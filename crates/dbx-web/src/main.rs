@@ -344,6 +344,7 @@ async fn main() {
         // Schema
         .route("/schema/databases", get(routes::schema::list_databases))
         .route("/schema/database-storage", post(routes::schema::list_database_storage))
+        .route("/schema/sqlserver/completion-context", get(routes::schema::get_sqlserver_completion_context))
         .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
         .route("/schema/doris/catalog-databases", get(routes::schema::list_doris_catalog_databases))
         .route("/schema/sqlserver/linked-servers", get(routes::schema::list_sqlserver_linked_servers))
@@ -756,6 +757,9 @@ async fn main() {
         .route("/cloud-sync/snippet/token-status", post(routes::cloud_sync::snippet_token_status))
         .route("/cloud-sync/snippet/save-token", post(routes::cloud_sync::save_snippet_saved_token))
         .route("/cloud-sync/snippet/forget-token", post(routes::cloud_sync::forget_snippet_saved_token))
+        .route("/cloud-sync/snippet/settings", post(routes::cloud_sync::snippet_sync_settings))
+        .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
+        .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 

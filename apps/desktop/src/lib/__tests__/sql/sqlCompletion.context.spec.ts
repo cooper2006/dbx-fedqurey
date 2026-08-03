@@ -21,6 +21,7 @@ describe("sqlCompletion database functions", () => {
       databaseType: "clickhouse",
       tables: [],
       columnsByTable: new Map(),
+      functionCase: "lower",
     });
 
     expect(items.find((item) => item.label === "toStartOfDay")).toMatchObject({
@@ -438,6 +439,13 @@ describe("sqlCompletion scoped context classification", () => {
     const context = getSqlCompletionContext(sql, sql.length);
 
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ schema: "dbo", name: "Users", alias: "u" }), expect.objectContaining({ name: "Orders", alias: "o" })]));
+  });
+
+  it("preserves SQL Server database and omitted schema in legacy table references", () => {
+    const sql = "SELECT * FROM BarDB..orders AS o WHERE o.";
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "sqlserver" });
+
+    expect(context.referencedTables).toEqual([expect.objectContaining({ database: "BarDB", schema: "dbo", name: "orders", alias: "o" })]);
   });
 
   it("treats schema-qualified table prefixes in FROM as table completion input", () => {

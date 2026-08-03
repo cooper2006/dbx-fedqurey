@@ -11,6 +11,8 @@ export interface BuildTransposeRowsOptions<T> {
   columns: string[];
   records: T[][];
   typeByColumn?: Map<string, string>;
+  types?: readonly (string | undefined)[];
+  comments?: readonly (string | undefined)[];
   displayValue: (value: T, column: string, columnIndex: number, recordIndex: number) => string;
 }
 
@@ -29,6 +31,7 @@ export interface DataGridTransposeRow<T> {
   id: string;
   column: string;
   type: string;
+  comment?: string;
   values: Array<DataGridTransposeCell<T>>;
 }
 
@@ -36,6 +39,7 @@ export interface DataGridVisibleTransposeRow<T> {
   id: string;
   column: string;
   type: string;
+  comment?: string;
   values: Array<DataGridVisibleTransposeCell<T>>;
 }
 
@@ -185,8 +189,17 @@ export function nextTransposeState(showTranspose: boolean, transposeRowIndex: nu
   return { showTranspose: true, transposeRowIndex: requestedRowIndex };
 }
 
-export function restoreDataGridAfterTranspose(options: { scroller: Pick<HTMLElement, "scrollLeft" | "scrollWidth" | "clientWidth"> | null; scrollLeftBeforeTranspose: number; attachCanvasResizeObserver: () => void; refreshGridScrollerMetrics: () => void }) {
+export function restoreDataGridAfterTranspose(options: {
+  scroller: Pick<HTMLElement, "scrollTop" | "scrollLeft" | "scrollHeight" | "scrollWidth" | "clientHeight" | "clientWidth"> | null;
+  scrollLeftBeforeTranspose: number;
+  scrollTopBeforeTranspose?: number;
+  attachCanvasResizeObserver: () => void;
+  refreshGridScrollerMetrics: () => void;
+}) {
   if (!options.scroller) return;
+  if (options.scrollTopBeforeTranspose !== undefined) {
+    options.scroller.scrollTop = Math.max(0, Math.min(Math.max(0, options.scroller.scrollHeight - options.scroller.clientHeight), options.scrollTopBeforeTranspose));
+  }
   options.scroller.scrollLeft = restoredDataGridScrollLeft(options.scrollLeftBeforeTranspose, options.scroller.scrollWidth, options.scroller.clientWidth);
   options.attachCanvasResizeObserver();
   options.refreshGridScrollerMetrics();
@@ -228,7 +241,8 @@ export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Ar
     return {
       id: `${columnIndex}:${column}`,
       column,
-      type: options.typeByColumn?.get(column) || "",
+      type: options.types?.[columnIndex] || options.typeByColumn?.get(column) || "",
+      ...(options.comments ? { comment: options.comments[columnIndex] || "" } : {}),
       values: options.records.map((record, recordIndex) => {
         const value = record[columnIndex] as T;
         return {
@@ -246,7 +260,8 @@ export function buildVisibleTransposeRows<T>(options: BuildVisibleTransposeRowsO
     return {
       id: `${columnIndex}:${column}`,
       column,
-      type: options.typeByColumn?.get(column) || "",
+      type: options.types?.[columnIndex] || options.typeByColumn?.get(column) || "",
+      ...(options.comments ? { comment: options.comments[columnIndex] || "" } : {}),
       values: options.recordIndexes.flatMap((recordIndex) => {
         const record = options.records[recordIndex];
         if (!record) return [];

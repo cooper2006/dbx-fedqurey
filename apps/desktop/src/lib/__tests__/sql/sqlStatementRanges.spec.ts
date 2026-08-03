@@ -281,6 +281,11 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 
+  it("keeps SQL Server temporary table names instead of treating them as hash comments", () => {
+    const sql = "DROP TABLE IF EXISTS #Temp;\nSELECT * FROM ##GlobalTemp;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["DROP TABLE IF EXISTS #Temp", "SELECT * FROM ##GlobalTemp"]);
+  });
+
   it("keeps MyBatis placeholders instead of treating them as hash comments", () => {
     const sql = "SELECT * FROM yd_org_decla_detail WHERE clr_ym = #{ym};\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "kingbase"))).toEqual(["SELECT * FROM yd_org_decla_detail WHERE clr_ym = #{ym}", "SELECT 2"]);
@@ -339,6 +344,24 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("splits large Dameng package bodies without repeated prefix parsing", () => {
+    const body = Array.from({ length: 3000 }, (_, index) => `    v_value := v_value + ${index % 10};`).join("\n");
+    const packageBody = `CREATE OR REPLACE PACKAGE BODY app.big_pkg AS
+  PROCEDURE run IS
+    v_value NUMBER := 0;
+  BEGIN
+${body}
+  END run;
+END big_pkg;`;
+    const sql = `${packageBody}\n/\nSELECT 1;`;
+    const startedAt = performance.now();
+    const ranges = splitSqlStatementRanges(sql, "dameng");
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(rangeSqlTexts(ranges)).toEqual([packageBody, "SELECT 1"]);
+    expect(elapsedMs).toBeLessThan(1000);
   });
 
   it("keeps nested GaussDB procedure blocks together", () => {
@@ -1013,10 +1036,11 @@ describe("currentExecutableStatementRange", () => {
     expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "redis")).toBeNull();
   });
 
-  it("does not expose current statement framing for MongoDB", () => {
-    const sql = "db.users.find({})";
+  it("uses the current MongoDB command range", () => {
+    const sql = 'db.users.find({})\n\ndb.getCollection("audit.logs").countDocuments({})';
 
-    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")).toBeNull();
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")?.sql).toBe("db.users.find({})");
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "audit.logs"), "mongodb")?.sql).toBe('db.getCollection("audit.logs").countDocuments({})');
   });
 });
 
@@ -1094,6 +1118,12 @@ describe("buildExecutionCandidates", () => {
     const cursorAfterFirstSemicolon = sql.indexOf(";") + 1;
     const candidates = buildExecutionCandidates(sql, cursorAfterFirstSemicolon);
     expect(candidateSummaries(candidates)).toEqual(["cursor:select 1", "all:select 1;\n\nselect 2;"]);
+  });
+
+  it("uses the final soft statement when the cursor follows trailing EOF whitespace", () => {
+    const sql = "SELECT 1\nSELECT 2 ";
+    const candidates = buildExecutionCandidates(sql, sql.length);
+    expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nSELECT 2"]);
   });
 
   it("dedupes when the cursor statement equals the full document", () => {

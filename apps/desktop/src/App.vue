@@ -1024,7 +1024,7 @@ async function newQuery() {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1047,7 +1047,7 @@ async function openConnectionQuery(connectionId: string) {
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
-          message: translateBackendError(t, e?.message || String(e)),
+          message: translateBackendError(t, e),
         }),
         5000,
       );
@@ -1065,7 +1065,7 @@ async function openConnectionQuery(connectionId: string) {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1112,7 +1112,7 @@ async function onClickTable(tableName: string) {
   try {
     await openTableTarget(target, { tableInfoTab: "ddl" });
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1122,7 +1122,7 @@ async function onViewTableData(tableName: string) {
   try {
     await openTableTarget(target);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1153,7 +1153,7 @@ async function changeActiveConnection(connectionId: string) {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1866,6 +1866,7 @@ onUnmounted(() => {
                             connectionId: activeTab.connectionId,
                             database: activeTab.database,
                             schema: activeTab.schema,
+                            catalog: activeTab.catalog,
                             tableName: activeTab.structureTableName || '',
                           },
                           commentChanged,
@@ -2025,6 +2026,7 @@ onUnmounted(() => {
       </Dialog>
       <DdlViewDialog v-if="queryEditorDdlTarget" v-model:open="showQueryEditorDdlDialog" :connection-id="queryEditorDdlTarget.connectionId" :database="queryEditorDdlTarget.database" :schema="queryEditorDdlTarget.schema" :table-name="queryEditorDdlTarget.tableName" :dialect="queryEditorDdlDialect" />
     </TooltipProvider>
+    <div id="dbx-query-editor-tooltip-root" class="fixed left-0 top-0 z-[70] h-0 w-0 overflow-visible" />
   </div>
 </template>
 

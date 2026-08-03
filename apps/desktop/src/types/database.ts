@@ -1,3 +1,5 @@
+import type { BackendError } from "@/lib/backend/errorUtils";
+
 export type DatabaseType =
   | "mysql"
   | "postgres"
@@ -372,6 +374,11 @@ export interface DatabaseStorageInfo {
   size_bytes: number | null;
 }
 
+export interface SqlServerCompletionContext {
+  default_schema: string;
+  supports_session_database_switch: boolean;
+}
+
 export interface SchemaInfo {
   name: string;
   comment?: string | null;
@@ -559,10 +566,20 @@ export interface OwnerInfo {
 
 export interface QueryResult {
   columns: string[];
+  /** One SRID per geometry/geography column (first non-null observed). */
+  spatial_columns?: SpatialColumn[];
+  /**
+   * Per-cell SRID metadata, parallel to `rows`: spatial_values[row][column] is
+   * that cell's geometry SRID, or null for non-spatial cells / unknown SRIDs.
+   * Every geometry value keeps its own SRID so mixed-SRID results stay correct.
+   */
+  spatial_values?: (number | null)[][];
   /** Internal marker for a result built by appending a page to existing rows. */
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Structured backend error; authoritative when execution_error is true. */
+  error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
   statement_index?: number;
   /** Internal row identifiers appended to editable query results. */
@@ -619,6 +636,7 @@ export interface BatchStatementExecutionItem {
   executionTimeMs?: number;
   affectedRows?: number;
   error?: string;
+  errorDetails?: BackendError;
 }
 
 export interface BatchSqlExecution {
@@ -631,6 +649,11 @@ export interface BatchSqlExecution {
   startedAt: number;
   finishedAt?: number;
   items: BatchStatementExecutionItem[];
+}
+
+export interface SpatialColumn {
+  column_index: number;
+  srid: number | null;
 }
 
 export interface QueryResultRun {

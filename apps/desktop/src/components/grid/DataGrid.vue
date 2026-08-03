@@ -5,6 +5,7 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  ArrowUpRight,
   Upload,
   Trash2,
   ChevronDown,
@@ -49,6 +50,7 @@ import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -65,6 +67,7 @@ import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
@@ -99,7 +102,6 @@ import {
   defaultTransposeRecordWidth,
   minTransposeFieldWidth,
   minTransposeRecordWidth,
-  nextAppendedTransposeState,
   nextContextTransposeState,
   nextKeyboardTransposeState,
   nextTransposeState,
@@ -138,7 +140,7 @@ import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
-import { CANVAS_DATA_GRID_ROW_HEIGHT, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { CANVAS_DATA_GRID_ROW_HEIGHT, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
@@ -162,7 +164,7 @@ import {
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { allNullColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
-import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
+import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { summarizeSelection } from "@/lib/dataGrid/gridSelection";
@@ -177,8 +179,10 @@ import {
   dataGridSelectedSortMenuValue,
   type DataGridColumnSortState,
 } from "@/lib/dataGrid/dataGridContextMenu";
+import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyMetadataRequestCurrent, foreignKeyNavigationTarget, foreignKeySourceColumnName, foreignKeyTableIdentity, type ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
 
 import { useToast } from "@/composables/useToast";
+import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/useDataGridExport";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
@@ -207,7 +211,8 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
-import { DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH, isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
+import { buildOrderedGridRows, type GridInsertRowPosition, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
+import { DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH, isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAddRowCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
@@ -216,6 +221,10 @@ import { supportsTableStructureEditing } from "@/lib/database/databaseCapabiliti
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
+import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
+import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
+import { runMongoMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { dataGridConditionColumnOptions, dataGridConditionIdentifierQuote } from "@/lib/dataGrid/dataGridConditionCompletion";
 import { isMacOS } from "@/lib/backend/platform";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
@@ -235,6 +244,7 @@ const DataGridMongoJsonPreview = defineAsyncComponent(() => import("@/components
 const DataGridDetailDialogs = defineAsyncComponent(() => import("@/components/grid/DataGridDetailDialogs.vue"));
 const DataGridBulkEditDialog = defineAsyncComponent(() => import("@/components/grid/DataGridBulkEditDialog.vue"));
 const DataGridCopyColumnNamesDialog = defineAsyncComponent(() => import("@/components/grid/DataGridCopyColumnNamesDialog.vue"));
+const DataGridInsertRowsDialog = defineAsyncComponent(() => import("@/components/grid/DataGridInsertRowsDialog.vue"));
 const ExportProgressDialog = defineAsyncComponent(() => import("@/components/export/ExportProgressDialog.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
 const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
@@ -250,6 +260,12 @@ const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMu
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
 const { isDark, themePalette } = useTheme();
 const { toast } = useToast();
+// 外键单元格跳转复用导航入口；对话框引用传 stub（同 AiAssistant 模式）
+const { openTableTarget } = useNavigationTargets({
+  showFieldLineageDialog: ref(false),
+  showDatabaseSearchDialog: ref(false),
+  showDiagramDialog: ref(false),
+});
 const { highlight } = useSqlHighlighter();
 const binaryCellDownloadMenuItems = computed(() =>
   BINARY_CELL_DOWNLOAD_MODES.map((mode) => ({
@@ -579,6 +595,10 @@ const bulkEditDialogOpen = ref(false);
 const bulkEditValue = ref("");
 const copyColumnNamesDialogOpen = ref(false);
 const copyColumnNamesDialogColumns = ref<string[]>([]);
+const insertRowsDialogOpen = ref(false);
+// Configured placement for newly inserted rows; the dropdown exposes it as a
+// mutually-exclusive radio group and the main "add row" button inserts here.
+const insertPosition = ref<GridInsertRowPosition>("below");
 const generateIncrementDialogOpen = ref(false);
 const generateIncrementStartValue = ref("1");
 const generateIncrementTarget = ref<"selection" | "detail">("selection");
@@ -601,6 +621,7 @@ const imagePreviewSrc = ref("");
 const imagePreviewTitle = ref("");
 const bulkEditDialogMounted = useDataGridAsyncSurface(bulkEditDialogOpen);
 const copyColumnNamesDialogMounted = useDataGridAsyncSurface(copyColumnNamesDialogOpen);
+const insertRowsDialogMounted = useDataGridAsyncSurface(insertRowsDialogOpen);
 const cellDetailDialogMounted = useDataGridAsyncSurface(cellDetailDialogOpen);
 const detailDialogsMounted = useDataGridAsyncSurface(computed(() => rowDetailDialogOpen.value || columnDetailDialogOpen.value));
 const imagePreviewMounted = useDataGridAsyncSurface(imagePreviewOpen);
@@ -1801,6 +1822,7 @@ const allColumnTypes = computed(() =>
   ),
 );
 const visibleColumnTypes = computed(() => visibleColumnIndexes.value.map((index) => allColumnTypes.value[index]));
+const visibleColumnComments = computed(() => visibleColumnIndexes.value.map((index) => dataGridColumnCommentFor(columnCommentMap.value, props.result.columns[index] ?? "", props.sourceColumns?.[index])));
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);
 
 const numericColumnRightAlign = computed(() => (settingsStore.editorSettings.numericColumnRightAlign ?? true) && !showTranspose.value);
@@ -1916,6 +1938,8 @@ const gridStyle = computed(() => ({
 const gridHorizontalScrollLeft = ref(0);
 const gridViewportWidth = ref(0);
 let gridScrollLeftBeforeTranspose = 0;
+let gridScrollTopBeforeKeyboardTranspose: number | null = null;
+let restoreGridScrollTopAfterTranspose = false;
 const {
   renderedColumnOffsets,
   horizontalColumnWindow,
@@ -2904,6 +2928,7 @@ const {
   scrollerRef,
   dirtyRows,
   newRows,
+  newRowMeta: editorNewRowMeta,
   deletedRows,
   quickEntryDraftRow,
   quickEntryDraftRowId,
@@ -2925,7 +2950,7 @@ const {
   restoreCellValue,
   cancelEdit,
   onEditKeydown,
-  addRow: addEditorRow,
+  addRows: addEditorRows,
   appendPastedRowsToNewRow,
   cloneRow,
   showDeleteRowConfirm,
@@ -3239,8 +3264,7 @@ function onToolbarRollback() {
 
 function addRow() {
   if (!canInsertRows.value) return;
-  addEditorRow();
-  focusAppendedTransposeRecord();
+  insertRows(1, insertPosition.value);
 }
 
 const refreshToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
@@ -3262,11 +3286,72 @@ const autoRefreshToolbarCapability = computed<DataGridToolbarAutoRefreshCapabili
   onToggle: toggleAutoRefresh,
   onSelectInterval: setAutoRefreshInterval,
 }));
-const addRowToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
+const canPlaceInsertAtSelection = computed(() => {
+  if (selectedRowCount.value !== 1) return false;
+  const selectedId = [...selectedRowIds.value][0];
+  if (selectedId === undefined) return false;
+  const item = getRowItem(selectedId);
+  if (!item || item.isDraft) return false;
+  return item.sourceIndex !== undefined || (item.isNew && item.newIndex !== undefined);
+});
+
+function selectedRowPlacement(position: "above" | "below"): GridNewRowPlacement | null {
+  if (!canPlaceInsertAtSelection.value) return null;
+  const selectedId = [...selectedRowIds.value][0]!;
+  const item = getRowItem(selectedId);
+  if (!item) return null;
+  if (item.isNew && item.newIndex !== undefined) {
+    const meta = editorNewRowMeta.value[item.newIndex];
+    if (meta) return { anchorId: -meta.token, position };
+  }
+  if (item.sourceIndex !== undefined) return { anchorId: item.sourceIndex, position };
+  return null;
+}
+
+function insertRows(count: number, position: "above" | "below" | "end") {
+  const placement: GridNewRowPlacement | null = position === "end" ? null : selectedRowPlacement(position);
+  const firstNewRowId = addEditorRows(count, placement);
+  if (firstNewRowId !== undefined) {
+    nextTick(() => {
+      const displayIndex = displayRowIndexById(firstNewRowId);
+      if (displayIndex >= 0) scrollGridRowIntoView(displayIndex);
+    });
+    focusInsertedTransposeRecord(firstNewRowId);
+  }
+}
+
+function handleAddRowMenuSelect(value: string) {
+  if (value === "insert-multiple") {
+    insertRowsDialogOpen.value = true;
+    return;
+  }
+  if (value === "position-above") {
+    insertPosition.value = "above";
+    return;
+  }
+  if (value === "position-below") {
+    insertPosition.value = "below";
+    return;
+  }
+  if (value === "position-end") {
+    insertPosition.value = "end";
+    return;
+  }
+  insertRows(1, "end");
+}
+
+const addRowToolbarCapability = computed<DataGridToolbarAddRowCapability>(() => ({
   label: t("grid.addRow"),
   tooltip: `${t("grid.addRow")} (${shortcutMod}+N)`,
   visible: canInsertRows.value,
+  items: [
+    { value: "insert-multiple", label: t("grid.insertMultipleRows") },
+    { value: "position-above", label: t("grid.insertPositionAbove"), separatorBefore: true, selected: insertPosition.value === "above", disabled: !canPlaceInsertAtSelection.value },
+    { value: "position-below", label: t("grid.insertPositionBelow"), selected: insertPosition.value === "below", disabled: !canPlaceInsertAtSelection.value },
+    { value: "position-end", label: t("grid.insertPositionEnd"), selected: insertPosition.value === "end" },
+  ],
   onTrigger: addRow,
+  onSelect: handleAddRowMenuSelect,
 }));
 const previewToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
   label: t(previewLabelKey.value),
@@ -3319,28 +3404,34 @@ function dirtyColumnsForRow(dirty: Map<number, CellValue> | undefined, columnCou
 
 const displayRowRefs = computed<DisplayRowRef[]>(() => {
   const refs: DisplayRowRef[] = [];
-  for (const sourceIndex of sortedRows.value) {
-    const dirty = dirtyRows.value.get(sourceIndex);
-    const isDeleted = deletedRows.value.has(sourceIndex);
-    const status: RowStatus = isDeleted ? "deleted" : dirty?.size ? "edited" : "clean";
-    const isActiveEditingRow = quickEntryEnabled.value && editingCell.value?.rowId === sourceIndex;
-    if (matchesRowStatusFilter(status, rowStatusFilter.value) || isActiveEditingRow) {
-      refs.push({ id: sourceIndex, displayIndex: refs.length, sourceIndex, isNew: false, isDeleted, status });
+  // Pending rows carry a display placement (anchor row + above/below) so they
+  // can render interleaved with the loaded rows; unplaced rows stay at the end.
+  for (const entry of buildOrderedGridRows(sortedRows.value, editorNewRowMeta.value, newRows.value.length)) {
+    if (entry.kind === "source") {
+      const sourceIndex = entry.sourceIndex;
+      const dirty = dirtyRows.value.get(sourceIndex);
+      const isDeleted = deletedRows.value.has(sourceIndex);
+      const status: RowStatus = isDeleted ? "deleted" : dirty?.size ? "edited" : "clean";
+      const isActiveEditingRow = quickEntryEnabled.value && editingCell.value?.rowId === sourceIndex;
+      if (matchesRowStatusFilter(status, rowStatusFilter.value) || isActiveEditingRow) {
+        refs.push({ id: sourceIndex, displayIndex: refs.length, sourceIndex, isNew: false, isDeleted, status });
+      }
+    } else {
+      const newIndex = entry.newIndex;
+      const row = newRows.value[newIndex];
+      if (!row || !rowMatchesLocalColumnFilters(row)) continue;
+      const status: RowStatus = "new";
+      if (!matchesRowStatusFilter(status, rowStatusFilter.value)) continue;
+      refs.push({
+        id: -(newIndex + 1),
+        displayIndex: refs.length,
+        newIndex,
+        isNew: true,
+        isDeleted: false,
+        status,
+      });
     }
   }
-  newRows.value.forEach((row, i) => {
-    if (!rowMatchesLocalColumnFilters(row)) return;
-    const status: RowStatus = "new";
-    if (!matchesRowStatusFilter(status, rowStatusFilter.value)) return;
-    refs.push({
-      id: -(i + 1),
-      displayIndex: refs.length,
-      newIndex: i,
-      isNew: true,
-      isDeleted: false,
-      status,
-    });
-  });
   if (showQuickEntryDraftRow.value) {
     ensureQuickEntryDraftRow();
     refs.push({
@@ -3564,7 +3655,7 @@ watch(
   },
   { immediate: true },
 );
-const isErrorResult = computed(() => props.result.columns.length === 1 && props.result.columns[0] === "Error" && props.result.rows.length > 0);
+const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 // --- Selection composable ---
 const selection = useDataGridSelection({
@@ -5077,15 +5168,16 @@ const canvasDetailButtonCell = computed(() => {
   const visibleLeft = Math.max(rowNumberWidth.value, rect.left);
   const visibleRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   const canQuickDownload = canQuickDownloadCellValue(target.rowIndex, target.col);
-  const minWidth = canQuickDownload ? 46 : 24;
+  const foreignKey = canvasCellForeignKey(target.rowIndex, target.col);
+  const minWidth = canvasDataGridActionOverlayWidth(canQuickDownload, !!foreignKey) + 2;
   if (rect.top < 0 || rect.top > viewportHeight - 1 || visibleRight - visibleLeft < minWidth) return null;
-  return { rowIndex: target.rowIndex, visibleColIdx, actualColIdx: target.col, rect, canQuickDownload };
+  return { rowIndex: target.rowIndex, visibleColIdx, actualColIdx: target.col, rect, canQuickDownload, foreignKey };
 });
 
 const canvasDetailButtonStyle = computed(() => {
   const cell = canvasDetailButtonCell.value;
   if (!cell) return {};
-  const actionWidth = cell.canQuickDownload ? 44 : 22;
+  const actionWidth = canvasDataGridActionOverlayWidth(cell.canQuickDownload, !!cell.foreignKey);
   const edgeGap = 6;
   return {
     left: `${Math.max(rowNumberWidth.value, cell.rect.left + cell.rect.width - actionWidth - edgeGap)}px`,
@@ -5099,7 +5191,7 @@ const canvasRightAlignedActionCell = computed(() => {
   return {
     rowIndex: cell.rowIndex,
     visibleColIdx: cell.visibleColIdx,
-    reservedWidth: canvasDataGridActionReservedWidth(cell.canQuickDownload),
+    reservedWidth: canvasDataGridActionReservedWidth(cell.canQuickDownload, !!cell.foreignKey),
   };
 });
 
@@ -6081,13 +6173,18 @@ function toggleKeyboardTranspose(): boolean {
     selectedRowIds: selectedRowIds.value,
     selectedRange: selectedRange.value,
   });
+  if (next.showTranspose) {
+    gridScrollTopBeforeKeyboardTranspose = gridScrollerElement()?.scrollTop ?? null;
+  } else if (gridScrollTopBeforeKeyboardTranspose !== null) {
+    restoreGridScrollTopAfterTranspose = true;
+  }
   showTranspose.value = next.showTranspose;
   transposeRowIndex.value = next.transposeRowIndex;
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
     if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
-  } else {
+  } else if (!restoreGridScrollTopAfterTranspose) {
     scrollGridRowIntoView(requestedRowIndex);
   }
   return true;
@@ -6567,7 +6664,8 @@ const transposeRows = computed(() => {
     records: displayRowRefs.value.map((_, index) => displayItemAt(index)?.data ?? []),
     recordIndexes: activeTransposeRecordIndexes.value,
     valueIndexes: visibleColumnIndexes.value,
-    typeByColumn: columnTypeMap.value,
+    types: visibleColumnTypes.value.map((type) => (type ? shortTypeName(compactHeaderColumnType(type)) : "")),
+    comments: visibleColumnComments.value,
     displayValue: (value, _column, index) => formatCellCached(value, visibleColumnIndexes.value[index]),
   });
 });
@@ -6581,6 +6679,13 @@ function transposeScrollElement(): HTMLElement | undefined {
   const raw = transposeScrollRef.value;
   if (!raw) return undefined;
   return raw instanceof HTMLElement ? raw : raw.$el;
+}
+
+function transposeFieldTitle(item: { column: string; type: string; comment?: string }): string {
+  const details = [item.column];
+  if (showColumnTypesInHeader.value && item.type) details.push(`${t("grid.columnType")}: ${item.type}`);
+  if (showColumnCommentsInHeader.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
+  return details.join("\n");
 }
 
 function updateTransposeViewport() {
@@ -6644,10 +6749,13 @@ function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: 
   }
 }
 
-function focusAppendedTransposeRecord() {
+function focusInsertedTransposeRecord(rowId: number) {
   if (!showTranspose.value) return;
   nextTick(() => {
-    applyTransposeState(nextAppendedTransposeState(true, displayRowCount.value));
+    const displayIndex = displayRowIndexById(rowId);
+    if (displayIndex >= 0) {
+      applyTransposeState(nextTransposeStateForRecordCount(true, displayIndex, displayRowCount.value));
+    }
   });
 }
 
@@ -6805,10 +6913,14 @@ watch(isTransposeMode, (active) => {
     return;
   }
 
+  const scrollTopBeforeTranspose = restoreGridScrollTopAfterTranspose ? (gridScrollTopBeforeKeyboardTranspose ?? undefined) : undefined;
+  restoreGridScrollTopAfterTranspose = false;
+  gridScrollTopBeforeKeyboardTranspose = null;
   nextTick(() => {
     restoreDataGridAfterTranspose({
       scroller: gridScrollerElement(),
       scrollLeftBeforeTranspose: gridScrollLeftBeforeTranspose,
+      scrollTopBeforeTranspose,
       attachCanvasResizeObserver,
       refreshGridScrollerMetrics,
     });
@@ -7202,6 +7314,16 @@ const foreignKeys = ref<ForeignKeyInfo[]>([]);
 const foreignKeysLoaded = ref(false);
 const foreignKeysLoading = ref(false);
 const foreignKeysError = ref("");
+const currentForeignKeyTableIdentity = computed(() =>
+  foreignKeyTableIdentity({
+    connectionId: props.connectionId,
+    database: props.database,
+    catalog: props.tableMeta?.catalog,
+    schema: props.tableMeta?.schema,
+    tableName: props.tableMeta?.tableName,
+  }),
+);
+let foreignKeysRequestGeneration = 0;
 const triggers = ref<TriggerInfo[]>([]);
 const triggersLoaded = ref(false);
 const triggersLoading = ref(false);
@@ -7294,7 +7416,8 @@ function toggleCellDetailPanelLayout() {
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(props.databaseType));
 const canOpenTableStructureEditor = computed(() => !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsTableStructureEditing(resolvedDatabaseType.value));
 const mongoConnectionConfig = resolvedConnectionConfig;
-const canManageMongoIndexes = computed(() => resolvedDatabaseType.value === "mongodb" && !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && mongoConnectionConfig.value?.db_type === "mongodb" && mongoConnectionConfig.value?.driver_profile !== "mongodb-legacy");
+const canManageMongoIndexes = computed(() => resolvedDatabaseType.value === "mongodb" && !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsMongoIndexMutations(mongoConnectionConfig.value, props.tableMeta?.tableType));
+const canShowTableIndexes = computed(() => tableMetadataCapabilities.value.indexes && (resolvedDatabaseType.value !== "mongodb" || mongoCollectionSupportsIndexes(props.tableMeta?.tableType)));
 const tableInfoTabs = computed(() => {
   const tabs: TableInfoTabItem[] = [];
   if (tableMetadataCapabilities.value.ddl) {
@@ -7308,7 +7431,7 @@ const tableInfoTabs = computed(() => {
       count: props.tableMeta?.columns.length,
     });
   }
-  if (tableMetadataCapabilities.value.indexes) {
+  if (canShowTableIndexes.value) {
     tabs.push({ id: "indexes", label: t("grid.tableInfoIndexes"), icon: KeyRound, count: indexes.value.length });
   }
   if (tableMetadataCapabilities.value.foreignKeys) {
@@ -7393,17 +7516,40 @@ async function reloadIndexes() {
   await fetchIndexes();
 }
 
+async function refreshMongoIndexMetadataAfterMutation() {
+  await reloadIndexes();
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const collection = props.tableMeta?.tableName;
+  if (!connectionId || !database || !collection) return;
+  try {
+    await refreshLoadedMongoIndexes(connectionStore, { connectionId, database, collection });
+  } catch (e: any) {
+    toast(t("contextMenu.mongoIndexRefreshFailed", { message: String(e?.message || e) }), 5000);
+  }
+}
+
 async function fetchForeignKeys() {
-  if (!props.connectionId || !props.tableMeta || foreignKeysLoaded.value || foreignKeysLoading.value) return;
+  const requestIdentity = currentForeignKeyTableIdentity.value;
+  if (!props.connectionId || !props.tableMeta || !requestIdentity || foreignKeysLoaded.value || foreignKeysLoading.value) return;
+  const connectionId = props.connectionId;
+  const database = props.database || "";
+  const schema = props.tableMeta.schema || props.database || "";
+  const tableName = props.tableMeta.tableName;
+  const catalog = props.tableMeta.catalog;
+  const requestGeneration = ++foreignKeysRequestGeneration;
   foreignKeysLoading.value = true;
   foreignKeysError.value = "";
   try {
-    foreignKeys.value = await api.listForeignKeys(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, props.tableMeta.catalog);
+    const nextForeignKeys = await api.listForeignKeys(connectionId, database, schema, tableName, catalog);
+    if (!foreignKeyMetadataRequestCurrent({ requestGeneration, currentGeneration: foreignKeysRequestGeneration, requestIdentity, currentIdentity: currentForeignKeyTableIdentity.value })) return;
+    foreignKeys.value = nextForeignKeys;
     foreignKeysLoaded.value = true;
   } catch (e: any) {
+    if (!foreignKeyMetadataRequestCurrent({ requestGeneration, currentGeneration: foreignKeysRequestGeneration, requestIdentity, currentIdentity: currentForeignKeyTableIdentity.value })) return;
     foreignKeysError.value = String(e?.message || e);
   } finally {
-    foreignKeysLoading.value = false;
+    if (foreignKeyMetadataRequestCurrent({ requestGeneration, currentGeneration: foreignKeysRequestGeneration, requestIdentity, currentIdentity: currentForeignKeyTableIdentity.value })) foreignKeysLoading.value = false;
   }
 }
 
@@ -7430,13 +7576,123 @@ watch(
     indexesError.value = "";
     foreignKeys.value = [];
     foreignKeysLoaded.value = false;
+    foreignKeysLoading.value = false;
     foreignKeysError.value = "";
+    foreignKeysRequestGeneration += 1;
     triggers.value = [];
     triggersLoaded.value = false;
     triggersError.value = "";
     if (showTableInfo.value) selectTableInfoTab(activeTableInfoTab.value);
   },
 );
+
+// ---- 外键单元格跳转 ----
+const columnForeignKeyMap = computed(() => buildColumnForeignKeyMap(foreignKeys.value));
+const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && !!props.tableMeta?.tableName && tableMetadataCapabilities.value.foreignKeys);
+
+function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation | null {
+  if (!foreignKeyNavigationEnabled.value) return null;
+  const columnName = foreignKeySourceColumnName({
+    context: props.context,
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    columnIndex: actualColIdx,
+  });
+  if (!columnName) return null;
+  return columnForeignKeyMap.value.get(columnName.toLowerCase()) ?? null;
+}
+
+function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
+  const association = cellForeignKeyAssociation(actualColIdx);
+  if (!association) return null;
+  const item = displayItems.value[rowIndex];
+  if (!item) return null;
+  const cells = foreignKeyAssociationCells({
+    association,
+    context: props.context,
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    row: item.data,
+  });
+  return cells ? association.foreignKey : null;
+}
+
+// 外键跳转按钮需要 FK 元数据：表身份就绪即后台加载（fetchForeignKeys 自带去重，
+// 上方 reset watch 先清旧表状态）
+watch(
+  () => [props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
+  () => {
+    if (foreignKeyNavigationEnabled.value) void fetchForeignKeys();
+  },
+  { immediate: true },
+);
+
+async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
+  const association = cellForeignKeyAssociation(actualColIdx);
+  const item = displayItems.value[rowIndex];
+  if (!association || !item || !props.connectionId) return;
+  const cells = foreignKeyAssociationCells({
+    association,
+    context: props.context,
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    row: item.data,
+  });
+  if (!cells) return;
+  try {
+    const conditions = await Promise.all(
+      cells.map(({ foreignKey, value }) =>
+        buildColumnValueFilterCondition({
+          databaseType: resolvedDatabaseType.value,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+          columnName: foreignKey.ref_column,
+          columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
+          rawValue: String(value),
+        }),
+      ),
+    );
+    const condition = combineForeignKeyConditions(conditions);
+    if (!condition) return;
+    await openTableTarget(
+      foreignKeyNavigationTarget({
+        connectionId: props.connectionId,
+        database: props.database || props.tableMeta?.database || "",
+        currentSchema: props.tableMeta?.schema || props.schema,
+        fk: association.foreignKey,
+        whereInput: condition,
+      }),
+    );
+  } catch (e: any) {
+    toast(String(e?.message || e), 5000);
+  }
+}
+
+function contextForeignKeyMenuItem(): ContextMenuItem | null {
+  const cell = contextCell.value;
+  if (!cell || cell.col < 0) return null;
+  const association = cellForeignKeyAssociation(cell.col);
+  const item = contextRowItem.value;
+  if (
+    !association ||
+    !item ||
+    !foreignKeyAssociationCells({
+      association,
+      context: props.context,
+      resultColumns: props.result.columns,
+      sourceColumns: props.sourceColumns,
+      row: item.data,
+    })
+  )
+    return null;
+  const fk = association.foreignKey;
+  return {
+    label: t("grid.foreignKeyNavigate", { table: fk.ref_table }),
+    icon: ArrowUpRight,
+    action: () => {
+      void navigateToForeignKeyCell(cell.rowIndex, cell.col);
+    },
+  };
+}
 
 if (showTableInfo.value && props.tableMeta && props.connectionId) {
   selectTableInfoTab(activeTableInfoTab.value);
@@ -7613,7 +7869,8 @@ const filteredIndexes = computed(() => {
   return indexes.value.filter((i) => i.name.toLowerCase().includes(q) || i.columns.some((c) => c.toLowerCase().includes(q)));
 });
 
-const droppableMongoIndexes = computed(() => indexes.value.filter((index) => !index.is_primary));
+const droppableMongoIndexes = computed(() => indexes.value.filter((index) => !isProtectedMongoIndex(index)));
+
 const dropMongoIndexConfirmMessage = computed(() =>
   pendingDropMongoIndex.value
     ? t("contextMenu.confirmDropMongoIndexMessage", {
@@ -7622,51 +7879,86 @@ const dropMongoIndexConfirmMessage = computed(() =>
       })
     : "",
 );
+const dropMongoIndexPreview = computed(() => (pendingDropMongoIndex.value ? mongoDropIndexPreview(props.database || "", props.tableMeta?.tableName || "", pendingDropMongoIndex.value.name) : ""));
 const dropAllMongoIndexesConfirmMessage = computed(() => t("contextMenu.confirmDropMongoAllIndexesMessage", { name: props.tableMeta?.tableName || "" }));
 const dropAllMongoIndexesConfirmDetails = computed(() => t("contextMenu.confirmDropMongoAllIndexesDetails"));
-const dropMongoIndexPreview = computed(() => (pendingDropMongoIndex.value ? `db.getCollection(${JSON.stringify(props.tableMeta?.tableName || "")}).dropIndex(${JSON.stringify(pendingDropMongoIndex.value.name)})` : ""));
-const dropAllMongoIndexesPreview = computed(() => `db.getCollection(${JSON.stringify(props.tableMeta?.tableName || "")}).dropIndexes()`);
+const dropAllMongoIndexesPreview = computed(() => mongoDropAllIndexesPreview(props.database || "", props.tableMeta?.tableName || ""));
 
 function requestDropMongoIndex(index: IndexInfo) {
+  if (!canManageMongoIndexes.value || isProtectedMongoIndex(index)) return;
   pendingDropMongoIndex.value = index;
   showDropMongoIndexConfirm.value = true;
 }
 
 function requestDropAllMongoIndexes() {
+  if (!canManageMongoIndexes.value || droppableMongoIndexes.value.length === 0) return;
   showDropAllMongoIndexesConfirm.value = true;
 }
 
 async function confirmDropMongoIndex() {
-  if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !pendingDropMongoIndex.value || dropMongoIndexLoading.value) return;
-  dropMongoIndexLoading.value = true;
-  try {
-    await connectionStore.ensureConnected(props.connectionId);
-    await api.mongoDropIndexes(props.connectionId, props.database, props.tableMeta.tableName, JSON.stringify(pendingDropMongoIndex.value.name), true);
-    toast(t("contextMenu.dropTableChildObjectSuccess", { name: pendingDropMongoIndex.value.name }), 3000);
-    showDropMongoIndexConfirm.value = false;
-    pendingDropMongoIndex.value = null;
-    await reloadIndexes();
-  } catch (e: any) {
-    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
-  } finally {
-    dropMongoIndexLoading.value = false;
-  }
+  const index = pendingDropMongoIndex.value;
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const tableName = props.tableMeta?.tableName;
+  if (!connectionId || !database || !tableName || !index || !canManageMongoIndexes.value || isProtectedMongoIndex(index) || dropMongoIndexLoading.value) return;
+  await runMongoMutation({
+    connection: connectionStore.getConfig(connectionId),
+    database,
+    reviewText: dropMongoIndexPreview.value,
+    source: t("production.sourceDataGrid"),
+    loading: dropMongoIndexLoading,
+    beforeExecute: () => connectionStore.ensureConnected(connectionId),
+    execute: async () => {
+      try {
+        return await api.mongoDropIndexes(connectionId, database, tableName, JSON.stringify(index.name), true);
+      } finally {
+        await refreshMongoIndexMetadataAfterMutation();
+      }
+    },
+    onSuccess: (result) => {
+      const failed = mongoDropIndexFailureCount(result);
+      if (failed > 0) {
+        toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+      } else {
+        toast(t("contextMenu.dropTableChildObjectSuccess", { name: index.name }), 3000);
+      }
+      showDropMongoIndexConfirm.value = false;
+      pendingDropMongoIndex.value = null;
+    },
+    onError: (e: any) => toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000),
+  });
 }
 
 async function confirmDropAllMongoIndexes() {
-  if (!props.connectionId || !props.database || !props.tableMeta?.tableName || dropAllMongoIndexesLoading.value) return;
-  dropAllMongoIndexesLoading.value = true;
-  try {
-    await connectionStore.ensureConnected(props.connectionId);
-    const result = await api.mongoDropIndexes(props.connectionId, props.database, props.tableMeta.tableName, undefined, false);
-    toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: props.tableMeta.tableName }), 3000);
-    showDropAllMongoIndexesConfirm.value = false;
-    await reloadIndexes();
-  } catch (e: any) {
-    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
-  } finally {
-    dropAllMongoIndexesLoading.value = false;
-  }
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const tableName = props.tableMeta?.tableName;
+  if (!connectionId || !database || !tableName || !canManageMongoIndexes.value || dropAllMongoIndexesLoading.value) return;
+  await runMongoMutation({
+    connection: connectionStore.getConfig(connectionId),
+    database,
+    reviewText: dropAllMongoIndexesPreview.value,
+    source: t("production.sourceDataGrid"),
+    loading: dropAllMongoIndexesLoading,
+    beforeExecute: () => connectionStore.ensureConnected(connectionId),
+    execute: async () => {
+      try {
+        return await api.mongoDropIndexes(connectionId, database, tableName, undefined, false);
+      } finally {
+        await refreshMongoIndexMetadataAfterMutation();
+      }
+    },
+    onSuccess: (result) => {
+      const failed = mongoDropIndexFailureCount(result);
+      if (failed > 0) {
+        toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+      } else {
+        toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: tableName }), 3000);
+      }
+      showDropAllMongoIndexesConfirm.value = false;
+    },
+    onError: (e: any) => toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000),
+  });
 }
 
 const filteredForeignKeys = computed(() => {
@@ -7950,6 +8242,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       icons: { cellDetails: Maximize2, columnDetails: TableProperties, rowDetails: ListTree, setNull: X, bulkEdit: Pencil, transpose: Rows3 },
       actions: { cellDetails: openContextCellDetailDialog, columnDetails: openContextColumnDetailDialog, rowDetails: openContextRowDetailDialog, setNull: setSelectionNull, bulkEdit: openBulkEditDialog, transpose: openContextTranspose },
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
+      foreignKeyItem: contextForeignKeyMenuItem(),
       copySubmenu: copySubmenu(),
       clearSelectionItem: { label: t("grid.clearSelection"), action: clearCellSelection, icon: SquareDashed },
       generateSubmenu: {
@@ -8232,18 +8525,36 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </template>
                 <template #default="{ item, index }">
                   <div class="data-grid-transpose-row flex border-b border-border/60" :style="{ height: '30px', width: `${transposeTotalWidth}px` }">
-                    <div
-                      data-native-clipboard
-                      class="sticky left-0 z-10 flex shrink-0 items-center border-r border-border bg-background px-3 py-0 font-medium truncate"
-                      :class="{
-                        'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
-                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
-                      }"
-                      :style="{ width: `${transposePinnedWidth}px` }"
-                      :title="item.column"
-                    >
-                      {{ item.column }}
-                    </div>
+                    <LightTooltip :text="transposeFieldTitle(item)" side="right" :side-offset="6" :delay="250" :open-on-focus="false" surface="popover">
+                      <div
+                        data-native-clipboard
+                        class="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 overflow-hidden border-r border-border bg-background px-3 py-0"
+                        :class="{
+                          'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
+                          'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
+                        }"
+                        :style="{ width: `${transposePinnedWidth}px` }"
+                      >
+                        <span class="min-w-0 flex-1 truncate font-medium">{{ item.column }}</span>
+                      </div>
+                      <template #content>
+                        <div
+                          data-grid-transpose-field-tooltip
+                          class="grid max-h-[min(20rem,calc(100vh-1rem))] w-[min(24rem,calc(100vw-1rem))] grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 overflow-auto rounded-md border border-border bg-popover px-3 py-2 text-left text-popover-foreground shadow-md"
+                        >
+                          <span class="text-muted-foreground">{{ t("grid.columnName") }}</span>
+                          <span class="min-w-0 break-all font-mono select-text">{{ item.column }}</span>
+                          <template v-if="showColumnTypesInHeader && item.type">
+                            <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
+                            <span class="min-w-0 break-all font-mono select-text" :class="typeColorClass(item.type)">{{ item.type }}</span>
+                          </template>
+                          <template v-if="showColumnCommentsInHeader && item.comment">
+                            <span class="text-muted-foreground">{{ t("grid.columnComment") }}</span>
+                            <span class="min-w-0 whitespace-pre-wrap break-words select-text">{{ item.comment }}</span>
+                          </template>
+                        </div>
+                      </template>
+                    </LightTooltip>
                     <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
                     <div
                       v-for="cell in item.values"
@@ -8843,6 +9154,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </template>
                       </LightDropdownMenu>
                       <button
+                        v-if="canvasDetailButtonCell.foreignKey"
+                        class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                        :title="t('grid.foreignKeyNavigate', { table: canvasDetailButtonCell.foreignKey.ref_table })"
+                        @mousedown.stop
+                        @click.stop="navigateToForeignKeyCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                      >
+                        <ArrowUpRight class="h-3 w-3" />
+                      </button>
+                      <button
                         class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                         :title="t('grid.cellDetails')"
                         @mousedown.stop
@@ -9183,7 +9503,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         {{ index.columns.join(", ") }}
                       </div>
                     </div>
-                    <Button v-if="canManageMongoIndexes && !index.is_primary" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px] text-destructive hover:text-destructive" @click="requestDropMongoIndex(index)">
+                    <Button v-if="canManageMongoIndexes && !isProtectedMongoIndex(index)" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px] text-destructive hover:text-destructive" @click="requestDropMongoIndex(index)">
                       <Trash2 class="mr-1 h-3 w-3" />
                       {{ t("contextMenu.dropIndex") }}
                     </Button>
@@ -9506,9 +9826,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     />
 
     <DataGridBulkEditDialog v-if="bulkEditDialogMounted" v-model:open="bulkEditDialogOpen" v-model:value="bulkEditValue" :selected-cell-count="selectedCellCount" @apply="applyBulkEditValue" />
+    <DataGridInsertRowsDialog v-if="insertRowsDialogMounted" v-model:open="insertRowsDialogOpen" :can-place-at-selection="canPlaceInsertAtSelection" :initial-position="insertPosition" @insert="insertRows" />
 
     <DataGridExtractorDialog v-model:open="extractorConfigOpen" :extractor="selectedCopyExtractor" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="extractorMenuItems" :preview="previewWithExtractor" @save="saveExtractorConfiguration" />
-    <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" @copy="copyText" />
+    <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
 
     <Dialog v-model:open="generateIncrementDialogOpen">
       <DialogContent class="sm:max-w-[380px]">
