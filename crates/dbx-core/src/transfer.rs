@@ -7312,6 +7312,7 @@ SELECT 1 FROM dual"#
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         };
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("paimon"), &config), Some("paimon"));
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("default_catalog"), &config), None);

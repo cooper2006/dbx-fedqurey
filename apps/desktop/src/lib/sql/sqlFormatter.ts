@@ -1,4 +1,5 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { analyzeFederatedSql } from "@/lib/federated/federatedFormatter";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
 
@@ -68,8 +69,15 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const { format } = await import("sql-formatter");
   const options = sqlFormatterOptions(settings);
   const language = formatterLanguage(dialect);
+
+  // Protect federated table references (connection.schema.table) before formatting
+  // so the formatter doesn't mangle multi-part identifiers
+  const { protectedSql, restoreMap } = protectFederatedRefs(sql);
+
   try {
-    return format(sql, { language, ...options });
+    let formatted = format(protectedSql, { language, ...options });
+    formatted = restoreFederatedRefs(formatted, restoreMap);
+    return formatted;
   } catch (err) {
     // The generic "sql" dialect can't parse many real-world constructs (PostgreSQL
     // `::` casts, GaussDB/openGauss materialized-view DDL, T-SQL specifics, ...).
@@ -77,13 +85,125 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     // that tolerates most of these, before surfacing the failure.
     if (language !== "postgresql") {
       try {
-        return format(sql, { language: "postgresql", ...options });
+        let formatted = format(protectedSql, { language: "postgresql", ...options });
+        formatted = restoreFederatedRefs(formatted, restoreMap);
+        return formatted;
       } catch {
         // fall through to the original error below
       }
     }
     throw err;
   }
+}
+
+/**
+ * SQL keyword set used to avoid false positives when detecting federation references.
+ * A dot-separated identifier chain is only treated as federated if the first segment
+ * is not a known SQL keyword.
+ */
+const SQL_KEYWORDS = new Set([
+  "select",
+  "from",
+  "where",
+  "join",
+  "on",
+  "inner",
+  "left",
+  "right",
+  "full",
+  "outer",
+  "cross",
+  "and",
+  "or",
+  "not",
+  "in",
+  "is",
+  "null",
+  "like",
+  "between",
+  "group",
+  "order",
+  "by",
+  "having",
+  "limit",
+  "offset",
+  "union",
+  "all",
+  "as",
+  "insert",
+  "into",
+  "values",
+  "update",
+  "set",
+  "delete",
+  "create",
+  "table",
+  "drop",
+  "alter",
+  "add",
+  "column",
+  "index",
+  "view",
+  "with",
+  "case",
+  "when",
+  "then",
+  "else",
+  "end",
+  "exists",
+  "distinct",
+  "asc",
+  "desc",
+  "natural",
+  "using",
+  "intersect",
+  "except",
+  "returning",
+  "values",
+]);
+
+/**
+ * Detect federated table references in SQL and replace them with safe placeholders.
+ * Only 3+ part identifiers (e.g., connection.schema.table) where the first part is
+ * not a SQL keyword are protected, as standard 2-part names (schema.table) are
+ * handled natively by the formatter.
+ */
+function protectFederatedRefs(sql: string): { protectedSql: string; restoreMap: Map<string, string> } {
+  const analysis = analyzeFederatedSql(sql);
+  const restoreMap = new Map<string, string>();
+
+  if (!analysis.usesFederation) {
+    return { protectedSql: sql, restoreMap };
+  }
+
+  // Match 3+ part dot-separated identifiers (connection.schema.table or connection.database.schema.table)
+  // that are not preceded by a dot (to avoid matching sub-parts of longer chains)
+  const federatedPattern = /(?<![\w.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,})/g;
+
+  let protectedSql = sql.replace(federatedPattern, (match) => {
+    const firstPart = match.split(".")[0].toLowerCase();
+    // Skip if the first part is a SQL keyword (e.g., "select.col" in unusual syntax)
+    if (SQL_KEYWORDS.has(firstPart)) {
+      return match;
+    }
+    const placeholder = `__FED_REF_${restoreMap.size}__`;
+    restoreMap.set(placeholder, match);
+    return placeholder;
+  });
+
+  return { protectedSql, restoreMap };
+}
+
+/**
+ * Restore federated table references from placeholders after formatting.
+ */
+function restoreFederatedRefs(sql: string, restoreMap: Map<string, string>): string {
+  if (restoreMap.size === 0) return sql;
+  let result = sql;
+  restoreMap.forEach((original, placeholder) => {
+    result = result.replace(new RegExp(placeholder, "g"), original);
+  });
+  return result;
 }
 
 /**

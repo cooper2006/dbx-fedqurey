@@ -1,0 +1,20 @@
+{
+  "kind": "webpage_snapshot",
+  "url": "https://github.com/t8y2/dbx/blob/main/crates/dbx-core/src/lib.rs",
+  "final_url": "https://github.com/t8y2/dbx/blob/main/crates/dbx-core/src/lib.rs",
+  "status": 200,
+  "read_status": "blocked",
+  "content_type": "text/html; charset=utf-8",
+  "fetched_at": "2026-08-03T01:38:22.723880+00:00",
+  "title": "dbx/crates/dbx-core/src/lib.rs at main · t8y2/dbx · GitHub",
+  "description": "20 MB lightweight cross-platform database client for 70+ databases, including MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, SQL Server, and Dameng. Built-in AI, MCP Server, CLI, desktop and Docker. | 轻量级跨平台数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis、MongoDB、达梦等 70+ 数据库，提供桌面端、Docker、CLI、内置 AI 助手和 MCP Server。 - dbx/crates/dbx-core/src/lib.rs at main · t8y2/dbx",
+  "site_name": "GitHub",
+  "published_at": null,
+  "source_type": "source_repo",
+  "text": "",
+  "quote_candidates": [],
+  "word_count": 0,
+  "truncated": false,
+  "blocked": true,
+  "source": "direct_http"
+}

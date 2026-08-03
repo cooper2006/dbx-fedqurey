@@ -174,6 +174,15 @@ pub struct ConnectionConfig {
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
+    /// Whether this connection is enabled for federated query participation.
+    /// When true, the connection can be referenced in federated SQL via
+    /// the `connection_name.schema.table` three-part naming convention.
+    #[serde(default = "default_federation_enabled")]
+    pub federation_enabled: bool,
+}
+
+fn default_federation_enabled() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -540,6 +549,9 @@ pub enum DatabaseType {
     /// system is determined by `external_config.systemKind`.
     #[serde(rename = "mq")]
     MessageQueue,
+    /// Apache Calcite federation engine for multi-connection queries
+    #[serde(rename = "calcite")]
+    Calcite,
 }
 
 #[derive(Deserialize)]
@@ -697,6 +709,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             is_production: data.is_production,
             production_databases: data.production_databases,
             database_info: data.database_info,
+            federation_enabled: true,
         }
     }
 }
@@ -1087,6 +1100,7 @@ impl ConnectionConfig {
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
+            DatabaseType::Calcite => "calcite://federation".to_string(),
         }
     }
 
@@ -1317,6 +1331,7 @@ impl ConnectionConfig {
             }
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
+            DatabaseType::Calcite => "calcite://federation".to_string(),
         }
     }
 
@@ -2246,6 +2261,7 @@ mod tests {
             one_time: false,
             read_only: false,
             is_production: false,
+            federation_enabled: false,
             production_databases: vec![],
             database_info: None,
         }

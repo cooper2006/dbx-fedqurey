@@ -60,6 +60,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         production_databases: vec![],
         show_system_schemas: false,
         database_info: None,
+        federation_enabled: false,
     }
 }
 

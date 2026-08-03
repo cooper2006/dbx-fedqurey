@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "defaultSchema": " FederatedSchema ",
+  "schemas": [
+    {
+      "name": " FederatedSchema ",
+      "type": "custom",
+      "factory": "com.dbx.agent.calcite.FederatedSchemaFactory"
+    }
+  ]
+}

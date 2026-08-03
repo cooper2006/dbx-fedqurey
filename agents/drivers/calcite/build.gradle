@@ -1,0 +1,70 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow'
+}
+
+group = 'com.dbx.agent'
+version = '1.0.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Apache Calcite for federated query execution
+    implementation 'org.apache.calcite:calcite-core:1.37.0'
+    implementation 'org.apache.calcite:calcite-linq4j:1.37.0'
+    
+    // JDBC Drivers for federation
+    implementation 'org.postgresql:postgresql:42.7.1'
+    implementation 'mysql:mysql-connector-java:8.0.33'
+    implementation 'com.mysql:mysql-connector-j:8.0.33'
+    
+    // JSON processing for RPC
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.16.1'
+    
+    // Test dependencies
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
+}
+
+shadowJar {
+    archiveBaseName.set('dbx-agent-calcite')
+    archiveClassifier.set('')
+    archiveVersion.set('')
+    
+    // Include all dependencies in shadow JAR
+    manifest {
+        attributes 'Main-Class': 'com.dbx.agent.calcite.CalciteAgent'
+    }
+    
+    // Merge service files
+    mergeServiceFiles()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+// Source sets for Calcite Agent
+sourceSets {
+    main {
+        java {
+            srcDirs = ['src/main/java']
+        }
+        resources {
+            srcDirs = ['src/main/resources']
+        }
+    }
+    test {
+        java {
+            srcDirs = ['src/test/java']
+        }
+    }
+}

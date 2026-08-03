@@ -6579,4 +6579,17 @@ export default withEnglishFallback({
     test: "测试",
     readOnly: "只读",
   },
+  // 联邦查询翻译
+  federation: {
+    enabled: "已启用联邦查询",
+    disabled: "未启用联邦查询",
+    hint: "此连接支持跨多个数据库的联邦查询",
+    requiresCalcite: "跨多连接的联邦查询需要启动 Apache Calcite Agent",
+    syntaxHint: "使用语法：connection.schema.table 进行联邦查询",
+    connections: "个连接",
+    singleConnection: "单连接联邦查询",
+    multiConnection: "多连接联邦查询",
+    enableFederation: "启用联邦查询",
+    enableFederationDesc: "允许此连接参与跨数据库的联邦查询",
+  },
 });

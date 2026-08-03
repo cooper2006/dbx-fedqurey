@@ -4725,6 +4725,12 @@ export default {
     sidebarHiddenTablePrefixesPlaceholder: "Example:\nODS_\nT8Y2_LONG_",
     sidebarTablePageSize: "Sidebar page size",
     sidebarTablePageSizeDescription: "Maximum number of tables/objects loaded per page in the sidebar tree. Increase if you have many tables and want fewer pages.",
+    // Federation query translations
+    federationEnabled: "Federated Query Enabled",
+    federationDisabled: "Federated Query Disabled",
+    federationHint: "This connection supports federated queries across multiple databases",
+    federationRequiresCalcite: "Federated query across multiple connections requires Apache Calcite Agent",
+    federatedQuerySyntax: "Use syntax: connection.schema.table for federated queries",
     sidebarTableSearchEnabled: "Enable table search inside databases",
     sidebarTableSearchEnabledDescription: "Show a local table search box under expanded databases, schemas, or table groups so each scope can filter tables independently.",
     sidebarObjectInfoMode: "Sidebar supplementary info",
@@ -6580,5 +6586,18 @@ export default {
     next: "Next",
     test: "Test",
     readOnly: "Read only",
+  },
+  // Federated query translations
+  federation: {
+    enabled: "Federated Query Enabled",
+    disabled: "Federated Query Disabled",
+    hint: "This connection supports federated queries across multiple databases",
+    requiresCalcite: "Federated query across multiple connections requires Apache Calcite Agent",
+    syntaxHint: "Use syntax: connection.schema.table for federated queries",
+    connections: "connections",
+    singleConnection: "Single-connection federated query",
+    multiConnection: "Multi-connection federated query",
+    enableFederation: "Enable Federated Query",
+    enableFederationDesc: "Allow this connection to participate in cross-database federated queries",
   },
 };

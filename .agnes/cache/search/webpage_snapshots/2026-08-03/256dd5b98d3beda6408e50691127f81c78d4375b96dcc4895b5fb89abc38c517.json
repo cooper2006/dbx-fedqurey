@@ -1,0 +1,20 @@
+{
+  "kind": "webpage_snapshot",
+  "url": "https://api.github.com/search/code?q=i18n+repo:t8y2/dbx&per_page=5",
+  "final_url": "https://api.github.com/search/code?q=i18n+repo:t8y2/dbx&per_page=5",
+  "status": 401,
+  "read_status": "blocked",
+  "content_type": "application/json; charset=utf-8",
+  "fetched_at": "2026-08-03T02:07:29.242466+00:00",
+  "title": "Untitled webpage",
+  "description": "",
+  "site_name": null,
+  "published_at": null,
+  "source_type": "source_repo",
+  "text": "",
+  "quote_candidates": [],
+  "word_count": 0,
+  "truncated": false,
+  "blocked": true,
+  "source": "direct_http"
+}

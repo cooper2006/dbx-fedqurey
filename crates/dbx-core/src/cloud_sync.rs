@@ -1171,6 +1171,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         }
     }
 
@@ -1236,6 +1237,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         }
     }
 
@@ -1349,6 +1351,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         };
         scrub_connection_secrets(&mut config);
         assert!(config.password.is_empty());

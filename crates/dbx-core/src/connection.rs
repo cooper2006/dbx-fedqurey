@@ -197,6 +197,7 @@ pub struct AppState {
     pub plugins: PluginRegistry,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
+    pub calcite_agent: std::sync::Arc<std::sync::Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>,
     duckdb_worker_process_isolation: AtomicBool,
     duckdb_worker_max_processes: AtomicUsize,
     /// PostgreSQL TLS cancel context, keyed by pool_key.
@@ -766,6 +767,7 @@ impl AppState {
                 app_version,
             ),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
+            calcite_agent: Arc::new(std::sync::Mutex::new(None)),
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
@@ -1851,6 +1853,9 @@ impl AppState {
                     "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
                         .to_string(),
                 );
+            }
+            DatabaseType::Calcite => {
+                return Err("Calcite federation engine does not support direct connection pools".to_string());
             }
         };
 
@@ -4281,6 +4286,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         }
     }
 

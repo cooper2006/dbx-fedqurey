@@ -3,6 +3,7 @@ import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
+import { errorManager } from "@/lib/error/errorHandler";
 
 // ---------------------------------------------------------------------------
 // Lazy backend resolution (avoids top-level await)
@@ -36,12 +37,14 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
       });
       return result;
     } catch (error) {
+      const appError = await errorManager.handle(error, { operation, args, elapsedMs: Math.round(performance.now() - startedAt) });
       appendDebugLog("error", "[DBX][api:error]", {
         operation,
         elapsedMs: Math.round(performance.now() - startedAt),
-        error,
+        errorCode: appError.code,
+        errorCategory: appError.category,
       });
-      throw error;
+      throw appError;
     }
   }) as unknown as Backend[K];
 }

@@ -310,6 +310,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         store_visible: true,
         profiles: &[],
     },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Calcite,
+        key: "calcite",
+        label: "Apache Calcite (Federated)",
+        store_visible: true,
+        profiles: &[],
+    },
 ];
 
 pub fn entries() -> &'static [AgentCatalogEntry] {

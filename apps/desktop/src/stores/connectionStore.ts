@@ -2669,6 +2669,7 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId: id,
           isExpanded: false,
           children: [],
+          federationEnabled: config.federation_enabled || false,
         });
       }
       return id;

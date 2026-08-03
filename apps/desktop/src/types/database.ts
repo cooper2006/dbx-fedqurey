@@ -176,6 +176,8 @@ export interface ConnectionConfig {
   production_databases?: string[];
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;
+  /** Whether federation query is enabled for this connection. */
+  federation_enabled?: boolean;
 }
 
 export type IdentifierCase = "lower" | "upper" | "mixed";
@@ -844,6 +846,7 @@ export interface TreeNode {
   partitionParentName?: string;
   hiddenChildren?: TreeNode[];
   tableSearchParentId?: string;
+  federationEnabled?: boolean;
   savedSqlId?: string;
   savedSqlFolderId?: string;
   meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;

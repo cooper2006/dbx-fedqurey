@@ -261,6 +261,7 @@ const defaultForm = (): ConnectionForm => ({
   is_production: false,
   production_databases: [],
   visible_databases: undefined,
+  federation_enabled: false,
 });
 
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
@@ -2040,6 +2041,7 @@ watch(
         production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
         visible_schemas: config.visible_schemas,
+        federation_enabled: config.federation_enabled || false,
       };
       oracleTnsAdminPath.value = parseOracleTnsConnectionString(config.connection_string)?.tnsAdmin || "";
       productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
@@ -3213,6 +3215,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
+  if (!config.federation_enabled) config.federation_enabled = undefined;
   if (isSingleDatabase(config.db_type) && config.production_databases?.length) {
     // Single-database drivers expose schemas or internal names, not independently selectable databases.
     config.is_production = true;
@@ -6690,6 +6693,13 @@ function openExternalUrl(url: string) {
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
+                  </label>
+                </div>
+                <div class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("federation.enableFederation") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" v-model="form.federation_enabled" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("federation.enableFederationDesc") }}</span>
                   </label>
                 </div>
                 <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">

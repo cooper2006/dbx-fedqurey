@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
 use crate::db;
+use crate::federated::{analyze_federation, rewrite_federated_sql, validate_federation};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::is_write_sql;
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword};
@@ -1445,14 +1446,35 @@ pub async fn execute_sql_statement_with_options(
         return Err(MONGO_SHELL_COMMAND_HINT.to_string());
     }
 
-    let db_type = connection_database_type(state, connection_id).await;
-    let has_executable_sql = db_type.map_or_else(
-        || crate::sql::has_executable_sql(sql),
-        |db_type| crate::sql::has_executable_sql_for_database(sql, db_type),
-    );
-    if !has_executable_sql {
-        return Ok(empty_query_result(0));
+    // Check for federated query patterns
+    let mut effective_sql = sql.to_string();
+    {
+        let configs = state.configs.read().await;
+        let all_connections: Vec<ConnectionConfig> = configs.values().cloned().collect();
+        drop(configs);
+        
+        let federation_analysis = analyze_federation(&effective_sql, &all_connections);
+        
+        // Validate federation access (check federation_enabled and schema visibility)
+        if federation_analysis.uses_federation_syntax {
+            if let Err(e) = validate_federation(&federation_analysis, &all_connections) {
+                return Err(e.to_string());
+            }
+        }
+        
+        // If single connection with federation syntax, rewrite SQL and continue normally
+        if federation_analysis.is_single_connection && federation_analysis.uses_federation_syntax {
+            if let Some(rewritten_sql) = rewrite_federated_sql(&effective_sql, &federation_analysis) {
+                log::debug!("Rewrote federated SQL for single connection");
+                effective_sql = rewritten_sql;
+            }
+        } else if federation_analysis.uses_federation_syntax && !federation_analysis.is_single_connection {
+            // Multi-connection federated query - requires Calcite Agent
+            return Err("Federated query across multiple connections requires Apache Calcite Agent to be configured. Please enable and start the Calcite Agent in settings.".to_string());
+        }
     }
+    
+    let db_type = connection_database_type(state, connection_id).await;
 
     if let Some(target_database) = postgres_drop_database_target(db_type, sql) {
         return execute_postgres_drop_database(state, connection_id, &target_database, sql, cancel_token, options)
@@ -1474,7 +1496,7 @@ pub async fn execute_sql_statement_with_options(
 
     let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
     let result =
-        do_execute(state, &pool_key, mysql_dialect, Some(database), sql, schema, cancel_token.clone(), options.clone())
+        do_execute(state, &pool_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token.clone(), options.clone())
             .await;
 
     let with_sql_context =
@@ -1489,7 +1511,7 @@ pub async fn execute_sql_statement_with_options(
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
-                do_execute(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options).await,
+                do_execute(state, &new_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token, options).await,
             )
         }
         Some(PoolErrorAction::Discard) => {
@@ -3849,6 +3871,7 @@ for line in sys.stdin:
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         }
     }
 
@@ -4667,6 +4690,7 @@ for line in sys.stdin:
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         };
 
         let params = external_driver_query_params(

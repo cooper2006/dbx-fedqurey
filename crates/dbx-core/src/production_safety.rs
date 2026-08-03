@@ -690,6 +690,7 @@ mod tests {
             is_production: false,
             production_databases: vec!["prod_app".to_string()],
             database_info: None,
+            federation_enabled: false,
         }
     }
 
