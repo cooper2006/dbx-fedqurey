@@ -24,6 +24,8 @@ pub struct FederatedTableRef {
     pub original_name: String,
     /// The connection name (e.g., "my_pg")
     pub connection_name: String,
+    /// The database name (for 4-part names like connection.database.schema.table)
+    pub database_name: Option<String>,
     /// The schema name (e.g., "public")
     pub schema_name: Option<String>,
     /// The table name (e.g., "users")
@@ -129,17 +131,18 @@ fn extract_table_refs(
             let conn_name = parts[0];
             if conn_map.contains_key(conn_name) {
                 *uses_federation = true;
-                let (schema_name, table_name) = if parts.len() >= 4 {
+                let (database_name, schema_name, table_name) = if parts.len() >= 4 {
                     // connection.database.schema.table
-                    (Some(parts[2].to_string()), parts[3].to_string())
+                    (Some(parts[1].to_string()), Some(parts[2].to_string()), parts[3].to_string())
                 } else {
                     // connection.schema.table (3 parts)
-                    (Some(parts[1].to_string()), parts[2].to_string())
+                    (None, Some(parts[1].to_string()), parts[2].to_string())
                 };
 
                 table_refs.push(FederatedTableRef {
                     original_name: name.to_string(),
                     connection_name: conn_name.to_string(),
+                    database_name,
                     schema_name,
                     table_name,
                     alias: None, // Will be filled from alias info
@@ -153,6 +156,7 @@ fn extract_table_refs(
             table_refs.push(FederatedTableRef {
                 original_name: name.to_string(),
                 connection_name: String::new(),
+                database_name: None,
                 schema_name: Some(parts[0].to_string()),
                 table_name: parts[1].to_string(),
                 alias: None,
@@ -161,6 +165,7 @@ fn extract_table_refs(
             table_refs.push(FederatedTableRef {
                 original_name: name.to_string(),
                 connection_name: String::new(),
+                database_name: None,
                 schema_name: None,
                 table_name: parts[0].to_string(),
                 alias: None,
@@ -220,14 +225,14 @@ pub fn rewrite_federated_sql(sql: &str, analysis: &FederatedAnalysis) -> Option<
     let mut rewrite_map: HashMap<String, Vec<ObjectNamePart>> = HashMap::new();
     for ref_ in &analysis.table_refs {
         if ref_.connection_name == *conn_name {
-            let new_parts: Vec<ObjectNamePart> = if let Some(ref schema) = ref_.schema_name {
-                vec![
-                    ObjectNamePart::Identifier(Ident::new(schema)),
-                    ObjectNamePart::Identifier(Ident::new(&ref_.table_name)),
-                ]
-            } else {
-                vec![ObjectNamePart::Identifier(Ident::new(&ref_.table_name))]
-            };
+            let mut new_parts: Vec<ObjectNamePart> = Vec::new();
+            if let Some(ref db) = ref_.database_name {
+                new_parts.push(ObjectNamePart::Identifier(Ident::new(db)));
+            }
+            if let Some(ref schema) = ref_.schema_name {
+                new_parts.push(ObjectNamePart::Identifier(Ident::new(schema)));
+            }
+            new_parts.push(ObjectNamePart::Identifier(Ident::new(&ref_.table_name)));
             rewrite_map.insert(ref_.original_name.clone(), new_parts);
         }
     }
@@ -418,6 +423,32 @@ mod tests {
         assert!(!analysis.is_single_connection);
         assert_eq!(analysis.connections.len(), 2);
         assert_eq!(analysis.table_refs.len(), 2);
+    }
+
+    #[test]
+    fn test_four_part_name_rewrite() {
+        // Test 4-part name: connection.database.schema.table
+        let conn = make_test_connection("postgresql", DatabaseType::Postgres, "ihrcore");
+        let sql = r#"SELECT "id", "connection_name", "db_type" FROM postgresql.ihrcore."public"."database_connection""#;
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+
+        assert!(analysis.uses_federation_syntax);
+        assert!(analysis.is_single_connection);
+        assert_eq!(analysis.single_connection, Some("postgresql".to_string()));
+        assert_eq!(analysis.table_refs.len(), 1);
+        assert_eq!(analysis.table_refs[0].connection_name, "postgresql");
+        assert_eq!(analysis.table_refs[0].database_name, Some("ihrcore".to_string()));
+        assert_eq!(analysis.table_refs[0].schema_name, Some("public".to_string()));
+        assert_eq!(analysis.table_refs[0].table_name, "database_connection");
+
+        // Verify rewrite removes connection prefix but keeps database.schema.table
+        if let Some(rewritten) = rewrite_federated_sql(sql, &analysis) {
+            assert!(rewritten.contains("ihrcore.public.database_connection"));
+            assert!(!rewritten.contains("postgresql."));
+        } else {
+            panic!("Expected successful rewrite for 4-part name");
+        }
     }
 
     #[test]
