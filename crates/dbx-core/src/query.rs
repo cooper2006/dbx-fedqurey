@@ -1629,6 +1629,7 @@ fn is_native_sql_server_error(db_type: Option<DatabaseType>, message: &str) -> b
         Some(DatabaseType::Mysql) => message.starts_with("Server error: `ERROR "),
         _ => false,
     }
+}
 /// 执行多连接联邦查询
 ///
 /// 当 SQL 中引用了多个数据库连接（如 `pg_conn.public.users JOIN mysql_conn.shop.orders`）时，
