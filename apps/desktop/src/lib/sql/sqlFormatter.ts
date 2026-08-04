@@ -1,5 +1,6 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { analyzeFederatedSql } from "@/lib/federated/federatedFormatter";
+import { looksLikeXml } from "@/lib/sql/autoFormat";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
 
@@ -90,8 +91,22 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const language = formatterLanguage(dialect);
 
   // Protect federated table references (connection.schema.table) before formatting
-  // so the formatter doesn't mangle multi-part identifiers
+  // so the formatter doesn't mangle multi-part identifiers.
+  // sql-formatter only supports up to 3-part qualified names (database.schema.table),
+  // but federated queries use 4+ parts (connection.schema.table).
   const { protectedSql, restoreMap } = protectFederatedRefs(sql);
+
+  // If no federated refs were protected, just format normally
+  if (restoreMap.size === 0) {
+    try {
+      const { format } = await import("sql-formatter");
+      const options = sqlFormatterOptions(settings);
+      const language = formatterLanguage(dialect);
+      return format(sql, { language, ...options });
+    } catch {
+      // fall through to the original error below
+    }
+  }
 
   try {
     let formatted = format(protectedSql, { language, ...options });
@@ -186,6 +201,10 @@ const SQL_KEYWORDS = new Set([
  * Only 3+ part identifiers (e.g., connection.schema.table) where the first part is
  * not a SQL keyword are protected, as standard 2-part names (schema.table) are
  * handled natively by the formatter.
+ *
+ * Note: sql-formatter only supports up to 3-part qualified names
+ * (database.schema.table), but federated queries use 4+ parts
+ * (connection.schema.table). We protect these before formatting.
  */
 function protectFederatedRefs(sql: string): { protectedSql: string; restoreMap: Map<string, string> } {
   const analysis = analyzeFederatedSql(sql);
@@ -197,10 +216,14 @@ function protectFederatedRefs(sql: string): { protectedSql: string; restoreMap: 
 
   // Match 3+ part dot-separated identifiers (connection.schema.table or connection.database.schema.table)
   // that are not preceded by a dot (to avoid matching sub-parts of longer chains)
-  const federatedPattern = /(?<![\w.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,})/g;
+  // A segment can be a plain identifier (user, public) or a double-quoted identifier ("public", "database_connection").
+  // This is critical because sql-formatter only supports up to 3-part qualified names, but federated queries use 4+.
+  const federatedPattern = /(?<![\w.])(?:(?:[A-Za-z_]\w*|"[^"]*")\.){2,}(?:[A-Za-z_]\w*|"[^"]*")/g;
 
   let protectedSql = sql.replace(federatedPattern, (match) => {
-    const firstPart = match.split(".")[0].toLowerCase();
+    // Extract the first segment (connection name), handling both plain and quoted identifiers
+    const firstPartMatch = match.match(/^(?:[A-Za-z_]\w*|"[^"]*")/);
+    const firstPart = firstPartMatch ? firstPartMatch[0].toLowerCase() : '';
     // Skip if the first part is a SQL keyword (e.g., "select.col" in unusual syntax)
     if (SQL_KEYWORDS.has(firstPart)) {
       return match;

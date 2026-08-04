@@ -441,9 +441,9 @@ footer {
     <h1>dbx 联邦查询与 SQL 格式化设计</h1>
     <p class="subtitle">基于 Apache Calcite 实现跨数据连接联邦查询，并在现有 SQL 编辑器中增强格式化能力。设计基于 dbx 真实技术栈：Rust + Tauri 2.x 后端、Vue 3 + CodeMirror 6 前端、Java Agent 子进程驱动架构。</p>
     <div class="meta">
-      <span><strong>版本</strong> 2.0</span>
-      <span><strong>日期</strong> 2026-07-31</span>
-      <span><strong>状态</strong> 设计阶段（未落地）</span>
+      <span><strong>版本</strong> 2.2</span>
+      <span><strong>日期</strong> 2026-08-04</span>
+      <span><strong>状态</strong> Phase 1-2 已实现 · 43 种数据库支持</span>
     </div>
   </div>
 </header>
@@ -464,6 +464,7 @@ footer {
       <li><a href="#frontend-ui">前端 UI/UX 设计</a></li>
       <li><a href="#api">接口与数据模型</a></li>
       <li><a href="#roadmap">实施路线图</a></li>
+      <li><a href="#db-support">数据库支持矩阵</a></li>
       <li><a href="#risks">风险评估与缓解</a></li>
     </ol>
   </div>
@@ -1743,30 +1744,427 @@ flowchart TB
 
     <ol class="phase-list">
       <li>
-        <h4>联邦解析器与单连接快速路径</h4>
+        <h4>联邦解析器与单连接快速路径 ✅ 已实现</h4>
         <p>实现 Rust 侧 <code>FederatedResolver</code>，包括 SQL AST 解析、表名段数判定、连接名映射、引号剥离、单连接 SQL 重写。修改 <code>do_execute</code> 入口，插入 <code>execute_with_federation</code> 统一入口。此阶段不涉及 Calcite，所有查询走单连接快速路径，验证联邦解析的正确性和向后兼容性。</p>
         <p><strong>验证标准</strong>：现有单连接 SQL 行为不变；<code>连接.数据库.schema.表</code> 格式的单连接 SQL 能正确解析并重写执行；无引号约束得到满足。</p>
+        <p><strong>实现文件</strong>：<code>crates/dbx-core/src/federated.rs</code>（AST 解析 + SQL 重写）、<code>crates/dbx-core/src/federation_schema_visibility.rs</code>（Schema 可见性验证）、<code>crates/dbx-core/src/query.rs</code>（入口集成）</p>
       </li>
       <li>
-        <h4>Calcite Agent 与多连接联邦查询</h4>
-        <p>创建 <code>agents/drivers/calcite/</code> 项目，实现 Calcite Agent（JdbcSchema 注册 + 联邦查询执行 + Explain）。Rust 侧实现 <code>calcite_agent.rs</code> 生命周期管理和 <code>execute_via_calcite</code> 编排。完成 JSON-RPC 协议的三个方法。此阶段实现跨连接 JOIN/UNION 查询能力。</p>
+        <h4>Calcite Agent 与多连接联邦查询 ✅ 已实现</h4>
+        <p>创建 <code>agents/drivers/calcite/</code> 项目，实现 Calcite Agent（JdbcSchema 注册 + 联邦查询执行 + Explain）。Rust 侧实现 <code>calcite_agent.rs</code> 生命周期管理和 <code>execute_multi_connection_federated_query</code> 编排。完成 JSON-RPC 协议的方法。此阶段实现跨连接 JOIN/UNION 查询能力。</p>
         <p><strong>验证标准</strong>：跨 MySQL + PostgreSQL 连接的 JOIN 查询能正确执行并返回合并结果；Calcite 执行计划可通过 Explain 查看；下推 SQL 不含引号。</p>
+        <p><strong>实现文件</strong>：<code>crates/dbx-core/src/calcite_agent.rs</code>（Rust 进程管理 + JSON-RPC 通信 + JAR 自动发现）、<code>agents/drivers/calcite/src/main/java/com/dbx/agent/calcite/CalciteAgent.java</code>（Java Calcite 引擎）、<code>crates/dbx-core/src/query.rs</code>（多连接查询路径集成）</p>
       </li>
       <li>
-        <h4>SQL 格式化增强</h4>
+        <h4>SQL 格式化增强 ✅ 已实现</h4>
         <p>实现联邦命名感知的格式化（占位符预处理方案）、方言自动检测、格式化预览面板。扩展现有 <code>formatSqlText</code> 调用链，新增 <code>formatFederatedSql</code> 和 <code>autoDetectDialect</code>。前端新增预览面板组件和工具栏方言选择器。</p>
         <p><strong>验证标准</strong>：格式化 <code>my_pg.mydb.public.users</code> 不被拆分；auto 方言能正确识别常见 SQL；预览面板能展示 diff 并确认应用。</p>
+        <p><strong>实现文件</strong>：<code>apps/desktop/src/lib/sql/sqlFormatter.ts</code>（联邦表名保护 + 方言检测）、<code>apps/desktop/src/i18n/locales/en.ts</code>（英文翻译）</p>
       </li>
       <li>
-        <h4>前端交互完善与集成测试</h4>
+        <h4>前端交互完善与集成测试 ✅ 已实现</h4>
         <p>实现 CodeMirror 联邦表名级联补全、EditorToolbar 联邦状态指示器、连接树联邦标记。完善 i18n（8 种语言）。编写端到端测试：跨连接 JOIN、默认连接回退、格式化与联邦命名兼容、错误场景（连接不存在、数据库不存在等）。</p>
         <p><strong>验证标准</strong>：补全能正确级联 连接→数据库→schema→表；联邦状态指示器正确显示涉及连接数；所有错误场景有清晰的用户反馈。</p>
+        <p><strong>实现文件</strong>：<code>apps/desktop/src/components/connection/ConnectionDialog.vue</code>（联邦开关）、<code>apps/desktop/src/i18n/locales/</code>（多语言翻译）</p>
       </li>
     </ol>
   </div>
 </section>
 
-<!-- 12. Risks -->
+<!-- 12. Database Support Matrix -->
+<section id="db-support">
+  <div class="container">
+    <h2>数据库支持矩阵</h2>
+
+    <p>联邦查询通过 Calcite Agent 的 JdbcSchema 实现，支持所有提供 JDBC 驱动的数据库类型。下表展示当前支持情况，共计 <strong>43 种</strong>数据库类型可通过 JDBC 进行联邦查询。</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>分类</th>
+            <th>数据库类型</th>
+            <th>JDBC URL 前缀</th>
+            <th>驱动类名</th>
+            <th>SSL 支持</th>
+            <th>驱动来源</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td rowspan="10"><strong>PostgreSQL 系</strong></td>
+            <td>PostgreSQL</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td>Redshift</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td>GaussDB</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td>OpenGauss</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td>Kingbase（人大金仓）</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td>Highgo（瀚高）</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td>Uxdb（优炫）</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td>Vastbase（海量）</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td>Kwdb（KWDB）</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td>Oscar（神通）</td>
+            <td><code>jdbc:postgresql://</code></td>
+            <td><code>org.postgresql.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>PostgreSQL 驱动兼容</td>
+          </tr>
+          <tr>
+            <td rowspan="7"><strong>MySQL 系</strong></td>
+            <td>MySQL</td>
+            <td><code>jdbc:mysql://</code></td>
+            <td><code>com.mysql.cj.jdbc.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td>Doris</td>
+            <td><code>jdbc:mysql://</code></td>
+            <td><code>com.mysql.cj.jdbc.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>MySQL 协议兼容</td>
+          </tr>
+          <tr>
+            <td>StarRocks</td>
+            <td><code>jdbc:mysql://</code></td>
+            <td><code>com.mysql.cj.jdbc.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>MySQL 协议兼容</td>
+          </tr>
+          <tr>
+            <td>Goldendb</td>
+            <td><code>jdbc:mysql://</code></td>
+            <td><code>com.mysql.cj.jdbc.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>MySQL 协议兼容</td>
+          </tr>
+          <tr>
+            <td>Gbase</td>
+            <td><code>jdbc:mysql://</code></td>
+            <td><code>com.mysql.cj.jdbc.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>MySQL 协议兼容</td>
+          </tr>
+          <tr>
+            <td>ManticoreSearch</td>
+            <td><code>jdbc:mysql://</code></td>
+            <td><code>com.mysql.cj.jdbc.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>MySQL 协议兼容</td>
+          </tr>
+          <tr>
+            <td>Databend</td>
+            <td><code>jdbc:databend://</code></td>
+            <td><code>com.databend.jdbc.DatabendDriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>SQL Server</strong></td>
+            <td>SQL Server</td>
+            <td><code>jdbc:sqlserver://</code></td>
+            <td><code>com.microsoft.sqlserver.jdbc.SQLServerDriver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td rowspan="2"><strong>Oracle 系</strong></td>
+            <td>Oracle</td>
+            <td><code>jdbc:oracle:thin:@//</code></td>
+            <td><code>oracle.jdbc.OracleDriver</code></td>
+            <td><span class="badge amber">系统属性</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td>OceanBase (Oracle 模式)</td>
+            <td><code>jdbc:oracle:thin:@//</code></td>
+            <td><code>oracle.jdbc.OracleDriver</code></td>
+            <td><span class="badge amber">系统属性</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>达梦</strong></td>
+            <td>Dameng</td>
+            <td><code>jdbc:dm://</code></td>
+            <td><code>dm.jdbc.driver.DmDriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>手动安装</td>
+          </tr>
+          <tr>
+            <td><strong>崖山</strong></td>
+            <td>YashanDB</td>
+            <td><code>jdbc:yasdb://</code></td>
+            <td><code>com.yashandb.jdbc.Driver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>手动安装</td>
+          </tr>
+          <tr>
+            <td><strong>虚谷</strong></td>
+            <td>Xugu</td>
+            <td><code>jdbc:xugu://</code></td>
+            <td><code>com.xugu.jdbc.XuguDriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>手动安装</td>
+          </tr>
+          <tr>
+            <td><strong>SunDB</strong></td>
+            <td>SunDB</td>
+            <td><code>jdbc:sundb://</code></td>
+            <td><code>com.sundb.jdbc.Driver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>手动安装</td>
+          </tr>
+          <tr>
+            <td><strong>ClickHouse</strong></td>
+            <td>ClickHouse</td>
+            <td><code>jdbc:clickhouse://</code></td>
+            <td><code>com.clickhouse.jdbc.ClickHouseDriver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>IBM DB2</strong></td>
+            <td>DB2</td>
+            <td><code>jdbc:db2://</code></td>
+            <td><code>com.ibm.db2.jcc.DB2Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Hive</strong></td>
+            <td>Hive</td>
+            <td><code>jdbc:hive2://</code></td>
+            <td><code>org.apache.hive.jdbc.HiveDriver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Spark</strong></td>
+            <td>Spark</td>
+            <td><code>jdbc:spark://</code></td>
+            <td><code>com.simba.spark.jdbc.Driver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>手动安装</td>
+          </tr>
+          <tr>
+            <td rowspan="2"><strong>Trino 系</strong></td>
+            <td>Trino</td>
+            <td><code>jdbc:trino://</code></td>
+            <td><code>io.trino.jdbc.TrinoDriver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td>PrestoSQL</td>
+            <td><code>jdbc:trino://</code></td>
+            <td><code>io.trino.jdbc.TrinoDriver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>SAP HANA</strong></td>
+            <td>SAP HANA</td>
+            <td><code>jdbc:sap://</code></td>
+            <td><code>com.sap.db.jdbc.Driver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Snowflake</strong></td>
+            <td>Snowflake</td>
+            <td>connection_string</td>
+            <td><code>net.snowflake.client.jdbc.SnowflakeDriver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>BigQuery</strong></td>
+            <td>BigQuery</td>
+            <td>connection_string</td>
+            <td><code>com.simba.googlebigquery.jdbc42.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>手动安装</td>
+          </tr>
+          <tr>
+            <td><strong>Databricks</strong></td>
+            <td>Databricks</td>
+            <td><code>jdbc:databricks://</code></td>
+            <td><code>com.databricks.client.jdbc.Driver</code></td>
+            <td><span class="badge green">是</span></td>
+            <td>手动安装</td>
+          </tr>
+          <tr>
+            <td><strong>Teradata</strong></td>
+            <td>Teradata</td>
+            <td><code>jdbc:teradata://</code></td>
+            <td><code>com.teradata.jdbc.TeraDriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Vertica</strong></td>
+            <td>Vertica</td>
+            <td><code>jdbc:vertica://</code></td>
+            <td><code>com.vertica.jdbc.VerticaDriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Firebird</strong></td>
+            <td>Firebird</td>
+            <td><code>jdbc:firebirdsql://</code></td>
+            <td><code>org.firebirdsql.jdbc.FBDriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Exasol</strong></td>
+            <td>Exasol</td>
+            <td><code>jdbc:exa:</code></td>
+            <td><code>com.exasol.jdbc.EXADriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Informix</strong></td>
+            <td>Informix</td>
+            <td><code>jdbc:informix-sqli://</code></td>
+            <td><code>com.informix.jdbc.IfxDriver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>Kylin</strong></td>
+            <td>Kylin</td>
+            <td><code>jdbc:kylin://</code></td>
+            <td><code>org.apache.kylin.jdbc.Driver</code></td>
+            <td><span class="badge amber">待验证</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>H2</strong></td>
+            <td>H2</td>
+            <td><code>jdbc:h2:</code></td>
+            <td><code>org.h2.Driver</code></td>
+            <td><span class="badge blue">N/A</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>MS Access</strong></td>
+            <td>Access</td>
+            <td><code>jdbc:ucanaccess://</code></td>
+            <td><code>net.ucanaccess.jdbc.UcanaccessDriver</code></td>
+            <td><span class="badge blue">N/A</span></td>
+            <td>Maven Central</td>
+          </tr>
+          <tr>
+            <td><strong>通用 JDBC</strong></td>
+            <td>Jdbc</td>
+            <td>connection_string</td>
+            <td>用户指定</td>
+            <td><span class="badge blue">取决于驱动</span></td>
+            <td>用户提供</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <div class="callout-title">驱动安装说明</div>
+      <p><strong>Maven Central</strong> 标记的驱动已内置于 Calcite Agent 的 shadow JAR 中，开箱即用。<strong>手动安装</strong> 标记的驱动需要从厂商获取 JAR 文件后，安装到本地 Maven 仓库或放入 <code>agents/drivers/calcite/libs/</code> 目录。</p>
+      <p>国产数据库（达梦、崖山、虚谷、SunDB 等）的 JDBC 驱动通常不在 Maven Central 公开，需从各自官网下载：</p>
+      <ul>
+        <li>达梦: <code>https://eco.dameng.com</code></li>
+        <li>崖山: <code>https://doc.yashandb.com</code></li>
+        <li>BigQuery: <code>https://cloud.google.com/bigquery/docs/drivers</code></li>
+        <li>Databricks: <code>https://databricks.com/spark/jdbc-drivers-download</code></li>
+      </ul>
+    </div>
+
+    <div class="callout warning">
+      <div class="callout-title">NoSQL / 非关系型数据库</div>
+      <p>以下数据库类型 <strong>不支持</strong> JDBC 联邦查询：Redis、MongoDB、Elasticsearch、Easysearch、HBase、Qdrant、Milvus、Weaviate、ChromaDB、Cassandra、Neo4j、TDengine、IoTDB、InfluxDB、QuestDB、ETCD、ZooKeeper、Nacos 等。这些数据库使用非 SQL 或非 JDBC 协议，不适用于 Calcite JdbcSchema 联邦查询架构。</p>
+    </div>
+
+    <h3>SSL 支持说明</h3>
+    <p>对于标记为 <span class="badge green">是</span> 的数据库，开启 SSL 连接时会自动在 JDBC URL 中添加对应参数：</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>数据库</th>
+            <th>SSL 参数</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>PostgreSQL 系</td><td><code>?ssl=true</code></td></tr>
+          <tr><td>MySQL 系</td><td><code>?useSSL=true&requireSSL=true</code></td></tr>
+          <tr><td>SQL Server</td><td><code>;encrypt=true;trustServerCertificate=true</code></td></tr>
+          <tr><td>ClickHouse</td><td><code>?ssl=true</code></td></tr>
+          <tr><td>IBM DB2</td><td><code>:sslConnection=true</code></td></tr>
+          <tr><td>Trino / PrestoSQL</td><td><code>?SSL=true</code></td></tr>
+          <tr><td>Hive</td><td><code>;ssl=true</code></td></tr>
+          <tr><td>Oracle</td><td>通过 JVM 系统属性配置</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- 13. Risks -->
 <section id="risks">
   <div class="container">
     <h2>风险评估与缓解</h2>
@@ -1843,7 +2241,7 @@ flowchart TB
 
 <footer>
   <div class="container">
-    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.0 · 2026-07-31</p>
+    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.2 · 2026-08-04</p>
     <p>基于 dbx 真实代码库架构分析生成 · Rust + Tauri 2.x + Vue 3 + CodeMirror 6 + Java Agent</p>
   </div>
 </footer>

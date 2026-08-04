@@ -1085,6 +1085,7 @@ for line in sys.stdin:
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            federation_enabled: false,
             is_production: false,
             production_databases: vec![],
             database_info: None,

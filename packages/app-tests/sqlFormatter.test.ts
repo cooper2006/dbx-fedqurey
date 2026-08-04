@@ -233,3 +233,33 @@ test("compressSqlText preserves unterminated block comments", () => {
   const sql = "DELETE FROM users /* unfinished";
   assert.equal(compressSqlText(sql), sql);
 });
+
+// ── 联邦查询格式化测试 ──
+
+test("formats federated SQL with double-quoted identifiers (4-part names)", async () => {
+  // 4-part federated reference: connection.database."schema"."table"
+  const sql = 'SELECT "id", "connection_name", "db_type" FROM postgresql.ihrcore."public"."database_connection"';
+  const formatted = await formatSqlText(sql, "postgres");
+
+  // Should preserve the federated reference
+  assert.match(formatted, /postgresql\.ihrcore/);
+  assert.match(formatted, /\"public\"\."database_connection"/);
+});
+
+test("formats federated SQL with plain identifiers (3-part names)", async () => {
+  const sql = 'SELECT u.id, u.name FROM my_pg.mydb.public.users u JOIN my_pg.mydb.public.orders o ON u.id = o.user_id';
+  const formatted = await formatSqlText(sql, "postgres");
+
+  // Should preserve federated references
+  assert.match(formatted, /my_pg\.mydb\.public\.users/);
+  assert.match(formatted, /my_pg\.mydb\.public\.orders/);
+});
+
+test("formats federated SQL with mixed plain and quoted identifiers", async () => {
+  const sql = 'SELECT p.name, o.total FROM mysql_shop.shop.products p JOIN mysql_shop.shop.orders o ON p.id = o.product_id';
+  const formatted = await formatSqlText(sql, "mysql");
+
+  // Should preserve federated references
+  assert.match(formatted, /mysql_shop\.shop\.products/);
+  assert.match(formatted, /mysql_shop\.shop\.orders/);
+});

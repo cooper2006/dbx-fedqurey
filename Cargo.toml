@@ -14,9 +14,27 @@ postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git"
 # sha256_password auth plugin. Remove after upstream support lands.
 mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "b615bb0b10b5975182a4aa069cabc3d09021f6ab" }
 
+# ──────────────────────────────────────────────────────────────
+# Profile 策略：
+#   fast-release  → 日常开发 / 快速验证（增量编译，无 LTO，并行 codegen）
+#   release       → 最终打包发布（全量 LTO，单 codegen-unit，体积优化）
+#
+# 用法：
+#   日常开发：cargo build --profile fast-release
+#   最终打包：cargo build --release
+# ──────────────────────────────────────────────────────────────
+
 [profile.release]
 panic = "abort"
 strip = true
 lto = true
 codegen-units = 1
 opt-level = "s"
+
+[profile.fast-release]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 1
+incremental = true
+strip = false

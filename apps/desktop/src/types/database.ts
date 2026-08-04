@@ -445,6 +445,7 @@ export interface ColumnInfo {
   is_nullable: boolean;
   column_default: string | null;
   is_primary_key: boolean;
+  is_unique?: boolean;
   extra: string | null;
   comment?: string | null;
   numeric_precision?: number | null;
@@ -903,6 +904,7 @@ export interface TableStructureEditorDraft {
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
+  loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   initialized: boolean;
 }

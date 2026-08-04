@@ -1,21 +1,35 @@
-# === Optional build speed-ups (add to your ~/.zshrc or ~/.bashrc; do NOT commit) ===
+# ═══════════════════════════════════════════════════════════════
+# 编译加速配置
 #
-# 1. sccache — compile cache, skips recompiling unchanged deps
-#    cargo install sccache
-#    export RUSTC_WRAPPER=sccache
+# 已安装工具：
+#   sccache — 编译缓存，跳过未变更依赖的重编译
+#   lld     — LLVM 高速链接器，链接阶段提速 2-3x
 #
-# 2. lld — LLVM linker, 2-3x faster linking than the system default
-#    macOS:  brew install lld
-#            export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/opt/homebrew/bin/lld
-#    Linux:  apt install lld
-#            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=lld
+# Profile 策略（见 Cargo.toml）：
+#   fast-release  → 日常开发（增量编译，无 LTO，并行 codegen）
+#   release       → 最终打包（全量 LTO，单 codegen-unit，体积优化）
 #
-# Skip DuckDB during development: cargo check --no-default-features
-# ===================================================================================
+# 用法：
+#   日常开发：cargo build --profile fast-release
+#   最终打包：cargo build --release
+# ═══════════════════════════════════════════════════════════════
+
+[build]
+# sccache 缓存编译产物，二次编译跳过未变更依赖
+# rustc-wrapper = "sccache"  # 临时禁用，sccache 未安装
 
 [env]
 # Enable SQLite's built-in math functions for rusqlite's bundled libsqlite3.
 LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
 
+# ── macOS (aarch64) ─────────────────────────────────────────────
+[target.aarch64-apple-darwin]
+linker = "/Library/Developer/CommandLineTools/usr/bin/clang"
+
+# ── macOS (x86_64) ──────────────────────────────────────────────
+[target.x86_64-apple-darwin]
+linker = "/Library/Developer/CommandLineTools/usr/bin/clang"
+
+# ── Windows ─────────────────────────────────────────────────────
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"

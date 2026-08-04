@@ -18,9 +18,11 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
+use crate::calcite_agent::{CalciteAgentConfig, CalciteAgentManager};
 use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
 use crate::db;
+use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
 use crate::federated::{analyze_federation, rewrite_federated_sql, validate_federation};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::is_write_sql;
@@ -1613,13 +1615,123 @@ fn classify_query_error(db_type: Option<DatabaseType>, error: QueryExecutionErro
         QueryExecutionError::Legacy(message) if is_dbx_query_timeout_error(&message.to_ascii_lowercase()) => {
             QueryExecutionError::Timeout(message)
         }
-        QueryExecutionError::Legacy(message)
-            if db_type == Some(DatabaseType::Postgres) && message.trim_start().starts_with("ERROR:") =>
-        {
+        QueryExecutionError::Legacy(message) if is_native_sql_server_error(db_type, &message) => {
             QueryExecutionError::Sql(message)
         }
         other => other,
     }
+}
+
+fn is_native_sql_server_error(db_type: Option<DatabaseType>, message: &str) -> bool {
+    let message = message.trim_start();
+    match db_type {
+        Some(DatabaseType::Postgres) => message.starts_with("ERROR:"),
+        Some(DatabaseType::Mysql) => message.starts_with("Server error: `ERROR "),
+        _ => false,
+    }
+/// 执行多连接联邦查询
+///
+/// 当 SQL 中引用了多个数据库连接（如 `pg_conn.public.users JOIN mysql_conn.shop.orders`）时，
+/// 通过 Calcite Agent 执行跨连接查询。
+///
+/// 流程：
+/// 1. 获取或创建 CalciteAgentManager
+/// 2. 启动 Agent（如果尚未运行）
+/// 3. 注册所有涉及的连接
+/// 4. 通过 Agent 执行联邦查询
+/// 5. 将结果转换为 QueryResult
+async fn execute_multi_connection_federated_query(
+    state: &AppState,
+    sql: &str,
+    analysis: &crate::federated::FederatedAnalysis,
+    cancel_token: Option<CancellationToken>,
+    all_connections: &[ConnectionConfig],
+) -> Result<db::QueryResult, QueryExecutionError> {
+    let conn_map: std::collections::HashMap<&str, &ConnectionConfig> = all_connections
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
+
+    // 获取或创建 CalciteAgentManager
+    let manager = {
+        let mut guard = state.calcite_agent.lock().unwrap();
+        if let Some(ref mgr) = *guard {
+            mgr.clone()
+        } else {
+            let config = CalciteAgentConfig::auto_discover();
+            if !config.is_jar_available() {
+                return Err(QueryExecutionError::Sql(format!(
+                    "Calcite Agent JAR not found. Federated queries across multiple connections require the Calcite Agent.\n\
+                     Expected JAR at: agents/drivers/calcite/build/libs/dbx-agent-calcite.jar\n\
+                     Please build it with: cd agents && ./gradlew :drivers:calcite:shadowJar"
+                )));
+            }
+            let mgr = CalciteAgentManager::new(config);
+            *guard = Some(mgr.clone());
+            mgr
+        }
+    };
+
+    // 启动 Agent（如果尚未运行）
+    let app_version = state.agent_manager.agent_app_version();
+    if !manager.is_running().await {
+        log::info!("Starting Calcite Agent for multi-connection federated query");
+        manager.start(app_version).await.map_err(|e| {
+            QueryExecutionError::Sql(format!("Failed to start Calcite Agent: {e}"))
+        })?;
+    }
+
+    // 注册所有涉及的连接
+    for conn_name in &analysis.connections {
+        let conn_config = match conn_map.get(conn_name.as_str()) {
+            Some(c) => *c,
+            None => {
+                return Err(QueryExecutionError::Sql(format!(
+                    "Connection '{conn_name}' not found in configured connections"
+                )));
+            }
+        };
+
+        // 检查是否已注册
+        let already_registered = {
+            let registered = manager.registered_connections_list().await;
+            registered.contains(conn_name)
+        };
+
+        if !already_registered {
+            log::info!("Registering connection '{}' with Calcite Agent", conn_name);
+            manager.register_connection(conn_config).await.map_err(|e| {
+                QueryExecutionError::Sql(format!(
+                    "Failed to register connection '{conn_name}' with Calcite Agent: {e}"
+                ))
+            })?;
+        }
+    }
+
+    // 执行联邦查询
+    log::info!("Executing multi-connection federated query via Calcite Agent");
+    let fed_result = manager
+        .execute_federated_query(sql, cancel_token)
+        .await
+        .map_err(|e| QueryExecutionError::Sql(format!("Calcite Agent query failed: {e}")))?;
+
+    // 转换为 QueryResult
+    let result = db::QueryResult {
+        columns: fed_result.columns,
+        column_types: vec![],
+        column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
+        rows: fed_result.rows,
+        affected_rows: 0,
+        execution_time_ms: fed_result.duration_ms as u128,
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+    };
+
+    Ok(result)
 }
 
 pub async fn do_execute(
@@ -1751,7 +1863,7 @@ pub async fn execute_sql_statement_with_options_typed(
         // Validate federation access (check federation_enabled and schema visibility)
         if federation_analysis.uses_federation_syntax {
             if let Err(e) = validate_federation(&federation_analysis, &all_connections) {
-                return Err(e.to_string());
+                return Err(e.to_string().into());
             }
         }
         
@@ -1762,8 +1874,15 @@ pub async fn execute_sql_statement_with_options_typed(
                 effective_sql = rewritten_sql;
             }
         } else if federation_analysis.uses_federation_syntax && !federation_analysis.is_single_connection {
-            // Multi-connection federated query - requires Calcite Agent
-            return Err("Federated query across multiple connections requires Apache Calcite Agent to be configured. Please enable and start the Calcite Agent in settings.".to_string());
+            // Multi-connection federated query - delegate to Calcite Agent
+            return execute_multi_connection_federated_query(
+                state,
+                &effective_sql,
+                &federation_analysis,
+                cancel_token,
+                &all_connections,
+            )
+            .await;
         }
     }
     
@@ -1790,7 +1909,7 @@ pub async fn execute_sql_statement_with_options_typed(
 
     let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
     let result =
-        do_execute(state, &pool_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token.clone(), options.clone())
+        do_execute_typed(state, &pool_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token.clone(), options.clone())
             .await;
 
     let with_sql_context = |result: Result<db::QueryResult, QueryExecutionError>| {
@@ -1806,7 +1925,7 @@ pub async fn execute_sql_statement_with_options_typed(
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
-                do_execute(state, &new_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token, options).await,
+                do_execute_typed(state, &new_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token, options).await,
             )
         }
         Some(PoolErrorAction::Discard) => {
@@ -5051,6 +5170,31 @@ for line in sys.stdin:
             backend_error.detail(),
             Some(
                 "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+            )
+        );
+    }
+
+    #[test]
+    fn mysql_server_error_preserves_sql_catalog_identity_and_detail() {
+        let error = classify_query_error(
+            Some(DatabaseType::Mysql),
+            QueryExecutionError::Legacy(
+                "Server error: `ERROR 1064 (42000): You have an error in your SQL syntax`".to_string(),
+            ),
+        )
+        .with_omitted_sql_context("SELECT 111 AS first_value FROM DUAL");
+        let backend_error = error.into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-4001");
+        assert_eq!(backend_error.message_key(), "backendErrors.jdbc.sqlFailed");
+        assert_eq!(
+            backend_error.message_params().get("stage"),
+            Some(&crate::backend_error::BackendMessageParam::String("execute".to_string()))
+        );
+        assert_eq!(
+            backend_error.detail(),
+            Some(
+                "Server error: `ERROR 1064 (42000): You have an error in your SQL syntax` SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
             )
         );
     }

@@ -171,14 +171,24 @@ fn extract_table_refs(
 }
 
 /// Get the default schema for a database type
+#[allow(dead_code)]
 fn get_default_schema(db_type: &crate::models::connection::DatabaseType, database: &str) -> String {
+    use crate::models::connection::DatabaseType as DT;
     match db_type {
-        crate::models::connection::DatabaseType::Postgres
-        | crate::models::connection::DatabaseType::Kingbase
-        | crate::models::connection::DatabaseType::Highgo
-        | crate::models::connection::DatabaseType::Uxdb => "public".to_string(),
-        crate::models::connection::DatabaseType::Mysql => database.to_string(),
-        crate::models::connection::DatabaseType::SqlServer => "dbo".to_string(),
+        // PostgreSQL 系 — 默认 schema 为 "public"
+        DT::Postgres | DT::Redshift | DT::Kingbase | DT::Highgo | DT::Uxdb
+        | DT::Vastbase | DT::Gaussdb | DT::OpenGauss | DT::Kwdb | DT::Oscar => "public".to_string(),
+        // MySQL 系 — schema 等同于 database 名
+        DT::Mysql | DT::Doris | DT::StarRocks | DT::Goldendb | DT::Gbase
+        | DT::ManticoreSearch | DT::Databend | DT::ClickHouse => database.to_string(),
+        // SQL Server — 默认 schema 为 "dbo"
+        DT::SqlServer => "dbo".to_string(),
+        // Oracle 系 — 默认 schema 等同于用户名（此处用 database 代替）
+        DT::Oracle | DT::OceanbaseOracle => database.to_string(),
+        // DB2 — 默认 schema 等同于用户名
+        DT::Db2 => database.to_string(),
+        // 达梦 — 默认 schema 为 "SYSDBA"
+        DT::Dameng => "SYSDBA".to_string(),
         _ => "public".to_string(),
     }
 }

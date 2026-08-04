@@ -11,9 +11,11 @@
 import type { SqlFormatDialect } from "./sqlFormatter";
 
 /**
- * Pattern to match federated table references: connection.schema.table or connection.table
+ * Pattern to match federated table references: connection.schema.table or connection.database.schema.table
+ * Handles both plain identifiers (user, public) and double-quoted identifiers ("public", "database_connection").
+ * A segment is either: [A-Za-z_]\w* (plain) or "[^"]*" (quoted).
  */
-const FEDERATED_REF_PATTERN = /(\w+)\.(\w+)(?:\.(\w+))?/g;
+const FEDERATED_REF_PATTERN = /(?<conn>(?:[A-Za-z_]\w*|"[^"]*"))\.(?:(?<schema>(?:[A-Za-z_]\w*|"[^"]*"))\.(?:(?<table>(?:[A-Za-z_]\w*|"[^"]*")))?)/g;
 
 /**
  * Format a federated SQL query with proper syntax preservation
@@ -25,7 +27,11 @@ export function formatFederatedSql(sql: string, dialect?: SqlFormatDialect): str
 
   // First, extract and protect federation references
   const protectedRefs: Map<string, string> = new Map();
-  let protectedSql = sql.replace(FEDERATED_REF_PATTERN, (match: string, conn: string, schema: string, table?: string) => {
+  let protectedSql = sql.replace(FEDERATED_REF_PATTERN, (match: string) => {
+    // Extract named groups from the match result
+    const c = (match as any).groups?.conn;
+    const s = (match as any).groups?.schema;
+    const t = (match as any).groups?.table;
     // Check if this looks like a federation reference (first part could be a connection name)
     const key = `__FED_REF_${protectedRefs.size}__`;
     protectedRefs.set(key, match);
@@ -74,7 +80,10 @@ export function analyzeFederatedSql(sql: string): FederatedAnalysis {
   for (const stmt of statements) {
     const matches = stmt.matchAll(FEDERATED_REF_PATTERN);
     for (const match of matches) {
-      const [, conn, schema, table] = match;
+      // Named groups from FEDERATED_REF_PATTERN
+      const conn = match.groups?.conn;
+      const schema = match.groups?.schema;
+      const table = match.groups?.table;
 
       // Heuristic: if first segment looks like it could be a connection name,
       // treat it as federation syntax
@@ -116,8 +125,11 @@ export function getRecommendedDialect(connections: string[]): SqlFormatDialect {
  */
 export function stripFederationPrefixes(sql: string): string {
   return sql.replace(FEDERATED_REF_PATTERN, (_match, _conn: string, schema: string, table?: string) => {
+    // Use named groups for clarity
+    const s = schema;
+    const t = table;
     // Return schema.table or just table
-    return table ? `${schema}.${table}` : schema;
+    return t ? `${s}.${t}` : s;
   });
 }
 
