@@ -177,12 +177,8 @@ pub struct ConnectionConfig {
     /// Whether this connection is enabled for federated query participation.
     /// When true, the connection can be referenced in federated SQL via
     /// the `connection_name.schema.table` three-part naming convention.
-    #[serde(default = "default_federation_enabled")]
+    #[serde(default)]
     pub federation_enabled: bool,
-}
-
-fn default_federation_enabled() -> bool {
-    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

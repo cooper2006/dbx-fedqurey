@@ -1296,6 +1296,10 @@ export interface SqlCompletionProviderInput {
   columnsByTable: Map<string, SqlCompletionColumn[]>;
   foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>;
   schemas?: string[];
+  /** Names of all configured connections, used to offer federated connection-name completion. */
+  federatedConnections?: string[];
+  /** Per-connection tables available for federated (cross-connection) completion, keyed by connection name. */
+  federatedTablesByConnection?: Record<string, SqlCompletionTable[]>;
   translations?: SqlCompletionTranslations;
   snippets?: SqlSnippet[];
   dialect?: "mysql" | "postgres" | "sqlserver";
@@ -1315,6 +1319,8 @@ export function buildSqlCompletionItems(
     columnsByTable: Map<string, SqlCompletionColumn[]>;
     foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>;
     schemas?: string[];
+    federatedConnections?: string[];
+    federatedTablesByConnection?: Record<string, SqlCompletionTable[]>;
     translations?: SqlCompletionTranslations;
     dialect?: "mysql" | "postgres" | "sqlserver";
     databaseType?: DatabaseType;
@@ -1418,6 +1424,9 @@ class SqlCompletionProvider {
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
       this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect));
+      // Federated query completion: offer connection names at the top level and
+      // cross-connection tables once a connection qualifier is present.
+      this.items.push(...buildFederatedTableItems(context, this.input));
       this.items.push(...buildTableItems(context, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType, this.input.currentSchema, this.input.keywordCase));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table"));
@@ -2858,6 +2867,55 @@ export function quoteSqlIdentifier(identifier: string, dialect?: "mysql" | "post
 }
 
 const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()));
+
+/**
+ * Federated query completion.
+ *
+ * - At the top level (no qualifier yet) offers configured connection names so
+ *   users can type `conn.` to reference a different connection.
+ * - Once a qualifier's first part matches a known connection, offers that
+ *   connection's tables (optionally filtered by an explicit schema part).
+ */
+function buildFederatedTableItems(context: SqlCompletionContext, input: SqlCompletionProviderInput): SqlCompletionItem[] {
+  const items: SqlCompletionItem[] = [];
+  const connections = input.federatedConnections ?? [];
+  if (connections.length === 0) return items;
+  const prefix = context.prefix;
+  const parts = context.qualifierParts ?? [];
+
+  if (parts.length === 0) {
+    for (const conn of connections) {
+      if (prefix && !conn.toLowerCase().startsWith(prefix.toLowerCase())) continue;
+      items.push({
+        label: conn,
+        type: "schema" as const,
+        detail: "Connection",
+        apply: `${conn}.`,
+        boost: computeBoost(conn, prefix) + 500,
+      });
+    }
+    return items;
+  }
+
+  const conn = parts[0];
+  if (!connections.some((c) => c.toLowerCase() === conn.toLowerCase())) return items;
+  const connTables = (input.federatedTablesByConnection ?? {})[conn] ?? [];
+  const qualifierSchema = parts.length > 1 ? parts[parts.length - 1] : undefined;
+  const dialect = input.dialect;
+  for (const table of connTables) {
+    if (qualifierSchema && table.schema && normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(qualifierSchema)) continue;
+    if (prefix && !matchesPrefix(table.name, prefix)) continue;
+    const qualified = `${quoteSqlIdentifier(conn, dialect)}${table.schema ? `.${quoteSqlIdentifier(table.schema, dialect)}` : ""}.${quoteSqlIdentifier(table.name, dialect)}`;
+    items.push({
+      label: table.name,
+      type: "table" as const,
+      detail: table.detail ?? `${conn}.${table.schema ?? ""}.${table.name}`,
+      apply: qualified,
+      boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
+    });
+  }
+  return items.sort(compareCompletionItems);
+}
 
 function buildTableItems(
   context: Pick<SqlCompletionContext, "prefix" | "qualifier">,

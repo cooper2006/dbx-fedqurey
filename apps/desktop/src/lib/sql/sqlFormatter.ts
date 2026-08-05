@@ -1,5 +1,6 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { analyzeFederatedSql } from "@/lib/federated/federatedFormatter";
+import { autoDetectDialect } from "@/lib/federated/dialectDetector";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
@@ -87,8 +88,20 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   }
 
   const { format } = await import("sql-formatter");
+  // When the caller didn't pin a dialect, infer one from the SQL text so
+  // vendor-specific syntax (LIMIT offset, TOP, CONNECT BY, ...) is formatted
+  // correctly instead of falling back to the permissive "sql" grammar.
+  let effectiveDialect = dialect;
+  if (dialect === "generic") {
+    const detected = autoDetectDialect(sql);
+    if (detected !== "generic") {
+      // sql-formatter has no Oracle/DuckDB grammar; PostgreSQL is the closest
+      // permissive superset for both.
+      effectiveDialect = detected === "oracle" || detected === "duckdb" ? "postgres" : detected;
+    }
+  }
   const options = sqlFormatterOptions(settings);
-  const language = formatterLanguage(dialect);
+  const language = formatterLanguage(effectiveDialect);
 
   // Protect federated table references (connection.schema.table) before formatting
   // so the formatter doesn't mangle multi-part identifiers.
@@ -101,7 +114,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     try {
       const { format } = await import("sql-formatter");
       const options = sqlFormatterOptions(settings);
-      const language = formatterLanguage(dialect);
+      const language = formatterLanguage(effectiveDialect);
       return format(sql, { language, ...options });
     } catch {
       // fall through to the original error below

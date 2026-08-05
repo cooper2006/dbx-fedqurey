@@ -1,6 +1,7 @@
 import * as api from "@/lib/backend/api";
 import { mongoCommandRangeAtCursor } from "@/lib/sql/sqlStatementRanges";
 import type { DatabaseType } from "@/types/database";
+import { stripIdentifierQuotes as _stripIdentifierQuotes } from "./identifierQuotes";
 
 export type ExecuteMode = "all" | "current";
 
@@ -59,7 +60,7 @@ export function resolveExecutableSql(fullSql: string, selectedSql: string, optio
 
 export async function resolveExecutableSqlWithBackend(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType }): Promise<string> {
   const trimmedSelection = selectedSql.trim();
-  if (trimmedSelection) return trimmedSelection;
+  if (trimmedSelection) return _stripIdentifierQuotes(trimmedSelection, options?.databaseType === "mysql" ? "mysql" : "postgres");
 
   if (options?.databaseType === "mongodb") {
     if (options.mode === "current" && options.cursorPos !== undefined) {
@@ -69,8 +70,9 @@ export async function resolveExecutableSqlWithBackend(fullSql: string, selectedS
   }
 
   if (options?.mode === "current" && options.cursorPos !== undefined) {
-    return await api.findStatementAtCursor(fullSql, options.cursorPos, options.databaseType);
+    const stmt = await api.findStatementAtCursor(fullSql, options.cursorPos, options.databaseType);
+    return _stripIdentifierQuotes(stmt, options?.databaseType === "mysql" ? "mysql" : "postgres");
   }
 
-  return fullSql;
+  return _stripIdentifierQuotes(fullSql, options?.databaseType === "mysql" ? "mysql" : "postgres");
 }

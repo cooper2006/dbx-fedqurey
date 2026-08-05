@@ -656,5 +656,10 @@ jobs:
       - name: Java agent tests and packages
         run: ./gradlew test shadowJar --continue
 
+      - name: Calcite federated integration tests
+        # Explicitly run the cross-connection federated query integration test so
+        # failures are surfaced in CI rather than being hidden behind --continue.
+        run: ./gradlew :calcite:test --tests 'com.dbx.agent.calcite.CalciteAgentFederatedIntegrationTest'
+
       - name: Agent jar validation
         run: python3 scripts/validate_agent_jars.py

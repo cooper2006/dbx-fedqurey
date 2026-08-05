@@ -528,6 +528,21 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function connectionErrorMessage(error: unknown): string {
     if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object") {
+      const obj = error as Record<string, unknown>;
+      // Backend structured errors commonly carry the message under these fields.
+      for (const key of ["message", "error", "msg", "detail"]) {
+        const v = obj[key];
+        if (typeof v === "string" && v.length > 0) return v;
+        if (v instanceof Error) return v.message;
+      }
+      try {
+        return JSON.stringify(error);
+      } catch {
+        return String(error);
+      }
+    }
     return String(error);
   }
 

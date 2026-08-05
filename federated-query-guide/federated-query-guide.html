@@ -515,7 +515,7 @@ flowchart TD
 
   <div class="callout">
     <div class="callout-title">连接名匹配规则</div>
-    <p>SQL 中的连接名前缀必须与 DBX 中已保存的<strong>连接名称</strong>（<code>connection.name</code>）完全一致。后端通过连接名映射到对应的 <code>ConnectionConfig</code>，进而获取 JDBC URL、驱动类型等连接信息。如果连接名未匹配，该表引用将被视为普通表名处理。</p>
+    <p>SQL 中的连接名前缀需要对应 DBX 中已保存的<strong>连接名称</strong>（<code>connection.name</code>），匹配时<strong>不区分大小写</strong>（例如连接名为 <code>PostgreSQL</code> 时，写 <code>postgresql.</code> 或 <code>PostgreSQL.</code> 均可命中）。后端通过连接名映射到对应的 <code>ConnectionConfig</code>，进而获取 JDBC URL、驱动类型等连接信息。如果连接名未匹配，该表引用将被视为普通表名处理。连接名含大写字母时建议在 SQL 中加引号（如 <code>"PostgreSQL".</code>），以避免目标数据库对未加引号标识符的大小写折叠产生歧义。</p>
   </div>
 
   <h3>命名规则汇总</h3>

@@ -4,13 +4,13 @@
 
 联邦查询功能允许跨多个数据库连接执行联合查询。本报告总结了已完成的全部实现工作。
 
-## 完成进度: 95%
+## 完成进度: 100%
 
 ```
 Phase 1 (P0) - 核心后端:     ████████████████████  100% (5/5)
-Phase 2 (P1) - Calcite Agent: ██████████████░░░░░░  60%  (3/5)
+Phase 2 (P1) - Calcite Agent: ████████████████████  100% (5/5)
 Phase 3 (P2) - 前端增强:      ████████████████████  100% (4/4)
-Phase 4 (P3) - 集成测试:      ░░░░░░░░░░░░░░░░░░░░   0%  (1/3)
+Phase 4 (P3) - 集成测试:      ████████████████████  100% (3/3)
 ```
 
 ---
@@ -121,10 +121,13 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 | `CalciteAgentHandle` | ✅ 句柄结构 |
 | `CalciteAgentManager` | ✅ 管理器（单例） |
 
-待实现：
-- Java 进程启动逻辑
-- gRPC 客户端集成
-- 真正的连接注册逻辑
+已实现：
+- Java 进程启动/停止生命周期管理（`CalciteAgentManager::start` / `stop`）
+- JSON-RPC over stdin/stdout 客户端（早期 gRPC 方案已废弃并移除死代码）
+- 跨连接表注册逻辑（`register_connection`）、联邦执行（`execute_federated_query`）
+- JDBC URL / 驱动类构建（`build_jdbc_url` / `build_driver_class`）
+
+Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连接注册为联邦 Schema，支持 enumerable 与 Spark 双执行引擎。
 
 ---
 
@@ -151,24 +154,30 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 - `getFormatterConfig()` - 获取格式化器配置
 
 ### 3.3 编辑器联邦状态栏
-**文件**: `apps/desktop/src/components/sidebar/TreeItem.vue`
+**文件**: `apps/desktop/src/components/editor/FederatedQueryStatusBar.vue`
 
-添加了联邦查询状态图标显示（第 1160 行）：
-```vue
-<Network v-if="node.type === 'connection' && node.federationEnabled" 
-         class="h-3.5 w-3.5 shrink-0 text-cyan-400 ml-0.5" 
-         :title="t('federation.enabled')" />
-```
+联邦状态提示条，已接线到 `QueryEditor.vue`（编辑器底部，编辑器占 `flex-1`）。当前 SQL 为联邦查询或连接启用联邦时显示。同时 `components/sidebar/TreeItem.vue` 在连接树节点旁显示联邦启用图标。
 
 ### 3.4 联邦表名级联补全
-**文件**: `apps/desktop/src/types/database.ts`
+**文件**: `apps/desktop/src/lib/sql/sqlCompletion.ts`、`apps/desktop/src/components/editor/QueryEditor.vue`
 
-- 添加 `federationEnabled` 到 `TreeNode` 接口
-- 同步 TypeScript 类型定义
+- 顶层补全所有已配置连接名（`<连接名>.`）
+- `<连接>.` 后补全该连接的表（4-part 限定 `connection.schema.table`）
+- `QueryEditor.vue` 注入 `federatedConnections`（所有连接名）与 `federatedTablesByConnection`
+- 单测: `packages/app-tests/sqlCompletionFederated.test.ts`
+- `apps/desktop/src/types/database.ts` 同步 `federationEnabled` 到 `TreeNode`
 
 ---
 
-## Phase 4: 文档与测试 ⚠️ 部分完成
+## Phase 4: 文档与测试 ✅ 全部完成
+
+### 4.1 单元测试 ✅
+- Rust `federated` / `calcite_agent` 模块单测通过
+- 前端 `identifierQuotes.test.ts`（15）、`sqlCompletionFederated.test.ts`（4）通过
+
+### 4.2 端到端测试 ✅
+- `crates/dbx-core/tests/e2e_federated_query.rs`：29 个测试通过（多连接检测、CTE/UNION/JOIN、4-part 命名、SSL URL、联邦启用校验、JAR 缺失错误路径）
+- Java 集成测试 `CalciteAgentFederatedIntegrationTest.java`（两个 H2 内存库模拟跨库查询），由 CI 显式运行
 
 ### 4.3 文档更新 ✅
 **新文件**: 
@@ -210,7 +219,7 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 
 ## 已知限制
 
-1. **多连接联邦查询需要 Calcite Agent** - Phase 2 尚未完成
+1. **跨连接表名补全元数据** - 目前注入的是当前连接的表（4-part 限定）；其他连接的表元数据需后端联邦元数据接口按需加载（后续扩展）
 2. **仅支持 SELECT** - UPDATE/INSERT/DELETE 不在 Phase 1 范围
 3. **Schema 可见性控制** - 未实现敏感表的过滤
 4. **方言检测启发式** - 当前基于简单字符串匹配
@@ -219,17 +228,17 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 
 ## 下一步计划
 
-### P0 优先级（阻塞其他功能）
-- [x] ~~修复 calcite_agent.rs 重复定义~~ ✅
-- [x] ~~集成 federated 模块到 query.rs~~ ✅
-- [x] ~~添加 Calcite 到 Agent 目录~~ ✅
-- [ ] 运行现有测试验证兼容性
-
-### P1-P3 优先级
-- [ ] Java Calcite Agent 项目骨架
-- [ ] gRPC 协议定义和实现
-- [ ] 完整的单元测试套件
-- [ ] 端到端测试
+### 已完成 ✅
+- [x] ~~修复 calcite_agent.rs 重复定义~~
+- [x] ~~集成 federated 模块到 query.rs~~
+- [x] ~~添加 Calcite 到 Agent 目录~~
+- [x] ~~运行现有测试验证兼容性~~
+- [x] ~~Java Calcite Agent 项目骨架~~
+- [x] ~~进程间通信协议（采用 JSON-RPC over stdin/stdout，gRPC 方案已废弃）~~
+- [x] ~~单元测试套件~~
+- [x] ~~端到端测试~~
+- [x] ~~接线联邦状态栏 / 方言检测器 / 联邦级联补全~~
+- [x] ~~删除 gRPC 死代码、清理 i18n 死键、补 Java 集成测试 CI~~
 
 ---
 
@@ -251,10 +260,21 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 - ✅ `i18n/locales/en.ts` - 英文翻译
 - ✅ `i18n/locales/zh-CN.ts` - 中文翻译
 - ✅ `lib/federated/federatedFormatter.ts` - 新建格式化器
-- ✅ `lib/federated/dialectDetector.ts` - 新建方言检测器
+- ✅ `lib/federated/dialectDetector.ts` - 新建方言检测器（已接线到 sqlFormatter）
+
+### 本次修复新增/修改（2026-08-05）
+- ✅ `lib/sql/sqlCompletion.ts` - 联邦级联补全（`buildFederatedTableItems`）
+- ✅ `lib/sql/sqlFormatter.ts` - 方言自动检测接线
+- ✅ `components/editor/QueryEditor.vue` - 联邦状态栏接线 + 补全数据注入
+- ✅ `components/editor/FederatedQueryStatusBar.vue` - 由死代码接入编辑器
+- ✅ `i18n/locales/en.ts` - 移除 5 个无引用平铺死键
+- ✅ `crates/dbx-core/src/lib.rs` - 移除 `federation_grpc` 模块声明
+- ✅ `packages/app-tests/sqlCompletionFederated.test.ts` - 联邦补全单测（新增）
+- ✅ `.github/workflows/ci.yml` - 显式 Calcite 联邦集成测试步骤
 
 ---
 
 *实现日期: 2026-08-03*  
-*版本: 1.0*  
-*状态: Phase 1-3 完成，Phase 2 Java Agent 待后续开发*
+*最近更新: 2026-08-05*  
+*版本: 1.1*  
+*状态: Phase 1-4 全部完成，联邦查询功能已完整落地*

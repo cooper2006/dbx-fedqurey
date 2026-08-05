@@ -2,7 +2,7 @@
 //! 
 //! This module manages which schemas and tables are visible for federated query operations.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for schema and table visibility in federated queries
@@ -145,17 +145,10 @@ impl FederationVisibilityConfig {
 
 /// Helper to identify system/internal schemas
 fn is_system_schema(schema: &str) -> bool {
+    // Note: schema is lowercased before matching, so only lowercase variants are valid.
     matches!(
         schema.to_lowercase().as_str(),
-        "information_schema"
-            | "pg_catalog"
-            | "sys"
-            | "INFORMATION_SCHEMA"
-            | "PG_CATALOG"
-            | "sys"
-            | "mysql"
-            | "performance_schema"
-            | "sys"
+        "information_schema" | "pg_catalog" | "sys" | "mysql" | "performance_schema"
     )
 }
 

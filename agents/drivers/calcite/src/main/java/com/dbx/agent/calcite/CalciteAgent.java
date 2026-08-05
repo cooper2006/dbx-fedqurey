@@ -17,6 +17,7 @@ import org.apache.calcite.adapter.jdbc.JdbcSchema;
 import org.apache.calcite.jdbc.CalciteConnection;
 import org.apache.calcite.schema.Schema;
 import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.schema.impl.AbstractSchema;
 
 /**
  * Apache Calcite 联邦查询 Agent
@@ -33,6 +34,9 @@ public class CalciteAgent {
     private static final Logger logger = LoggerFactory.getLogger(CalciteAgent.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    // 执行引擎: "enumerable"（默认，Janino 编译器）或 "spark"（Spark RDD）
+    private final String engine;
+
     // 已注册的数据源配置
     private final ConcurrentHashMap<String, DataSourceConfig> registeredSources = new ConcurrentHashMap<>();
 
@@ -40,10 +44,39 @@ public class CalciteAgent {
     private CalciteConnection calciteConnection;
     private final Object calciteLock = new Object();
 
+    /**
+     * 默认构造函数，使用 enumerable 引擎
+     */
+    public CalciteAgent() {
+        this("enumerable");
+    }
+
+    /**
+     * 指定执行引擎的构造函数
+     *
+     * @param engine "enumerable" 或 "spark"
+     */
+    public CalciteAgent(String engine) {
+        this.engine = engine != null ? engine.toLowerCase() : "enumerable";
+    }
+
     public static void main(String[] args) {
         logger.info("Starting Calcite Federated Query Agent...");
 
-        CalciteAgent agent = new CalciteAgent();
+        // 设置 JVM 级别的 Calcite 系统属性
+        // 缓存动态生成的 Bindable Java 类，减少重复编译开销（默认 0 = 不缓存）
+        System.setProperty("calcite.bindableCacheMaxSize", "1000");
+
+        // 执行引擎选择：通过环境变量 CALCITE_ENGINE=spark 切换
+        // 默认: enumerable（Janino 编译器，轻量级）
+        // spark: 启用 Spark 引擎（需要 classpath 中包含 calcite-spark 依赖）
+        String engine = System.getenv("CALCITE_ENGINE");
+        if (engine == null || engine.isEmpty()) {
+            engine = "enumerable";
+        }
+        logger.info("Calcite execution engine: {}", engine);
+
+        CalciteAgent agent = new CalciteAgent(engine);
         try {
             agent.runLoop();
         } catch (Exception e) {
@@ -84,8 +117,9 @@ public class CalciteAgent {
         ObjectNode request = MAPPER.readValue(jsonRequest, ObjectNode.class);
 
         String method = request.path("method").asText();
-        ObjectNode params = request.path("params").isObject()
-            ? request.path("params")
+        com.fasterxml.jackson.databind.JsonNode paramsNode = request.path("params");
+        ObjectNode params = paramsNode.isObject()
+            ? (ObjectNode) paramsNode
             : MAPPER.createObjectNode();
         String id = request.path("id").asText(null);
 
@@ -201,56 +235,65 @@ public class CalciteAgent {
                 throw new RuntimeException("No data sources registered. Call registerSource first.");
             }
 
-            try (Connection conn = calciteConnection;
-                 PreparedStatement stmt = conn.prepareStatement(rewrittenSql)) {
-
+            // 注意：不使用 try-with-resources 关闭 calciteConnection，因为它是跨查询复用的共享连接
+            PreparedStatement stmt = null;
+            ResultSet rs = null;
+            try {
+                stmt = calciteConnection.prepareStatement(rewrittenSql);
                 stmt.setMaxRows(maxRows);
                 stmt.setQueryTimeout((int) Math.min(timeoutMs / 1000, Integer.MAX_VALUE));
 
-                try (ResultSet rs = stmt.executeQuery()) {
-                    ResultSetMetaData rsMeta = rs.getMetaData();
-                    int columnCount = rsMeta.getColumnCount();
+                rs = stmt.executeQuery();
+                ResultSetMetaData rsMeta = rs.getMetaData();
+                int columnCount = rsMeta.getColumnCount();
 
-                    List<String> columns = new ArrayList<>();
+                List<String> columns = new ArrayList<>();
+                for (int i = 1; i <= columnCount; i++) {
+                    columns.add(rsMeta.getColumnLabel(i));
+                }
+
+                List<List<Object>> rows = new ArrayList<>();
+                int rowCount = 0;
+                while (rs.next() && rowCount < maxRows) {
+                    List<Object> row = new ArrayList<>(columnCount);
                     for (int i = 1; i <= columnCount; i++) {
-                        columns.add(rsMeta.getColumnLabel(i));
-                    }
-
-                    List<List<Object>> rows = new ArrayList<>();
-                    int rowCount = 0;
-                    while (rs.next() && rowCount < maxRows) {
-                        List<Object> row = new ArrayList<>(columnCount);
-                        for (int i = 1; i <= columnCount; i++) {
-                            Object value = rs.getObject(i);
-                            // 处理特殊类型
-                            if (value instanceof byte[]) {
-                                row.add("[BINARY]");
-                            } else if (value instanceof java.sql.Timestamp) {
-                                row.add(value.toString());
-                            } else if (value instanceof java.sql.Date) {
-                                row.add(value.toString());
-                            } else if (value instanceof java.sql.Time) {
-                                row.add(value.toString());
-                            } else if (value instanceof java.math.BigDecimal) {
-                                row.add(((java.math.BigDecimal) value).toPlainString());
-                            } else {
-                                row.add(value);
-                            }
+                        Object value = rs.getObject(i);
+                        // 处理特殊类型
+                        if (value instanceof byte[]) {
+                            row.add("[BINARY]");
+                        } else if (value instanceof java.sql.Timestamp) {
+                            row.add(value.toString());
+                        } else if (value instanceof java.sql.Date) {
+                            row.add(value.toString());
+                        } else if (value instanceof java.sql.Time) {
+                            row.add(value.toString());
+                        } else if (value instanceof java.math.BigDecimal) {
+                            row.add(((java.math.BigDecimal) value).toPlainString());
+                        } else {
+                            row.add(value);
                         }
-                        rows.add(row);
-                        rowCount++;
                     }
+                    rows.add(row);
+                    rowCount++;
+                }
 
-                    long duration = System.currentTimeMillis() - startTime;
+                long duration = System.currentTimeMillis() - startTime;
 
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("columns", columns);
-                    result.put("rows", rows);
-                    result.put("rowCount", rowCount);
-                    result.put("durationMs", duration);
-                    result.put("success", true);
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("columns", columns);
+                result.put("rows", rows);
+                result.put("rowCount", rowCount);
+                result.put("durationMs", duration);
+                result.put("success", true);
 
-                    return createSuccessResponse(result, id);
+                return createSuccessResponse(result, id);
+            } finally {
+                // 只关闭 Statement 和 ResultSet，不关闭共享的 CalciteConnection
+                if (rs != null) {
+                    try { rs.close(); } catch (SQLException ignored) {}
+                }
+                if (stmt != null) {
+                    try { stmt.close(); } catch (SQLException ignored) {}
                 }
             }
         }
@@ -272,14 +315,23 @@ public class CalciteAgent {
             String explainSql = "EXPLAIN PLAN FOR " + rewrittenSql;
             String plan = "";
 
-            try (Connection conn = calciteConnection;
-                 PreparedStatement stmt = conn.prepareStatement(explainSql)) {
-                try (ResultSet rs = stmt.executeQuery()) {
-                    StringBuilder sb = new StringBuilder();
-                    while (rs.next()) {
-                        sb.append(rs.getString(1)).append("\n");
-                    }
-                    plan = sb.toString();
+            // 注意：不使用 try-with-resources 关闭 calciteConnection，因为它是跨查询复用的共享连接
+            PreparedStatement stmt = null;
+            ResultSet rs = null;
+            try {
+                stmt = calciteConnection.prepareStatement(explainSql);
+                rs = stmt.executeQuery();
+                StringBuilder sb = new StringBuilder();
+                while (rs.next()) {
+                    sb.append(rs.getString(1)).append("\n");
+                }
+                plan = sb.toString();
+            } finally {
+                if (rs != null) {
+                    try { rs.close(); } catch (SQLException ignored) {}
+                }
+                if (stmt != null) {
+                    try { stmt.close(); } catch (SQLException ignored) {}
                 }
             }
 
@@ -349,22 +401,30 @@ public class CalciteAgent {
 
             SchemaPlus rootSchema = calciteConnection.getRootSchema();
 
-            // 创建 JDBC 连接池（使用单个连接，Calcite 会在需要时获取元数据）
-            Connection rawConn = DriverManager.getConnection(config.jdbcUrl, config.username, config.password);
+            // 创建 DataSource 包装器（Calcite 的 JdbcSchema 需要 DataSource 而非 Connection）
+            javax.sql.DataSource dataSource = new SimpleDataSource(config.jdbcUrl, config.username, config.password);
 
-            // 使用 JdbcSchema 将 JDBC 连接的 Schema 注册到 Calcite
-            // JdbcSchema 会自动发现表和列信息
+            // 查询数据库默认 Schema（H2 为 "PUBLIC"，PostgreSQL 为 "public" 等）
+            String defaultSchema;
+            try (Connection metaConn = dataSource.getConnection()) {
+                defaultSchema = metaConn.getSchema();
+            }
+
+            // 使用 connectionId 作为 JdbcSchema 的唯一名称
+            // 这样每个连接的 JdbcConvention 名称不同，避免 Calcite 优化器规则冲突
+            // （多个名为 "PUBLIC" 的子 Schema 会导致 JdbcToEnumerableConverterRule 重复注册）
             JdbcSchema jdbcSchema = JdbcSchema.create(
                 rootSchema,
-                config.connectionId,
-                rawConn,
-                null,  // catalog - 使用默认
-                null   // schema - 使用默认
+                config.connectionId,  // 唯一名称 → 唯一 Convention
+                dataSource,
+                null,           // catalog - 使用默认
+                defaultSchema   // 数据库默认 Schema
             );
 
             rootSchema.add(config.connectionId, jdbcSchema);
 
-            logger.info("Registered Calcite schema for connection: {}", config.connectionId);
+            logger.info("Registered Calcite schema for connection: {} (default schema: {})",
+                config.connectionId, defaultSchema);
         }
     }
 
@@ -403,8 +463,42 @@ public class CalciteAgent {
 
             // 启用 Calcite 的查询优化
             calciteConnection.getProperties().setProperty("calciteOptimize", "true");
+            // 关闭大小写敏感：不同数据库对标识符大小写处理不同
+            // （H2 用大写、PostgreSQL 用小写、MySQL 依赖操作系统）
+            // 关闭后 Calcite 在查找表/列时忽略大小写
+            calciteConnection.getProperties().setProperty("caseSensitive", "false");
 
-            logger.info("Initialized Calcite connection");
+            // ===== 百万级数据量优化参数 =====
+            // 启用物化视图重写：CTE 和重复子查询结果可被物化，避免重复计算
+            calciteConnection.getProperties().setProperty("materializationsEnabled", "true");
+            // 去关联化：将相关子查询转换为 Join，减少嵌套循环
+            calciteConnection.getProperties().setProperty("forceDecorrelate", "true");
+            // 大结果集自动存入临时表，减少内存压力
+            calciteConnection.getProperties().setProperty("autoTemp", "true");
+            // 注：topDownOpt 在 1.37.0 的 JdbcSchema 联邦场景下触发 EnumerableMergeJoin 断言错误，暂不启用
+
+            // ===== 执行引擎选择 =====
+            if ("spark".equals(engine)) {
+                // Spark 引擎：通过反射加载 SparkHandlerImpl
+                // 需要 classpath 中包含 calcite-spark 依赖
+                // Spark 提供 spill-to-disk 能力，适合百万级以上数据量
+                // 注意：calcite-spark 1.37.0 依赖 Spark 2.2.2 + Scala 2.10
+                try {
+                    calciteConnection.getProperties().setProperty("spark", "true");
+                    logger.info("Spark engine enabled (spark=true)");
+                } catch (Exception e) {
+                    logger.warn("Failed to enable Spark engine, falling back to enumerable: {}",
+                        e.getMessage());
+                    calciteConnection.getProperties().setProperty("spark", "false");
+                }
+            } else {
+                // Enumerable 引擎：使用 Janino 编译器在运行时编译生成的 Java 代码
+                // 轻量级，无额外依赖，适合中小数据量
+                calciteConnection.getProperties().setProperty("spark", "false");
+            }
+
+            logger.info("Initialized Calcite connection (engine={}, caseSensitive=false, " +
+                "materializations=true, forceDecorrelate=true, autoTemp=true)", engine);
         }
     }
 
@@ -414,19 +508,21 @@ public class CalciteAgent {
      * Calcite 会通过已注册的 Schema 自动路由到正确的数据源
      */
     private String rewriteFederatedSql(String sql) {
-        // 使用正则匹配 连接名.Schema.表名 模式
-        // 需要确保连接名匹配已注册的数据源
+        // 将 连接名.Schema.表名 和 连接名.Database.Schema.表名 重写为 "连接名"."表名"
+        // 因为每个连接注册为单个 JdbcSchema（映射到数据库默认 Schema），表直接在连接名下可访问
         String result = sql;
 
         for (String connId : registeredSources.keySet()) {
-            // 匹配 connId.schema.table 或 connId.database.schema.table
-            // 替换为 "connId"."schema"."table"
-            String pattern = "(?i)\\b" + java.util.regex.Pattern.quote(connId) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)";
-            result = result.replaceAll(pattern, "\"$1\".\"$2\"");
+            // 处理四段式：connId.database.schema.table → "connId"."table"
+            // 必须先处理四段式（更长的匹配），再处理三段式
+            String pattern4 = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
+                "\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)";
+            result = result.replaceAll(pattern4, "\"" + connId + "\".\"$3\"");
 
-            // 处理四段式：connId.database.schema.table
-            String pattern4 = "(?i)\\b" + java.util.regex.Pattern.quote(connId) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)";
-            result = result.replaceAll(pattern4, "\"$2\".\"$3\"");
+            // 匹配三段式 connId.schema.table → "connId"."table"
+            String pattern3 = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
+                "\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)";
+            result = result.replaceAll(pattern3, "\"" + connId + "\".\"$2\"");
         }
 
         return result;
@@ -434,7 +530,7 @@ public class CalciteAgent {
 
     // ========== 辅助方法 ==========
 
-    private String createSuccessResponse(Object result, String id) throws Exception {
+    String createSuccessResponse(Object result, String id) throws Exception {
         ObjectNode response = MAPPER.createObjectNode();
         response.put("jsonrpc", "2.0");
         response.set("result", MAPPER.valueToTree(result));
@@ -444,7 +540,7 @@ public class CalciteAgent {
         return MAPPER.writeValueAsString(response);
     }
 
-    private String createErrorResponse(String message) {
+    String createErrorResponse(String message) {
         try {
             ObjectNode response = MAPPER.createObjectNode();
             response.put("jsonrpc", "2.0");
@@ -475,5 +571,50 @@ public class CalciteAgent {
             this.password = password;
             this.driverClass = driverClass;
         }
+    }
+
+    /**
+     * 简单的 DataSource 实现，用于将 DriverManager 连接包装为 DataSource
+     * Calcite 的 JdbcSchema 需要 DataSource 接口
+     */
+    public static class SimpleDataSource implements javax.sql.DataSource {
+        private final String jdbcUrl;
+        private final String username;
+        private final String password;
+
+        SimpleDataSource(String jdbcUrl, String username, String password) {
+            this.jdbcUrl = jdbcUrl;
+            this.username = username;
+            this.password = password;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            return DriverManager.getConnection(jdbcUrl, username, password);
+        }
+
+        @Override
+        public Connection getConnection(String username, String password) throws SQLException {
+            return DriverManager.getConnection(jdbcUrl, username, password);
+        }
+
+        @Override
+        public java.io.PrintWriter getLogWriter() { return null; }
+        @Override
+        public void setLogWriter(java.io.PrintWriter out) {}
+        @Override
+        public void setLoginTimeout(int seconds) {}
+        @Override
+        public int getLoginTimeout() { return 0; }
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getLogger("SimpleDataSource");
+        }
+        @Override
+        public <T> T unwrap(Class<T> iface) throws SQLException {
+            throw new SQLException("Not a wrapper");
+        }
+        @Override
+        public boolean isWrapperFor(Class<?> iface) { return false; }
     }
 }

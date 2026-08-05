@@ -53,7 +53,6 @@ pub mod process;
 pub mod production_safety;
 pub mod prompt_template;
 pub mod calcite_agent;
-pub mod federation_grpc;
 pub mod federation_schema_visibility;
 pub mod federated;
 pub mod query;

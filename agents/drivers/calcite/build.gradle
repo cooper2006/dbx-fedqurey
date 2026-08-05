@@ -8,72 +8,99 @@ version = '1.0.0-SNAPSHOT'
 
 repositories {
     mavenCentral()
+    mavenLocal()
 }
+
+// ===== 执行引擎选择 =====
+// 通过 -Pengine=spark 或 -Pengine=enumerable 切换
+// 默认使用 enumerable（Janino 编译器，轻量级，无额外依赖）
+// spark 引擎需要额外的 Spark/Scala 依赖，适合百万级以上数据量
+ext.engine = project.findProperty('engine') ?: 'enumerable'
+
+// ===== 版本统一管理 =====
+// Calcite 1.39.0+ 将 calcite-spark 模块升级到 Spark 3.5.x / Scala 2.13
+// Spark 4.0.x 是首个官方支持 Java 21 的版本（仅支持 Scala 2.13）
+ext.calciteVersion = '1.39.0'
+ext.sparkVersion = '4.0.0'
+ext.scalaVersion = '2.13'
 
 dependencies {
     // Apache Calcite for federated query execution
-    implementation 'org.apache.calcite:calcite-core:1.37.0'
-    implementation 'org.apache.calcite:calcite-linq4j:1.37.0'
-    
-    // JDBC Drivers for federation — bundled in shadow JAR
-    // PostgreSQL 系（含 Gaussdb, OpenGauss, Kingbase, Highgo, Uxdb, Vastbase, Kwdb, Oscar）
-    implementation 'org.postgresql:postgresql:42.7.1'
-    // MySQL 系（含 Doris, StarRocks, Goldendb, Gbase, ManticoreSearch）
-    implementation 'mysql:mysql-connector-java:8.0.33'
-    implementation 'com.mysql:mysql-connector-j:8.0.33'
-    // SQL Server
-    implementation 'com.microsoft.sqlserver:mssql-jdbc:12.6.1.jre11'
-    // Oracle
-    implementation 'com.oracle.database.jdbc:ojdbc11:23.3.0.23.09'
-    // ClickHouse
-    implementation 'com.clickhouse:clickhouse-jdbc:0.6.0'
-    // IBM DB2
-    implementation 'com.ibm.db2:jcc:11.5.9.0'
-    // Hive
-    implementation 'org.apache.hive:hive-jdbc:3.1.3:standalone'
-    // Snowflake
-    implementation 'net.snowflake:snowflake-jdbc:3.14.5'
-    // Firebird
-    implementation 'org.firebirdsql.jdbc:jaybird:5.0.4.java11'
-    // Trino
-    implementation 'io.trino:trino-jdbc:435'
-    // Vertica
-    implementation 'com.vertica.jdbc:vertica-jdbc:24.1.0-0'
-    // SAP HANA
-    implementation 'com.sap.cloud.db.jdbc:ngdbc:2.20.17'
-    // Teradata
-    implementation 'com.teradata.jdbc:terajdbc4:17.20.00.14'
-    // Exasol
-    implementation 'com.exasol:exasol-jdbc:7.1.20'
-    // Databend
-    implementation 'com.databend:databend-jdbc:0.3.10'
-    // Informix
-    implementation 'com.ibm.informix:jdbc:4.50.10.1'
-    // Kylin
-    implementation 'org.apache.kylin:kylin-jdbc:4.0.3'
-    // MS Access (UCanAccess)
-    implementation 'net.sf.ucanaccess:ucanaccess:5.1.2'
-    // H2
+    implementation "org.apache.calcite:calcite-core:${calciteVersion}"
+    implementation "org.apache.calcite:calcite-linq4j:${calciteVersion}"
+
+    // H2 — 用于测试的内存数据库
     implementation 'com.h2database:h2:2.2.224'
-    
-    // 以下驱动需要手动安装到本地 Maven 仓库或从厂商获取（未在 Maven Central 公开）：
-    // - 达梦 (Dameng): dmjdbc.jar — 从 https://eco.dameng.com 下载
-    // - 人大金仓 (YashanDB): yasdb-jdbc.jar — 从 https://doc.yashandb.com 下载
-    // - 虚谷 (Xugu): xugu_jdbc.jar — 从厂商获取
-    // - SunDB: sundb-jdbc.jar — 从 SUNJESOFT 获取
-    // - Gbase: gbase-connector-java.jar — 从厂商获取
-    // - Goldendb: 使用 MySQL 驱动
-    // - Databricks: com.databricks:databricks-jdbc — 从 https://databricks.com/spark/jdbc-drivers-download 下载
-    // - BigQuery: com.simba:simba-jdbc — 从 Google Cloud 获取
-    // - Spark: com.simba:spark-jdbc — 从厂商获取
-    // - 国产 PG 兼容数据库（Gaussdb, OpenGauss 等）: 使用 PostgreSQL 驱动
-    
+
+    // PostgreSQL（Maven Central 可用）
+    implementation 'org.postgresql:postgresql:42.7.1'
+    // MySQL（Maven Central 可用）
+    implementation 'mysql:mysql-connector-java:8.0.33'
+    // SQL Server（Maven Central 可用）
+    implementation 'com.microsoft.sqlserver:mssql-jdbc:12.6.1.jre11'
+    // Oracle（Maven Central 可用）
+    implementation 'com.oracle.database.jdbc:ojdbc11:23.3.0.23.09'
+    // ClickHouse（Maven Central 可用）
+    implementation 'com.clickhouse:clickhouse-jdbc:0.6.0'
+    // IBM DB2（Maven Central 可用）
+    implementation 'com.ibm.db2:jcc:11.5.9.0'
+    // Trino（Maven Central 可用）
+    implementation 'io.trino:trino-jdbc:435'
+    // Snowflake（Maven Central 可用）
+    implementation 'net.snowflake:snowflake-jdbc:3.14.5'
+    // Firebird（Maven Central 可用）
+    implementation 'org.firebirdsql.jdbc:jaybird:5.0.4.java11'
+    // Informix（Maven Central 可用）
+    implementation 'com.ibm.informix:jdbc:4.50.10.1'
+    // Exasol（Maven Central 可用）
+    implementation 'com.exasol:exasol-jdbc:7.1.20'
+    // Kylin（Maven Central 可用）
+    implementation 'org.apache.kylin:kylin-jdbc:4.0.3'
+
+    // 以下驱动不在 Maven Central，需手动安装到 mavenLocal：
+    // - Teradata: com.teradata.jdbc:terajdbc4
+    // - Databend: com.databend:databend-jdbc
+    // - MS Access (UCanAccess): net.sf.ucanaccess:ucanaccess
+    // - Vertica: com.vertica.jdbc:vertica-jdbc
+    // - SAP HANA: com.sap.cloud.db.jdbc:ngdbc
+    // - Hive: org.apache.hive:hive-jdbc
+    // - 达梦/人大金仓/虚谷/SunDB/Gbase/Databricks/BigQuery/Spark 等需从厂商获取
+
     // JSON processing for RPC
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.16.1'
-    
+
     // Logging
     implementation 'org.slf4j:slf4j-simple:2.0.13'
-    
+
+    // ===== Spark 引擎依赖（仅当 -Pengine=spark 时启用）=====
+    // Calcite 1.39.0 的 calcite-spark 模块已适配 Spark 3.5.x / Scala 2.13
+    // 此处覆盖为 Spark 4.0.x — 首个官方支持 Java 21 的 Spark 版本
+    // Spark 4.0 仅支持 Scala 2.13（已移除 Scala 2.12 支持）
+    if (engine == 'spark') {
+        println "==> 启用 Spark 执行引擎 (Spark ${sparkVersion} + Scala ${scalaVersion}, Java 21 兼容)"
+        implementation "org.apache.calcite:calcite-spark:${calciteVersion}"
+        // 覆盖 Spark 依赖为 4.0.x，排除 calcite-spark 传递的旧版 Spark
+        // 排除不需要的传递依赖以避免 classifier 冲突（avro-mapred hadoop2 classifier 在 Maven Central 缺失）
+        implementation("org.apache.spark:spark-core_${scalaVersion}:${sparkVersion}") {
+            exclude group: 'org.scala-lang', module: 'scala-library'
+            exclude group: 'com.google.guava', module: 'guava'
+            exclude group: 'org.apache.avro', module: 'avro-mapred'
+            exclude group: 'org.apache.hadoop', module: 'hadoop-client'
+            exclude group: 'org.apache.hadoop', module: 'hadoop-client-api'
+            exclude group: 'org.apache.hadoop', module: 'hadoop-client-runtime'
+        }
+        // Scala 2.13 运行时
+        implementation 'org.scala-lang:scala-library:2.13.16'
+        // Spark 4.0 运行时依赖（与 Calcite 共存）
+        runtimeOnly 'com.google.guava:guava:33.4.0-jre'
+        // Spark 4.0 使用 log4j2
+        runtimeOnly 'org.apache.logging.log4j:log4j-slf4j2-impl:2.24.3'
+        runtimeOnly 'org.apache.logging.log4j:log4j-api:2.24.3'
+        runtimeOnly 'org.apache.logging.log4j:log4j-core:2.24.3'
+    } else {
+        println '==> 使用默认 Enumerable 引擎 (Janino 编译器)'
+    }
+
     // Test dependencies
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
@@ -83,14 +110,21 @@ shadowJar {
     archiveBaseName.set('dbx-agent-calcite')
     archiveClassifier.set('')
     archiveVersion.set('')
-    
-    // Include all dependencies in shadow JAR
+
     manifest {
         attributes 'Main-Class': 'com.dbx.agent.calcite.CalciteAgent'
     }
-    
-    // Merge service files
+
     mergeServiceFiles()
+
+    // 允许 ZIP64 格式（条目超过 65535 时需要）
+    zip64 = true
+
+    // Spark 模式下排除冲突的依赖
+    if (engine == 'spark') {
+        // 排除 Spark 自带的旧版依赖，避免与 Calcite 冲突
+        exclude 'META-INF/versions/9/**'
+    }
 }
 
 java {
@@ -103,7 +137,6 @@ tasks.withType(Test).configureEach {
     useJUnitPlatform()
 }
 
-// Source sets for Calcite Agent
 sourceSets {
     main {
         java {

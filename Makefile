@@ -3,7 +3,7 @@
 PNPM ?= pnpm
 TAURI_DEV_PORT ?= 1420
 
-.PHONY: help install docs-install check-tauri-dev-port dev dev-fast dev-web dev-backend build package clean docs docs-build check test cargo-check-fast cargo-test-fast db db-list db-verify db-down db-reset db-check db-completion
+.PHONY: help install docs-install check-tauri-dev-port dev dev-fast dev-web dev-backend build package package-fast clean docs docs-build check test cargo-check-fast cargo-test-fast db db-list db-verify db-down db-reset db-check db-completion
 
 export DB
 export DB_VERSION
@@ -30,6 +30,7 @@ help:
 	@printf '  %-23s %s\n' 'make dev-backend' 'Start the web backend development server'
 	@printf '  %-23s %s\n' 'make build' 'Run type checks and build the desktop frontend'
 	@printf '  %-23s %s\n' 'make package' 'Build the desktop app package'
+	@printf '  %-23s %s\n' 'make package-fast' 'Build with minimal features (duckdb-sidecar only) for faster compile'
 	@printf '  %-23s %s\n' 'make clean' 'Remove local Rust build artifacts and caches'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Docs:'
@@ -88,6 +89,9 @@ build: node_modules/.modules.yaml
 
 package: node_modules/.modules.yaml
 	$(PNPM) tauri build
+
+package-fast: node_modules/.modules.yaml
+	$(PNPM) tauri build -- --no-default-features --features duckdb-sidecar
 
 clean:
 	cargo clean

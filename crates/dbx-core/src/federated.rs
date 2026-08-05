@@ -71,10 +71,11 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
         }
     };
 
-    // Build a map from connection name to config for quick lookup
-    let conn_map: HashMap<&str, &ConnectionConfig> = connections
+    // Build a map from lowercased connection name to config for quick lookup.
+    // Lookups are case-insensitive so `postgresql` matches a connection named `PostgreSQL`.
+    let conn_map: HashMap<String, &ConnectionConfig> = connections
         .iter()
-        .map(|c| (c.name.as_str(), c))
+        .map(|c| (c.name.to_lowercase(), c))
         .collect();
 
     // Walk through all statements and extract table references
@@ -109,7 +110,7 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
 /// Extract table references from a statement, detecting federation patterns
 fn extract_table_refs(
     stmt: &Statement,
-    conn_map: &HashMap<&str, &ConnectionConfig>,
+    conn_map: &HashMap<String, &ConnectionConfig>,
     table_refs: &mut Vec<FederatedTableRef>,
     uses_federation: &mut bool,
 ) {
@@ -127,9 +128,9 @@ fn extract_table_refs(
         if parts.len() >= 3 {
             // 3 parts: connection.schema.table (PostgreSQL) or connection.database.table (MySQL)
             // 4 parts: connection.database.schema.table (full qualified)
-            // Try to match the first part as a connection name
+            // Try to match the first part as a connection name (case-insensitive)
             let conn_name = parts[0];
-            if conn_map.contains_key(conn_name) {
+            if let Some(config) = conn_map.get(&conn_name.to_lowercase()) {
                 *uses_federation = true;
                 let (database_name, schema_name, table_name) = if parts.len() >= 4 {
                     // connection.database.schema.table
@@ -139,9 +140,11 @@ fn extract_table_refs(
                     (None, Some(parts[1].to_string()), parts[2].to_string())
                 };
 
+                // Use the canonical connection name from the config so downstream
+                // matching (single_connection / rewrite / validation) is consistent.
                 table_refs.push(FederatedTableRef {
                     original_name: name.to_string(),
-                    connection_name: conn_name.to_string(),
+                    connection_name: config.name.clone(),
                     database_name,
                     schema_name,
                     table_name,
@@ -392,6 +395,31 @@ mod tests {
             database_info: None,
             federation_enabled: true,
         }
+    }
+
+    #[test]
+    fn test_case_insensitive_connection_name() {
+        // Connection is named "PostgreSQL" but SQL references it as lowercase "postgresql".
+        let conn = make_test_connection("PostgreSQL", DatabaseType::Postgres, "mydb");
+        let sql = "SELECT u.id FROM postgresql.public.users u WHERE u.active = true";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+
+        assert!(analysis.uses_federation_syntax, "should match connection case-insensitively");
+        assert!(analysis.is_single_connection);
+        // Canonical (config) connection name is used downstream.
+        assert_eq!(analysis.single_connection, Some("PostgreSQL".to_string()));
+        assert_eq!(analysis.table_refs.len(), 1);
+        assert_eq!(analysis.table_refs[0].connection_name, "PostgreSQL");
+        assert_eq!(analysis.table_refs[0].schema_name, Some("public".to_string()));
+        assert_eq!(analysis.table_refs[0].table_name, "users");
+
+        // Rewrite must strip the lowercase prefix and produce the target table ref.
+        let rewritten = rewrite_federated_sql(sql, &analysis).expect("rewrite should succeed");
+        assert!(
+            rewritten.contains("public.users") && !rewritten.contains("postgresql"),
+            "rewritten SQL should drop the connection prefix, got: {rewritten}"
+        );
     }
 
     #[test]

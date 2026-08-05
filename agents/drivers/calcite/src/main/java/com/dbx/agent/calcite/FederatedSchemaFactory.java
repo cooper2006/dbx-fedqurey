@@ -1,11 +1,13 @@
 package com.dbx.agent.calcite;
 
 import org.apache.calcite.schema.Schema;
+import org.apache.calcite.schema.SchemaFactory;
+import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.schema.Table;
 import org.apache.calcite.schema.impl.AbstractSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.*;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,12 +16,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * Factory for creating federated schemas in Calcite.
  * This schema dynamically adapts to registered JDBC connections.
  */
-public class FederatedSchemaFactory implements org.apache.calcite.schema.impl.AbstractSchemaFactory {
+public class FederatedSchemaFactory implements SchemaFactory {
     
     private static final Logger logger = LoggerFactory.getLogger(FederatedSchemaFactory.class);
     
     @Override
-    public Schema create(Schema.ParentSchema parent, String name, Map<String, Object> operand) {
+    public Schema create(SchemaPlus parent, String name, Map<String, Object> operand) {
         logger.info("Creating federated schema: {}", name);
         return new FederatedSchema();
     }

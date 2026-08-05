@@ -7,6 +7,7 @@ import { Transaction, StateEffect } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
+import FederatedQueryStatusBar from "./FederatedQueryStatusBar.vue";
 import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -3050,6 +3051,14 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     columnsByTable,
     foreignKeysByTable: cachedForeignKeysByTable,
     schemas: schemaNames,
+    // Federated 4-part naming (connection.schema.table): offer every configured
+    // connection as a qualifier, and the current connection's tables under its
+    // own name so `connection.schema.table` resolves to a fully qualified item.
+    federatedConnections: connectionStore.connections.value.map((c) => c.name),
+    federatedTablesByConnection: (() => {
+      const self = connectionStore.connections.value.find((c) => c.id === props.connectionId);
+      return self && tables.length > 0 ? { [self.name]: tables } : undefined;
+    })(),
     translations: completionTranslations.value,
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
@@ -4820,12 +4829,12 @@ defineExpose({
 </script>
 
 <template>
-  <div class="h-full w-full overflow-hidden relative" @gesturestart="onEditorGestureStart" @gesturechange="onEditorGestureChange" @gestureend="onEditorGestureEnd">
+  <div class="h-full w-full overflow-hidden relative flex flex-col" @gesturestart="onEditorGestureStart" @gesturechange="onEditorGestureChange" @gestureend="onEditorGestureEnd">
     <CustomContextMenu :items="contextMenuItems" @close="contextMenuOpen = false" v-slot="{ onContextMenu }">
       <div
         ref="editorRef"
         data-query-editor-root
-        class="h-full w-full overflow-hidden"
+        class="h-full w-full overflow-hidden flex-1 min-h-0"
         @contextmenu="
           (e: MouseEvent) => {
             if (view) {
@@ -4839,6 +4848,7 @@ defineExpose({
       />
     </CustomContextMenu>
     <EditorSearchPanel ref="searchPanelRef" :view="view" />
+    <FederatedQueryStatusBar :sql="props.modelValue" :connection-id="props.connectionId" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
   </div>

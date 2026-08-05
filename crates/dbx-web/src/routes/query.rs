@@ -366,7 +366,10 @@ pub async fn execute_query(
         },
     )
     .await
-    .map_err(|error| AppError::from(error.into_backend_error()))?;
+    .map_err(|error| {
+        tracing::error!(connection_id = %req.connection_id, sql = %req.sql, error = %error, "execute_query failed");
+        AppError::from(error.into_backend_error())
+    })?;
 
     drop(registered);
     Ok(Json(result))
