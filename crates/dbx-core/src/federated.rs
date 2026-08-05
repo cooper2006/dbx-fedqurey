@@ -294,9 +294,10 @@ pub fn validate_federation(
     analysis: &FederatedAnalysis,
     connections: &[ConnectionConfig],
 ) -> Result<(), FederationValidationError> {
-    let conn_map: HashMap<&str, &ConnectionConfig> = connections
+    // Use lowercase keys for case-insensitive lookup, matching `analyze_federation`.
+    let conn_map: HashMap<String, &ConnectionConfig> = connections
         .iter()
-        .map(|c| (c.name.as_str(), c))
+        .map(|c| (c.name.to_lowercase(), c))
         .collect();
 
     for ref_ in &analysis.table_refs {
@@ -305,7 +306,8 @@ pub fn validate_federation(
             continue;
         }
 
-        let config = match conn_map.get(ref_.connection_name.as_str()) {
+        // Case-insensitive lookup matching analyze_federation
+        let config = match conn_map.get(&ref_.connection_name.to_lowercase()) {
             Some(c) => *c,
             None => continue, // Unknown connection - will be caught later during execution
         };
@@ -502,5 +504,68 @@ mod tests {
 
         assert!(rewritten.is_some());
         assert_eq!(rewritten.unwrap(), "SELECT * FROM public.users WHERE id = 1");
+    }
+
+    #[test]
+    fn test_validate_federation_case_insensitive() {
+        // Connection is named "PostgreSQL" but SQL references it as lowercase
+        let conn = make_test_connection("PostgreSQL", DatabaseType::Postgres, "mydb");
+        let sql = "SELECT u.id FROM postgresql.public.users u";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax);
+        assert_eq!(analysis.single_connection, Some("PostgreSQL".to_string()));
+
+        // Validation should pass since canonical name matches
+        let result = validate_federation(&analysis, &[conn.clone()]);
+        assert!(result.is_ok(), "Validation should succeed for case-insensitive match");
+    }
+
+    #[test]
+    fn test_validate_federation_disabled_connection() {
+        let mut conn = make_test_connection("my_db", DatabaseType::Postgres, "mydb");
+        conn.federation_enabled = false;
+
+        let sql = "SELECT * FROM my_db.public.users";
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+
+        let result = validate_federation(&analysis, &[conn.clone()]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FederationValidationError::FederationNotEnabled(name) => {
+                assert_eq!(name, "my_db");
+            }
+            _ => panic!("Expected FederationNotEnabled error"),
+        }
+    }
+
+    #[test]
+    fn test_nonexistent_connection_not_matched() {
+        // Connection named "MyDB" but SQL uses "nonexistent"
+        let conn = make_test_connection("MyDB", DatabaseType::Postgres, "mydb");
+        let sql = "SELECT * FROM nonexistent.public.users";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        
+        // Should NOT match as federation since connection doesn't exist
+        assert!(!analysis.uses_federation_syntax);
+        assert!(analysis.table_refs.is_empty() || analysis.table_refs[0].connection_name.is_empty());
+    }
+
+    #[test]
+    fn test_4_part_name_rewrite_with_alias() {
+        let conn = make_test_connection("postgresql", DatabaseType::Postgres, "ihrcore");
+        let sql = r#"SELECT u.id FROM postgresql.ihrcore."public"."users" u"#;
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax);
+        assert_eq!(analysis.table_refs[0].database_name, Some("ihrcore".to_string()));
+        assert_eq!(analysis.table_refs[0].schema_name, Some("public".to_string()));
+        assert_eq!(analysis.table_refs[0].table_name, "users");
+
+        let rewritten = rewrite_federated_sql(sql, &analysis).expect("rewrite should succeed");
+        assert!(rewritten.contains("ihrcore.public.users"));
+        assert!(!rewritten.contains("postgresql."));
+        assert!(rewritten.contains("u"));
     }
 }

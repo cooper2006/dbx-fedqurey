@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, Mutex as TokioMutex};
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +33,8 @@ pub struct CalciteAgentConfig {
     pub java_path: String,
     pub java_options: Vec<String>,
     pub working_dir: Option<String>,
+    /// Execution engine for Calcite: "enumerable" (default, Janino compiler) or "spark"
+    pub engine: String,
 }
 
 impl Default for CalciteAgentConfig {
@@ -41,14 +44,14 @@ impl Default for CalciteAgentConfig {
             java_path: "java".to_string(),
             java_options: Vec::new(),
             working_dir: None,
+            engine: "enumerable".to_string(),
         }
     }
 }
 
 impl CalciteAgentConfig {
-    /// 自动发现 Calcite Agent JAR 并创建配置
-    ///
-    /// 在 agents/drivers/calcite/build/libs/ 目录下查找 dbx-agent-calcite.jar
+    /// Auto-discover Calcite Agent JAR and create configuration.
+    /// Searches for dbx-agent-calcite.jar in agents/drivers/calcite/build/libs/.
     pub fn auto_discover() -> Self {
         let jar_path = find_calcite_agent_jar();
         Self {
@@ -59,24 +62,25 @@ impl CalciteAgentConfig {
                 "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn".to_string(),
             ],
             working_dir: None,
+            engine: std::env::var("CALCITE_ENGINE").unwrap_or_else(|_| "enumerable".to_string()),
         }
     }
 
-    /// 检查 JAR 路径是否已配置且文件存在
+    /// Check if JAR path is configured and file exists
     pub fn is_jar_available(&self) -> bool {
         !self.jar_path.is_empty() && std::path::Path::new(&self.jar_path).exists()
     }
 }
 
-/// 查找 Calcite Agent JAR 文件
+/// Find Calcite Agent JAR file.
 ///
-/// 搜索顺序：
-/// 1. agents/drivers/calcite/build/libs/dbx-agent-calcite.jar (开发环境)
-/// 2. 应用数据目录下的 agents/calcite/dbx-agent-calcite.jar (安装环境)
+/// Search order:
+/// 1. agents/drivers/calcite/build/libs/dbx-agent-calcite.jar (development)
+/// 2. Relative paths from current directory
 fn find_calcite_agent_jar() -> String {
     let jar_name = "dbx-agent-calcite.jar";
 
-    // 开发环境：从 CARGO_MANIFEST_DIR 向上查找 agents 目录
+    // Development environment: search from CARGO_MANIFEST_DIR upward
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
         let dev_path = workspace_root
@@ -91,7 +95,7 @@ fn find_calcite_agent_jar() -> String {
         }
     }
 
-    // 也检查相对路径
+    // Check relative paths
     let relative_paths = [
         format!("agents/drivers/calcite/build/libs/{jar_name}"),
         format!("../agents/drivers/calcite/build/libs/{jar_name}"),
@@ -244,6 +248,21 @@ impl CalciteAgentRuntime {
     pub fn is_alive(&self) -> bool {
         !self.failed.load(Ordering::SeqCst)
     }
+
+    /// Health check via ping-pong protocol.
+    /// Returns true if the agent responds within the timeout.
+    pub async fn ping(&self, timeout: Duration) -> Result<(), String> {
+        if self.failed.load(Ordering::SeqCst) {
+            return Err("Calcite Agent has failed".to_string());
+        }
+        let result = self.call("ping", serde_json::json!({}), Some(timeout)).await?;
+        let pong = result.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        if pong == "pong" {
+            Ok(())
+        } else {
+            Err(format!("Unexpected ping response: {pong}"))
+        }
+    }
 }
 
 /// 等待 Agent 发送就绪信号
@@ -391,11 +410,17 @@ impl CalciteAgentManager {
         let jdbc_url = build_jdbc_url(config)?;
         let driver_class = build_driver_class(config);
 
+        // Hash the password before sending to Java Agent to avoid plaintext transmission.
+        // The Agent computes the same SHA-256 hash and uses it as the password token.
+        let mut hasher = Sha256::new();
+        hasher.update(config.password.as_bytes());
+        let password_hash = format!("{:x}", hasher.finalize());
+
         let params = serde_json::json!({
             "connectionId": config.name,
             "jdbcUrl": jdbc_url,
             "username": config.username,
-            "password": config.password,
+            "passwordHash": password_hash,
             "driverClass": driver_class,
         });
 
@@ -553,6 +578,15 @@ impl CalciteAgentManager {
         log::info!("Calcite Agent stopped");
         Ok(())
     }
+
+    /// Health check: returns true if the agent responds to ping within timeout.
+    pub async fn is_healthy(&self, timeout: Duration) -> bool {
+        let rt_guard = self.runtime.lock().await;
+        match rt_guard.as_ref() {
+            Some(runtime) => runtime.ping(timeout).await.is_ok(),
+            None => false,
+        }
+    }
 }
 
 /// 联邦查询结果
@@ -562,6 +596,15 @@ pub struct FederatedQueryResult {
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
     pub duration_ms: u64,
+}
+
+/// Append SSL query parameters to a JDBC URL based on database type.
+fn append_ssl_params(url: &str, ssl: bool) -> String {
+    if !ssl {
+        return url.to_string();
+    }
+    let sep = if url.contains('?') { "&" } else { "?" };
+    format!("{url}{sep}ssl=true")
 }
 
 /// 根据 ConnectionConfig 构建 JDBC URL
@@ -705,40 +748,46 @@ pub fn build_jdbc_url(config: &ConnectionConfig) -> Result<String, String> {
         }
     };
 
-    // SSL 参数
-    if config.ssl && url.starts_with("jdbc:postgresql://") {
-        let sep = if url.contains('?') { "&" } else { "?" };
-        return Ok(format!("{url}{sep}ssl=true"));
-    }
-    if config.ssl && url.starts_with("jdbc:mysql://") {
-        let sep = if url.contains('?') { "&" } else { "?" };
-        return Ok(format!("{url}{sep}useSSL=true&requireSSL=true"));
-    }
-    if config.ssl && url.starts_with("jdbc:sqlserver://") {
-        return Ok(format!("{url};encrypt=true;trustServerCertificate=true"));
-    }
-    if config.ssl && url.starts_with("jdbc:oracle:thin:@") {
-        // Oracle SSL via system properties — return URL as-is, driver handles via props
-        return Ok(url);
-    }
-    if config.ssl && url.starts_with("jdbc:clickhouse://") {
-        let sep = if url.contains('?') { "&" } else { "?" };
-        return Ok(format!("{url}{sep}ssl=true"));
-    }
-    if config.ssl && url.starts_with("jdbc:db2://") {
-        let sep = if url.contains(':') { ":" } else { "?" };
-        return Ok(format!("{url}{sep}sslConnection=true"));
-    }
-    if config.ssl && url.starts_with("jdbc:trino://") {
-        let sep = if url.contains('?') { "&" } else { "?" };
-        return Ok(format!("{url}{sep}SSL=true"));
-    }
-    if config.ssl && url.starts_with("jdbc:hive2://") {
-        let sep = if url.contains(';') { ";" } else { "?" };
-        return Ok(format!("{url}{sep}ssl=true"));
+    // SSL parameters (deduplicated helper)
+    if config.ssl {
+        match config.db_type {
+            DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Kingbase
+            | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
+            | DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Kwdb
+            | DatabaseType::Oscar | DatabaseType::ClickHouse => {
+                return Ok(append_ssl_params(&url, true));
+            }
+            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
+            | DatabaseType::Goldendb | DatabaseType::Gbase => {
+                let sep = if url.contains('?') { "&" } else { "?" };
+                return Ok(format!("{url}{sep}useSSL=true&requireSSL=true"));
+            }
+            DatabaseType::SqlServer => {
+                return Ok(format!("{url};encrypt=true;trustServerCertificate=true"));
+            }
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
+                // Oracle SSL via system properties — return URL as-is
+                return Ok(url);
+            }
+            DatabaseType::Db2 => {
+                let sep = if url.contains(':') { ":" } else { "?" };
+                return Ok(format!("{url}{sep}sslConnection=true"));
+            }
+            DatabaseType::Trino | DatabaseType::PrestoSql => {
+                let sep = if url.contains('?') { "&" } else { "?" };
+                return Ok(format!("{url}{sep}SSL=true"));
+            }
+            DatabaseType::Hive => {
+                let sep = if url.contains(';') { ";" } else { "?" };
+                return Ok(format!("{url}{sep}ssl=true"));
+            }
+            _ => {
+                return Ok(append_ssl_params(&url, true));
+            }
+        }
     }
 
-    // URL 参数
+    // URL parameters
     if let Some(ref params) = config.url_params {
         if !params.is_empty() {
             let sep = if url.contains('?') { "&" } else { "?" };

@@ -274,7 +274,39 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 
 ---
 
-*实现日期: 2026-08-03*  
-*最近更新: 2026-08-05*  
-*版本: 1.1*  
-*状态: Phase 1-4 全部完成，联邦查询功能已完整落地*
+### 代码审查修复 (P0-P2)
+
+#### P0 - 密码安全
+- **问题**: 连接密码以明文形式通过 JSON-RPC 发送到 Java Agent
+- **修复**: 在 Rust 端使用 SHA-256 哈希密码后发送，Java Agent 侧接受 `passwordHash` 参数
+- **文件**: `crates/dbx-core/src/calcite_agent.rs`, `agents/drivers/calcite/.../CalciteAgent.java`
+
+#### P1 - 线程安全
+- **问题**: Java Agent 中 `registeredSources` 操作非原子，并发注册/注销可能导致竞态条件
+- **修复**: 将 `registerSource`、`unregisterSource` 中的操作包装在 `synchronized(calciteLock)` 块中
+- **文件**: `agents/drivers/calcite/.../CalciteAgent.java`
+
+#### P2 - 大小写一致性
+- **问题**: `analyze_federation` 使用小写进行连接名匹配，但 `validate_federation` 使用原始大小写进行查找
+- **修复**: 统一两个函数都使用 `HashMap<String, &ConnectionConfig>` + `to_lowercase()` 进行大小写不敏感匹配
+- **新增测试**: `test_validate_federation_case_insensitive`
+- **文件**: `crates/dbx-core/src/federated.rs`
+
+#### P2 - SSL 参数重复代码
+- **问题**: `build_jdbc_url` 中每个数据库类型的 SSL 参数添加逻辑分散且重复
+- **修复**: 提取 `append_ssl_params` 辅助函数，使用 `match` 语句统一处理 15+ 种数据库类型
+- **文件**: `crates/dbx-core/src/calcite_agent.rs`
+
+#### P2 - 健康检查缺失
+- **问题**: 无法检查 Calcite Agent 是否正常运行
+- **修复**: 添加 `ping()` 方法和 `is_healthy()` 方法，通过 ping-pong 协议验证连通性
+- **文件**: `crates/dbx-core/src/calcite_agent.rs`
+
+#### P2 - 引擎配置硬编码
+- **问题**: Java Agent 执行引擎（enumerable/spark）硬编码为 enumerable
+- **修复**: 支持通过环境变量 `CALCITE_ENGINE` 配置，Rust 和 Java 两侧一致
+- **文件**: `crates/dbx-core/src/calcite_agent.rs`, `agents/drivers/calcite/.../CalciteAgent.java`
+
+---
+
+## 关键设计决策

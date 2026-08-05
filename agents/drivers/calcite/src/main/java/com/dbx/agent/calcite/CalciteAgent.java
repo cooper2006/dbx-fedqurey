@@ -45,35 +45,39 @@ public class CalciteAgent {
     private final Object calciteLock = new Object();
 
     /**
-     * 默认构造函数，使用 enumerable 引擎
+     * Default constructor with enumerable engine.
      */
     public CalciteAgent() {
-        this("enumerable");
+        this(loadEngineFromEnv());
     }
 
     /**
-     * 指定执行引擎的构造函数
+     * Constructor with specified execution engine.
      *
-     * @param engine "enumerable" 或 "spark"
+     * @param engine "enumerable" or "spark"
      */
     public CalciteAgent(String engine) {
         this.engine = engine != null ? engine.toLowerCase() : "enumerable";
     }
 
+    /**
+     * Load execution engine from environment variable CALCITE_ENGINE.
+     * Falls back to "enumerable" if not set.
+     */
+    private static String loadEngineFromEnv() {
+        String engine = System.getenv("CALCITE_ENGINE");
+        return (engine == null || engine.isEmpty()) ? "enumerable" : engine.toLowerCase();
+    }
+
     public static void main(String[] args) {
         logger.info("Starting Calcite Federated Query Agent...");
 
-        // 设置 JVM 级别的 Calcite 系统属性
-        // 缓存动态生成的 Bindable Java 类，减少重复编译开销（默认 0 = 不缓存）
+        // Cache dynamically generated Bindable Java classes to reduce compilation overhead
         System.setProperty("calcite.bindableCacheMaxSize", "1000");
 
-        // 执行引擎选择：通过环境变量 CALCITE_ENGINE=spark 切换
-        // 默认: enumerable（Janino 编译器，轻量级）
-        // spark: 启用 Spark 引擎（需要 classpath 中包含 calcite-spark 依赖）
-        String engine = System.getenv("CALCITE_ENGINE");
-        if (engine == null || engine.isEmpty()) {
-            engine = "enumerable";
-        }
+        // Load execution engine from environment variable (default: enumerable)
+        // spark: requires calcite-spark dependency on classpath
+        String engine = loadEngineFromEnv();
         logger.info("Calcite execution engine: {}", engine);
 
         CalciteAgent agent = new CalciteAgent(engine);
@@ -151,7 +155,11 @@ public class CalciteAgent {
         String connectionId = params.path("connectionId").asText();
         String jdbcUrl = params.path("jdbcUrl").asText();
         String username = params.path("username").asText("");
+        // Accept either plaintext password or hashed password from Rust side
         String password = params.path("password").asText("");
+        if (password.isEmpty()) {
+            password = params.path("passwordHash").asText("");
+        }
         String driverClass = params.path("driverClass").asText("");
 
         // 加载 JDBC 驱动
@@ -175,12 +183,15 @@ public class CalciteAgent {
                 connectionId, databaseProduct, databaseVersion);
         }
 
-        // 存储数据源配置
+        // 存储数据源配置（使用传入的密码或哈希值）
         DataSourceConfig config = new DataSourceConfig(connectionId, jdbcUrl, username, password, driverClass);
-        registeredSources.put(connectionId, config);
 
-        // 在 Calcite 中注册此数据源为一个 Schema
-        registerSchemaInCalcite(config);
+        // Use synchronized block to ensure thread-safe registration
+        synchronized (calciteLock) {
+            registeredSources.put(connectionId, config);
+            // 在 Calcite 中注册此数据源为一个 Schema
+            registerSchemaInCalcite(config);
+        }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("connectionId", connectionId);
@@ -197,20 +208,19 @@ public class CalciteAgent {
     private String handleUnregisterSource(ObjectNode params, String id) throws Exception {
         String connectionId = params.path("connectionId").asText();
 
-        if (registeredSources.remove(connectionId) != null) {
-            // 从 Calcite 中移除 Schema
-            synchronized (calciteLock) {
+        synchronized (calciteLock) {
+            if (registeredSources.remove(connectionId) != null) {
+                // 从 Calcite 中移除 Schema
                 if (calciteConnection != null) {
                     SchemaPlus rootSchema = calciteConnection.getRootSchema();
                     // Calcite 不支持直接移除 Schema，需要重建连接
                     rebuildCalciteSchemas();
                 }
+                logger.info("Unregistered source: {}", connectionId);
+                return createSuccessResponse(Map.of("connectionId", connectionId, "success", true), id);
             }
-            logger.info("Unregistered source: {}", connectionId);
-            return createSuccessResponse(Map.of("connectionId", connectionId, "success", true), id);
-        } else {
-            return createErrorResponse("Source not found: " + connectionId);
         }
+        return createErrorResponse("Source not found: " + connectionId);
     }
 
     /**
