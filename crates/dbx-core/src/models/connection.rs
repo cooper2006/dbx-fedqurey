@@ -1108,6 +1108,13 @@ impl ConnectionConfig {
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
             DatabaseType::Calcite => "calcite://federation".to_string(),
+            DatabaseType::VictoriaMetrics => {
+                let db = self.database.as_deref().unwrap_or("default");
+                format!("http://{}:{}?db={}", self.host, self.port, db)
+            }
+            DatabaseType::Mqtt => {
+                format!("tcp://{}:{}", self.host, self.port)
+            }
         }
     }
 
@@ -1339,6 +1346,13 @@ impl ConnectionConfig {
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
             DatabaseType::Calcite => "calcite://federation".to_string(),
+            DatabaseType::VictoriaMetrics => {
+                let db = self.database.as_deref().unwrap_or("default");
+                format!("http://{}:{}?db={}", self.host, self.port, db)
+            }
+            DatabaseType::Mqtt => {
+                format!("tcp://{}:{}", self.host, self.port)
+            }
         }
     }
 

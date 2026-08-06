@@ -1723,10 +1723,8 @@ async fn execute_multi_connection_federated_query(
     cancel_token: Option<CancellationToken>,
     all_connections: &[ConnectionConfig],
 ) -> Result<db::QueryResult, QueryExecutionError> {
-    let conn_map: std::collections::HashMap<&str, &ConnectionConfig> = all_connections
-        .iter()
-        .map(|c| (c.name.as_str(), c))
-        .collect();
+    let conn_map: std::collections::HashMap<&str, &ConnectionConfig> =
+        all_connections.iter().map(|c| (c.name.as_str(), c)).collect();
 
     // 获取或创建 CalciteAgentManager
     let manager = {
@@ -1752,9 +1750,10 @@ async fn execute_multi_connection_federated_query(
     let app_version = state.agent_manager.agent_app_version();
     if !manager.is_running().await {
         log::info!("Starting Calcite Agent for multi-connection federated query");
-        manager.start(app_version).await.map_err(|e| {
-            QueryExecutionError::Sql(format!("Failed to start Calcite Agent: {e}"))
-        })?;
+        manager
+            .start(app_version)
+            .await
+            .map_err(|e| QueryExecutionError::Sql(format!("Failed to start Calcite Agent: {e}")))?;
     }
 
     // 注册所有涉及的连接
@@ -1777,9 +1776,7 @@ async fn execute_multi_connection_federated_query(
         if !already_registered {
             log::info!("Registering connection '{}' with Calcite Agent", conn_name);
             manager.register_connection(conn_config).await.map_err(|e| {
-                QueryExecutionError::Sql(format!(
-                    "Failed to register connection '{conn_name}' with Calcite Agent: {e}"
-                ))
+                QueryExecutionError::Sql(format!("Failed to register connection '{conn_name}' with Calcite Agent: {e}"))
             })?;
         }
     }
@@ -1933,16 +1930,16 @@ pub async fn execute_sql_statement_with_options_typed(
         let configs = state.configs.read().await;
         let all_connections: Vec<ConnectionConfig> = configs.values().cloned().collect();
         drop(configs);
-        
+
         let federation_analysis = analyze_federation(&effective_sql, &all_connections);
-        
+
         // Validate federation access (check federation_enabled and schema visibility)
         if federation_analysis.uses_federation_syntax {
             if let Err(e) = validate_federation(&federation_analysis, &all_connections) {
                 return Err(e.to_string().into());
             }
         }
-        
+
         // If single connection with federation syntax, rewrite SQL and continue normally
         if federation_analysis.is_single_connection && federation_analysis.uses_federation_syntax {
             if let Some(rewritten_sql) = rewrite_federated_sql(&effective_sql, &federation_analysis) {
@@ -1961,7 +1958,7 @@ pub async fn execute_sql_statement_with_options_typed(
             .await;
         }
     }
-    
+
     let db_type = connection_database_type(state, connection_id).await;
 
     if let Some(target_database) = postgres_drop_database_target(db_type, sql) {
@@ -1984,9 +1981,17 @@ pub async fn execute_sql_statement_with_options_typed(
     }
 
     let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-    let result =
-        do_execute_typed(state, &pool_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token.clone(), options.clone())
-            .await;
+    let result = do_execute_typed(
+        state,
+        &pool_key,
+        mysql_dialect,
+        Some(database),
+        &effective_sql,
+        schema,
+        cancel_token.clone(),
+        options.clone(),
+    )
+    .await;
 
     let with_sql_context = |result: Result<db::QueryResult, QueryExecutionError>| {
         result.map_err(|error| error.with_omitted_sql_context(sql))
@@ -2001,7 +2006,17 @@ pub async fn execute_sql_statement_with_options_typed(
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
-                do_execute_typed(state, &new_key, mysql_dialect, Some(database), &effective_sql, schema, cancel_token, options).await,
+                do_execute_typed(
+                    state,
+                    &new_key,
+                    mysql_dialect,
+                    Some(database),
+                    &effective_sql,
+                    schema,
+                    cancel_token,
+                    options,
+                )
+                .await,
             )
         }
         Some(PoolErrorAction::Discard) => {

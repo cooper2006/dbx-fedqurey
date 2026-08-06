@@ -106,6 +106,9 @@ pub enum PoolKind {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    VictoriaMetrics(crate::db::victoriametrics_driver::VictoriaMetricsClient),
+    #[cfg(feature = "mq-admin")]
+    Mqtt(std::sync::Arc<crate::mqtt::client::MqttClient>),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     ExternalDriver {
         driver_id: String,
@@ -1950,6 +1953,21 @@ impl AppState {
                 db::influxdb_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::InfluxDb(client)
             }
+            DatabaseType::VictoriaMetrics => {
+                let client = db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(
+                    &url,
+                    &db_config,
+                    connect_timeout,
+                )?;
+                db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::VictoriaMetrics(client)
+            }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::Mqtt => {
+                let mqtt_config = crate::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
+                let client = crate::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                PoolKind::Mqtt(client)
+            }
             DatabaseType::Nacos => {
                 let admin_config = self.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = self.nacos_registry.build_transient_config(admin_config).await?;
@@ -2317,6 +2335,7 @@ impl AppState {
                         "127.0.0.1",
                         1,
                         false,
+                        ssh.allow_exec_channel_proxy,
                     )
                     .await;
                 self.tunnels.stop_tunnel(&probe_id).await;
@@ -2882,6 +2901,20 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::VictoriaMetrics(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::victoriametrics_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("VictoriaMetrics connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(_) => false,
                 PoolKind::Rqlite(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -3776,6 +3809,21 @@ impl AppState {
                         false
                     }
                 },
+                PoolKind::VictoriaMetrics(client) => {
+                    match db::victoriametrics_driver::test_connection(client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("VictoriaMetrics connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(client) => {
+                    // MQTT clients don't have a simple ping; treat as healthy for keepalive
+                    let _ = client;
+                    true
+                }
                 PoolKind::Rqlite(client) => match db::rqlite_driver::test_connection(client, timeout).await {
                     Ok(()) => true,
                     Err(e) => {
@@ -4038,7 +4086,10 @@ enum KeepaliveTarget {
     Postgres(deadpool_postgres::Pool),
     Rqlite(db::rqlite_driver::RqliteClient),
     Turso(db::turso_driver::TursoClient),
-    MongoDb { client: mongodb::Client, database: Option<String> },
+    MongoDb {
+        client: mongodb::Client,
+        database: Option<String>,
+    },
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
@@ -4046,6 +4097,9 @@ enum KeepaliveTarget {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    VictoriaMetrics(crate::db::victoriametrics_driver::VictoriaMetricsClient),
+    #[cfg(feature = "mq-admin")]
+    Mqtt(std::sync::Arc<crate::mqtt::client::MqttClient>),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
 }
 
@@ -4139,6 +4193,9 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
+        PoolKind::VictoriaMetrics(client) => Some(KeepaliveTarget::VictoriaMetrics(client.clone())),
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => Some(KeepaliveTarget::Mqtt(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
         _ => None,
     }
@@ -4184,6 +4241,14 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         }
         KeepaliveTarget::InfluxDb(client) => {
             db::influxdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::VictoriaMetrics(client) => {
+            db::victoriametrics_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        #[cfg(feature = "mq-admin")]
+        KeepaliveTarget::Mqtt(_client) => {
+            // MQTT keepalive - just check if connected
+            Ok(())
         }
         KeepaliveTarget::Agent(client) => {
             let Ok(mut client) = client.try_lock() else {
@@ -4392,6 +4457,9 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
+        PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => PoolKind::Mqtt(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
         PoolKind::ExternalDriver { driver_id, config, session } => {
             PoolKind::ExternalDriver { driver_id: driver_id.clone(), config: config.clone(), session: session.clone() }
@@ -4444,6 +4512,13 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::InfluxDb(client) => {
             drop(client);
+        }
+        PoolKind::VictoriaMetrics(client) => {
+            drop(client);
+        }
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => {
+            let _ = client; // MQTT client cleanup handled internally
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;

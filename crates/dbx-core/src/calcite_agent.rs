@@ -57,10 +57,7 @@ impl CalciteAgentConfig {
         Self {
             jar_path,
             java_path: "java".to_string(),
-            java_options: vec![
-                "-Xmx512m".to_string(),
-                "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn".to_string(),
-            ],
+            java_options: vec!["-Xmx512m".to_string(), "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn".to_string()],
             working_dir: None,
             engine: std::env::var("CALCITE_ENGINE").unwrap_or_else(|_| "enumerable".to_string()),
         }
@@ -83,13 +80,8 @@ fn find_calcite_agent_jar() -> String {
     // Development environment: search from CARGO_MANIFEST_DIR upward
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
-        let dev_path = workspace_root
-            .join("agents")
-            .join("drivers")
-            .join("calcite")
-            .join("build")
-            .join("libs")
-            .join(jar_name);
+        let dev_path =
+            workspace_root.join("agents").join("drivers").join("calcite").join("build").join("libs").join(jar_name);
         if dev_path.exists() {
             return dev_path.to_string_lossy().to_string();
         }
@@ -138,9 +130,7 @@ impl CalciteAgentRuntime {
         if let Some(ref dir) = config.working_dir {
             cmd.current_dir(dir);
         }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         log::info!("Starting Calcite Agent: java -jar {}", config.jar_path);
 
@@ -186,12 +176,7 @@ impl CalciteAgentRuntime {
     }
 
     /// 发送 JSON-RPC 请求并等待响应
-    pub async fn call(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Option<Duration>,
-    ) -> Result<Value, String> {
+    pub async fn call(&self, method: &str, params: Value, timeout: Option<Duration>) -> Result<Value, String> {
         if self.failed.load(Ordering::SeqCst) {
             return Err("Calcite Agent has failed".to_string());
         }
@@ -213,8 +198,7 @@ impl CalciteAgentRuntime {
         // 发送请求
         {
             let mut stdin = self.stdin.lock().unwrap();
-            let line = serde_json::to_string(&request)
-                .map_err(|e| format!("Failed to serialize request: {e}"))?;
+            let line = serde_json::to_string(&request).map_err(|e| format!("Failed to serialize request: {e}"))?;
             stdin
                 .write_all(line.as_bytes())
                 .and_then(|_| stdin.write_all(b"\n"))
@@ -229,8 +213,7 @@ impl CalciteAgentRuntime {
                 .map_err(|_| format!("Calcite Agent request timed out ({timeout:?})"))?
                 .map_err(|_| "Calcite Agent response channel closed".to_string())?
         } else {
-            rx.await
-                .map_err(|_| "Calcite Agent response channel closed".to_string())?
+            rx.await.map_err(|_| "Calcite Agent response channel closed".to_string())?
         };
 
         result
@@ -279,9 +262,7 @@ fn wait_for_ready(
     loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) => {
-                return (reader, Some("Agent process closed stdout during startup".to_string()))
-            }
+            Ok(0) => return (reader, Some("Agent process closed stdout during startup".to_string())),
             Ok(_) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -330,10 +311,7 @@ fn start_response_reader(
                             let mut map = pending.lock().unwrap();
                             if let Some(sender) = map.remove(&id) {
                                 if let Some(error) = value.get("error") {
-                                    let msg = error
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("Unknown error");
+                                    let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
                                     let _ = sender.send(Err(msg.to_string()));
                                 } else {
                                     let result = value.get("result").cloned().unwrap_or(Value::Null);
@@ -403,9 +381,7 @@ impl CalciteAgentManager {
     /// 注册一个数据连接到 Calcite Agent
     pub async fn register_connection(&self, config: &ConnectionConfig) -> Result<(), String> {
         let runtime_guard = self.runtime.lock().await;
-        let runtime = runtime_guard
-            .as_ref()
-            .ok_or("Calcite Agent is not running")?;
+        let runtime = runtime_guard.as_ref().ok_or("Calcite Agent is not running")?;
 
         let jdbc_url = build_jdbc_url(config)?;
         let driver_class = build_driver_class(config);
@@ -424,14 +400,9 @@ impl CalciteAgentManager {
             "driverClass": driver_class,
         });
 
-        let result = runtime
-            .call("registerSource", params, Some(Duration::from_secs(30)))
-            .await?;
+        let result = runtime.call("registerSource", params, Some(Duration::from_secs(30))).await?;
 
-        let success = result
-            .get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
 
         if !success {
             return Err(result
@@ -457,9 +428,7 @@ impl CalciteAgentManager {
         cancel_token: Option<CancellationToken>,
     ) -> Result<FederatedQueryResult, String> {
         let runtime_guard = self.runtime.lock().await;
-        let runtime = runtime_guard
-            .as_ref()
-            .ok_or("Calcite Agent is not running")?;
+        let runtime = runtime_guard.as_ref().ok_or("Calcite Agent is not running")?;
 
         let params = serde_json::json!({
             "sql": sql,
@@ -477,45 +446,23 @@ impl CalciteAgentManager {
             runtime.call("executeFederatedQuery", params, Some(timeout)).await?
         };
 
-        let success = result
-            .get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
 
         if !success {
-            return Err(result
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Query execution failed")
-                .to_string());
+            return Err(result.get("error").and_then(|v| v.as_str()).unwrap_or("Query execution failed").to_string());
         }
 
-        let columns: Vec<String> = result
-            .get("columns")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let columns: Vec<String> =
+            result.get("columns").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
 
-        let rows: Vec<Vec<Value>> = result
-            .get("rows")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let rows: Vec<Vec<Value>> =
+            result.get("rows").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
 
-        let row_count = result
-            .get("rowCount")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(rows.len() as u64) as usize;
+        let row_count = result.get("rowCount").and_then(|v| v.as_u64()).unwrap_or(rows.len() as u64) as usize;
 
-        let duration_ms = result
-            .get("durationMs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let duration_ms = result.get("durationMs").and_then(|v| v.as_u64()).unwrap_or(0);
 
-        Ok(FederatedQueryResult {
-            columns,
-            rows,
-            row_count,
-            duration_ms,
-        })
+        Ok(FederatedQueryResult { columns, rows, row_count, duration_ms })
     }
 
     /// 启动 Calcite Agent
@@ -621,14 +568,24 @@ pub fn build_jdbc_url(config: &ConnectionConfig) -> Result<String, String> {
 
     let url = match config.db_type {
         // PostgreSQL 系
-        DatabaseType::Postgres | DatabaseType::Redshift
-        | DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
-        | DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Kwdb | DatabaseType::Oscar => {
+        DatabaseType::Postgres
+        | DatabaseType::Redshift
+        | DatabaseType::Kingbase
+        | DatabaseType::Highgo
+        | DatabaseType::Uxdb
+        | DatabaseType::Vastbase
+        | DatabaseType::Gaussdb
+        | DatabaseType::OpenGauss
+        | DatabaseType::Kwdb
+        | DatabaseType::Oscar => {
             format!("jdbc:postgresql://{host}:{port}/{database}")
         }
         // MySQL 系
-        DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
-        | DatabaseType::Goldendb | DatabaseType::Gbase => {
+        DatabaseType::Mysql
+        | DatabaseType::Doris
+        | DatabaseType::StarRocks
+        | DatabaseType::Goldendb
+        | DatabaseType::Gbase => {
             format!("jdbc:mysql://{host}:{port}/{database}")
         }
         // SQL Server
@@ -648,9 +605,7 @@ pub fn build_jdbc_url(config: &ConnectionConfig) -> Result<String, String> {
             format!("jdbc:yasdb://{host}:{port}/{database}")
         }
         // H2
-        DatabaseType::H2 => {
-            config.connection_string.as_deref().unwrap_or("jdbc:h2:mem:test").to_string()
-        }
+        DatabaseType::H2 => config.connection_string.as_deref().unwrap_or("jdbc:h2:mem:test").to_string(),
         // Trino / PrestoSQL
         DatabaseType::Trino | DatabaseType::PrestoSql => {
             format!("jdbc:trino://{host}:{port}/{database}")
@@ -716,33 +671,19 @@ pub fn build_jdbc_url(config: &ConnectionConfig) -> Result<String, String> {
             format!("jdbc:mysql://{host}:{port}/")
         }
         // MS Access (UCanAccess — 通过 connection_string 指定文件路径)
-        DatabaseType::Access => {
-            config.connection_string.as_deref().unwrap_or("").to_string()
-        }
+        DatabaseType::Access => config.connection_string.as_deref().unwrap_or("").to_string(),
         // 云数据仓库
-        DatabaseType::Snowflake => {
-            config.connection_string.as_deref().unwrap_or("").to_string()
-        }
+        DatabaseType::Snowflake => config.connection_string.as_deref().unwrap_or("").to_string(),
         // BigQuery (通过 connection_string)
-        DatabaseType::Bigquery => {
-            config.connection_string.as_deref().unwrap_or("").to_string()
-        }
+        DatabaseType::Bigquery => config.connection_string.as_deref().unwrap_or("").to_string(),
         // Databricks
-        DatabaseType::Databricks => {
-            config.connection_string.as_deref()
-                .map(|cs| {
-                    if cs.starts_with("jdbc:") {
-                        cs.to_string()
-                    } else {
-                        format!("jdbc:databricks://{cs}")
-                    }
-                })
-                .unwrap_or_else(|| "".to_string())
-        }
+        DatabaseType::Databricks => config
+            .connection_string
+            .as_deref()
+            .map(|cs| if cs.starts_with("jdbc:") { cs.to_string() } else { format!("jdbc:databricks://{cs}") })
+            .unwrap_or_else(|| "".to_string()),
         // 通用 JDBC
-        DatabaseType::Jdbc => {
-            config.connection_string.as_deref().unwrap_or("").to_string()
-        }
+        DatabaseType::Jdbc => config.connection_string.as_deref().unwrap_or("").to_string(),
         _ => {
             return Err(format!("Unsupported database type for federation: {:?}", config.db_type));
         }
@@ -751,14 +692,24 @@ pub fn build_jdbc_url(config: &ConnectionConfig) -> Result<String, String> {
     // SSL parameters (deduplicated helper)
     if config.ssl {
         match config.db_type {
-            DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Kingbase
-            | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
-            | DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Kwdb
-            | DatabaseType::Oscar | DatabaseType::ClickHouse => {
+            DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Uxdb
+            | DatabaseType::Vastbase
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kwdb
+            | DatabaseType::Oscar
+            | DatabaseType::ClickHouse => {
                 return Ok(append_ssl_params(&url, true));
             }
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
-            | DatabaseType::Goldendb | DatabaseType::Gbase => {
+            DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Goldendb
+            | DatabaseType::Gbase => {
                 let sep = if url.contains('?') { "&" } else { "?" };
                 return Ok(format!("{url}{sep}useSSL=true&requireSSL=true"));
             }
@@ -802,16 +753,22 @@ pub fn build_jdbc_url(config: &ConnectionConfig) -> Result<String, String> {
 pub fn build_driver_class(config: &ConnectionConfig) -> String {
     match config.db_type {
         // PostgreSQL 系（含国产 PG 兼容数据库）
-        DatabaseType::Postgres | DatabaseType::Redshift
-        | DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
-        | DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Kwdb | DatabaseType::Oscar => {
-            "org.postgresql.Driver".to_string()
-        }
+        DatabaseType::Postgres
+        | DatabaseType::Redshift
+        | DatabaseType::Kingbase
+        | DatabaseType::Highgo
+        | DatabaseType::Uxdb
+        | DatabaseType::Vastbase
+        | DatabaseType::Gaussdb
+        | DatabaseType::OpenGauss
+        | DatabaseType::Kwdb
+        | DatabaseType::Oscar => "org.postgresql.Driver".to_string(),
         // MySQL 系
-        DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
-        | DatabaseType::Goldendb | DatabaseType::Gbase => {
-            "com.mysql.cj.jdbc.Driver".to_string()
-        }
+        DatabaseType::Mysql
+        | DatabaseType::Doris
+        | DatabaseType::StarRocks
+        | DatabaseType::Goldendb
+        | DatabaseType::Gbase => "com.mysql.cj.jdbc.Driver".to_string(),
         // SQL Server
         DatabaseType::SqlServer => "com.microsoft.sqlserver.jdbc.SQLServerDriver".to_string(),
         // Oracle 系
@@ -973,59 +930,35 @@ mod tests {
     fn test_build_jdbc_url_extended_types() {
         // SQL Server
         let mssql = make_test_conn(DatabaseType::SqlServer, "localhost", 1433, "testdb");
-        assert_eq!(
-            build_jdbc_url(&mssql).unwrap(),
-            "jdbc:sqlserver://localhost:1433;databaseName=testdb"
-        );
+        assert_eq!(build_jdbc_url(&mssql).unwrap(), "jdbc:sqlserver://localhost:1433;databaseName=testdb");
 
         // Oracle
         let oracle = make_test_conn(DatabaseType::Oracle, "localhost", 1521, "ORCL");
-        assert_eq!(
-            build_jdbc_url(&oracle).unwrap(),
-            "jdbc:oracle:thin:@//localhost:1521/ORCL"
-        );
+        assert_eq!(build_jdbc_url(&oracle).unwrap(), "jdbc:oracle:thin:@//localhost:1521/ORCL");
 
         // ClickHouse
         let ch = make_test_conn(DatabaseType::ClickHouse, "localhost", 8123, "testdb");
-        assert_eq!(
-            build_jdbc_url(&ch).unwrap(),
-            "jdbc:clickhouse://localhost:8123/testdb"
-        );
+        assert_eq!(build_jdbc_url(&ch).unwrap(), "jdbc:clickhouse://localhost:8123/testdb");
 
         // Trino
         let trino = make_test_conn(DatabaseType::Trino, "localhost", 8080, "testdb");
-        assert_eq!(
-            build_jdbc_url(&trino).unwrap(),
-            "jdbc:trino://localhost:8080/testdb"
-        );
+        assert_eq!(build_jdbc_url(&trino).unwrap(), "jdbc:trino://localhost:8080/testdb");
 
         // DB2
         let db2 = make_test_conn(DatabaseType::Db2, "localhost", 50000, "testdb");
-        assert_eq!(
-            build_jdbc_url(&db2).unwrap(),
-            "jdbc:db2://localhost:50000/testdb"
-        );
+        assert_eq!(build_jdbc_url(&db2).unwrap(), "jdbc:db2://localhost:50000/testdb");
 
         // Hive
         let hive = make_test_conn(DatabaseType::Hive, "localhost", 10000, "testdb");
-        assert_eq!(
-            build_jdbc_url(&hive).unwrap(),
-            "jdbc:hive2://localhost:10000/testdb"
-        );
+        assert_eq!(build_jdbc_url(&hive).unwrap(), "jdbc:hive2://localhost:10000/testdb");
 
         // ManticoreSearch (MySQL 协议兼容)
         let manticore = make_test_conn(DatabaseType::ManticoreSearch, "localhost", 9306, "");
-        assert_eq!(
-            build_jdbc_url(&manticore).unwrap(),
-            "jdbc:mysql://localhost:9306/"
-        );
+        assert_eq!(build_jdbc_url(&manticore).unwrap(), "jdbc:mysql://localhost:9306/");
 
         // Databend
         let databend = make_test_conn(DatabaseType::Databend, "localhost", 8124, "testdb");
-        assert_eq!(
-            build_jdbc_url(&databend).unwrap(),
-            "jdbc:databend://localhost:8124/testdb"
-        );
+        assert_eq!(build_jdbc_url(&databend).unwrap(), "jdbc:databend://localhost:8124/testdb");
     }
 
     #[test]
@@ -1103,24 +1036,15 @@ mod tests {
     fn test_build_jdbc_url_pg_compatible() {
         // GaussDB
         let gaussdb = make_test_conn(DatabaseType::Gaussdb, "localhost", 5432, "testdb");
-        assert_eq!(
-            build_jdbc_url(&gaussdb).unwrap(),
-            "jdbc:postgresql://localhost:5432/testdb"
-        );
+        assert_eq!(build_jdbc_url(&gaussdb).unwrap(), "jdbc:postgresql://localhost:5432/testdb");
 
         // OpenGauss
         let opengauss = make_test_conn(DatabaseType::OpenGauss, "localhost", 5432, "testdb");
-        assert_eq!(
-            build_jdbc_url(&opengauss).unwrap(),
-            "jdbc:postgresql://localhost:5432/testdb"
-        );
+        assert_eq!(build_jdbc_url(&opengauss).unwrap(), "jdbc:postgresql://localhost:5432/testdb");
 
         // Kingbase
         let kingbase = make_test_conn(DatabaseType::Kingbase, "localhost", 54321, "testdb");
-        assert_eq!(
-            build_jdbc_url(&kingbase).unwrap(),
-            "jdbc:postgresql://localhost:54321/testdb"
-        );
+        assert_eq!(build_jdbc_url(&kingbase).unwrap(), "jdbc:postgresql://localhost:54321/testdb");
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub federation_enabled: bool,
 
 #### 1.4 Agent 目录注册
 **位置**: 
-- `crates/dbx-core/src/models/connection.rs` - 新增 `DatabaseType::Calcite`
+- `crates/dbx-core/src/models/connection.rs` - 新增 `DatabaseType::Calcite`、`VictoriaMetrics`、`Mqtt`
 - `crates/dbx-core/src/agent_catalog.rs` - 添加 Calcite Catalog Entry
 
 ```rust
@@ -55,6 +55,20 @@ AgentCatalogEntry {
     profiles: &[],
 }
 ```
+
+#### 1.6 新增数据库类型支持
+**位置**: `crates/dbx-core/src/models/connection.rs`
+
+新增数据库类型：
+- `DatabaseType::VictoriaMetrics` - VictoriaMetrics 时序数据库支持
+- `DatabaseType::Mqtt` - MQTT 消息队列支持
+
+**位置**: `crates/dbx-core/src/connection.rs`
+
+- 添加 `PoolKind::VictoriaMetrics` 和 `PoolKind::Mqtt` 枚举变体
+- 实现连接池创建逻辑（`DatabaseType::VictoriaMetrics` / `DatabaseType::Mqtt`）
+- 添加连接健康检查和 keepalive 支持
+- 修复 SSH 隧道 `allow_exec_channel_proxy` 参数传递
 
 #### 1.5 AppState 集成
 **位置**: `crates/dbx-core/src/connection.rs`
@@ -186,13 +200,14 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 ## 文件变更清单
 
 ### Rust (crates/dbx-core/src/)
-- `lib.rs` - 添加 calcite_agent 模块声明
-- `models/connection.rs` - 添加 DatabaseType::Calcite 和 federation_enabled 字段
+- `lib.rs` - 模块声明顺序调整
+- `models/connection.rs` - 添加 DatabaseType::Calcite/VictoriaMetrics/Mqtt 和 federation_enabled 字段
 - `agent_catalog.rs` - 添加 Calcite Catalog Entry
 - `query.rs` - 集成联邦分析逻辑
-- `connection.rs` - AppState 添加 calcite_agent 字段
+- `connection.rs` - AppState 添加 calcite_agent 字段、VictoriaMetrics/Mqtt 连接池支持
 - `federated.rs` - 核心联邦逻辑实现
 - `calcite_agent.rs` - Calcite Agent 生命周期管理
+- `federation_schema_visibility.rs` - 联邦模式 Schema 可见性控制
 
 ### TypeScript (apps/desktop/src/)
 - `lib/federated/federatedFormatter.ts` - 新建
@@ -207,5 +222,5 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 ---
 *实现日期: 2026-08-03*
 *最近更新: 2026-08-06*
-*版本: 1.1*
-*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成*
+*版本: 1.2*
+*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成，新增 VictoriaMetrics/Mqtt 支持*

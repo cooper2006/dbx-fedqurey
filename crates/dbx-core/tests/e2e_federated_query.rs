@@ -3,9 +3,7 @@
 
 #[cfg(test)]
 mod e2e_tests {
-    use dbx_core::calcite_agent::{
-        build_driver_class, build_jdbc_url, CalciteAgentConfig, CalciteAgentManager,
-    };
+    use dbx_core::calcite_agent::{build_driver_class, build_jdbc_url, CalciteAgentConfig, CalciteAgentManager};
     use dbx_core::federated::{
         analyze_federation, rewrite_federated_sql, validate_federation, FederationValidationError,
     };
@@ -25,12 +23,22 @@ mod e2e_tests {
 
     fn default_port_for_type(db_type: &DatabaseType) -> u16 {
         match db_type {
-            DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Kingbase
-            | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
-            | DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Kwdb
+            DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Uxdb
+            | DatabaseType::Vastbase
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kwdb
             | DatabaseType::Oscar => 5432,
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
-            | DatabaseType::Goldendb | DatabaseType::Gbase | DatabaseType::ManticoreSearch => 3306,
+            DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Goldendb
+            | DatabaseType::Gbase
+            | DatabaseType::ManticoreSearch => 3306,
             DatabaseType::SqlServer => 1433,
             DatabaseType::Oracle | DatabaseType::OceanbaseOracle => 1521,
             DatabaseType::Dameng => 5236,
@@ -124,27 +132,27 @@ mod e2e_tests {
     async fn test_single_connection_federated_query_flow() {
         // Setup: Create a single PostgreSQL connection with federation enabled
         let pg_conn = create_test_connection("pg_analytics", DatabaseType::Postgres, "analytics", true);
-        
+
         // Test SQL: Federated syntax with single connection
         let sql = "SELECT u.name, u.email FROM pg_analytics.public.users u WHERE u.active = true";
-        
+
         // Analyze federation
         let analysis = analyze_federation(sql, &[pg_conn.clone()]);
-        
+
         // Verify detection
         assert!(analysis.uses_federation_syntax, "Should detect federation syntax");
         assert!(analysis.is_single_connection, "Should be single connection");
         assert_eq!(analysis.connections.len(), 1);
         assert_eq!(analysis.connections[0], "pg_analytics");
-        
+
         // Rewrite SQL
         let rewritten = rewrite_federated_sql(sql, &analysis);
         assert!(rewritten.is_some(), "Should rewrite SQL");
-        
+
         let rewritten_sql = rewritten.unwrap();
         assert!(!rewritten_sql.contains("pg_analytics."), "Should remove connection prefix");
         assert!(rewritten_sql.contains("public.users"), "Should preserve schema.table");
-        
+
         println!("✓ Single connection federated query test passed");
     }
 
@@ -153,7 +161,7 @@ mod e2e_tests {
         // Setup: Create two connections for different databases
         let pg_conn = create_test_connection("pg_db", DatabaseType::Postgres, "analytics", true);
         let mysql_conn = create_test_connection("mysql_db", DatabaseType::Mysql, "shop", true);
-        
+
         // Test SQL: Cross-database JOIN
         let sql = r#"
             SELECT p.name, o.total_amount 
@@ -161,22 +169,22 @@ mod e2e_tests {
             JOIN mysql_db.shop.orders o ON p.id = o.product_id
             WHERE p.category = 'electronics'
         "#;
-        
+
         // Analyze federation
         let analysis = analyze_federation(sql, &[pg_conn.clone(), mysql_conn.clone()]);
-        
+
         // Verify multi-connection detection
         assert!(analysis.uses_federation_syntax, "Should detect federation syntax");
         assert!(!analysis.is_single_connection, "Should be multi-connection");
         assert_eq!(analysis.connections.len(), 2);
-        
+
         // Verify table references
         assert_eq!(analysis.table_refs.len(), 2);
         assert_eq!(analysis.table_refs[0].connection_name, "pg_db");
         assert_eq!(analysis.table_refs[0].table_name, "products");
         assert_eq!(analysis.table_refs[1].connection_name, "mysql_db");
         assert_eq!(analysis.table_refs[1].table_name, "orders");
-        
+
         println!("✓ Multi-connection federated query detection test passed");
     }
 
@@ -184,21 +192,21 @@ mod e2e_tests {
     async fn test_non_federated_query_unchanged() {
         // Setup: Create a regular connection without federation
         let conn = create_test_connection("my_db", DatabaseType::Postgres, "testdb", false);
-        
+
         // Test SQL: Regular SQL without federation syntax
         let sql = "SELECT * FROM users WHERE id = 1 AND status = 'active' ORDER BY created_at DESC";
-        
+
         // Analyze federation
         let analysis = analyze_federation(sql, &[conn.clone()]);
-        
+
         // Should not detect federation syntax
         assert!(!analysis.uses_federation_syntax, "Should not detect federation syntax");
         assert!(analysis.is_single_connection, "Should be treated as single connection");
-        
+
         // No rewriting needed
         let rewritten = rewrite_federated_sql(sql, &analysis);
         assert!(rewritten.is_none(), "Should not rewrite non-federated SQL");
-        
+
         println!("✓ Non-federated query test passed");
     }
 
@@ -206,7 +214,7 @@ mod e2e_tests {
     async fn test_subquery_federation_detection() {
         // Setup
         let conn = create_test_connection("main_db", DatabaseType::Postgres, "main", true);
-        
+
         // Test SQL: Subquery with federation syntax
         let sql = r#"
             SELECT * FROM main_db.analytics.customers c
@@ -215,13 +223,13 @@ mod e2e_tests {
                 WHERE o.amount > 1000
             )
         "#;
-        
+
         let analysis = analyze_federation(sql, &[conn.clone()]);
-        
+
         // Should detect federation in both main query and subquery
         assert!(analysis.uses_federation_syntax, "Should detect federation in subquery");
         assert_eq!(analysis.table_refs.len(), 2);
-        
+
         println!("✓ Subquery federation detection test passed");
     }
 
@@ -231,7 +239,7 @@ mod e2e_tests {
         let postgres_conn = create_test_connection("postgres", DatabaseType::Postgres, "analytics", true);
         let mysql_conn = create_test_connection("mysql", DatabaseType::Mysql, "ecommerce", true);
         let clickhouse_conn = create_test_connection("clickhouse", DatabaseType::ClickHouse, "logs", true);
-        
+
         // Test SQL: Complex JOIN across three connections
         let sql = r#"
             SELECT 
@@ -244,19 +252,19 @@ mod e2e_tests {
             WHERE p.price > 100
             ORDER BY o.order_date DESC
         "#;
-        
+
         let analysis = analyze_federation(sql, &[postgres_conn.clone(), mysql_conn.clone(), clickhouse_conn.clone()]);
-        
+
         // Should detect all three connections
         assert!(analysis.uses_federation_syntax, "Should detect federation syntax");
         assert_eq!(analysis.connections.len(), 3);
         assert!(analysis.connections.contains(&"postgres".to_string()));
         assert!(analysis.connections.contains(&"mysql".to_string()));
         assert!(analysis.connections.contains(&"clickhouse".to_string()));
-        
+
         // Should have 3 table references
         assert_eq!(analysis.table_refs.len(), 3);
-        
+
         println!("✓ Complex federated join test passed");
     }
 
@@ -264,10 +272,10 @@ mod e2e_tests {
     async fn test_schema_visibility_filtering() {
         // This test verifies that schema visibility configuration works correctly
         // in the federation context
-        
+
         // Note: Actual implementation would need to integrate with
         // SchemaVisibilityConfig from federation_grpc module
-        
+
         println!("✓ Schema visibility filtering test placeholder");
     }
 
@@ -282,13 +290,13 @@ mod e2e_tests {
         // Test graceful handling of invalid SQL
         let conn = create_test_connection("test", DatabaseType::Postgres, "db", true);
         let invalid_sql = "INVALID SQL SYNTAX {{{";
-        
+
         let analysis = analyze_federation(invalid_sql, &[conn.clone()]);
-        
+
         // Should not panic, return default values
         assert!(!analysis.uses_federation_syntax, "Invalid SQL should not trigger federation");
         assert!(analysis.is_single_connection, "Invalid SQL defaults to single connection");
-        
+
         println!("✓ Error handling test passed");
     }
 
@@ -745,7 +753,10 @@ mod e2e_tests {
 
         let mssql_url = build_jdbc_url(&mssql_conn).unwrap();
         assert!(mssql_url.contains("encrypt=true"), "SQL Server SSL URL should contain encrypt=true: {mssql_url}");
-        assert!(mssql_url.contains("trustServerCertificate=true"), "SQL Server SSL URL should contain trustServerCertificate: {mssql_url}");
+        assert!(
+            mssql_url.contains("trustServerCertificate=true"),
+            "SQL Server SSL URL should contain trustServerCertificate: {mssql_url}"
+        );
 
         let ch_url = build_jdbc_url(&ch_conn).unwrap();
         assert!(ch_url.contains("ssl=true"), "ClickHouse SSL URL should contain ssl=true: {ch_url}");
@@ -761,22 +772,8 @@ mod e2e_tests {
     #[tokio::test]
     async fn test_register_connection_parameter_building() {
         let conns = vec![
-            create_test_connection_with_port(
-                "pg_prod",
-                DatabaseType::Postgres,
-                "analytics",
-                true,
-                "10.0.0.1",
-                5432,
-            ),
-            create_test_connection_with_port(
-                "mysql_prod",
-                DatabaseType::Mysql,
-                "shop",
-                true,
-                "10.0.0.2",
-                3306,
-            ),
+            create_test_connection_with_port("pg_prod", DatabaseType::Postgres, "analytics", true, "10.0.0.1", 5432),
+            create_test_connection_with_port("mysql_prod", DatabaseType::Mysql, "shop", true, "10.0.0.2", 3306),
         ];
 
         for conn in &conns {
@@ -788,12 +785,7 @@ mod e2e_tests {
             assert!(!jdbc_url.is_empty(), "JDBC URL should not be empty for {}", conn.name);
             assert!(!driver_class.is_empty(), "Driver class should not be empty for {}", conn.name);
             assert!(jdbc_url.starts_with("jdbc:"), "JDBC URL should start with jdbc: prefix");
-            assert!(
-                jdbc_url.contains(&conn.host),
-                "JDBC URL should contain host '{}': {}",
-                conn.host,
-                jdbc_url
-            );
+            assert!(jdbc_url.contains(&conn.host), "JDBC URL should contain host '{}': {}", conn.host, jdbc_url);
 
             // 验证 JSON 参数可以正确序列化（模拟 register_connection 内部逻辑）
             let params = serde_json::json!({
@@ -955,9 +947,7 @@ mod e2e_tests {
     /// 不会将其计入联邦连接列表。这种情况下查询可能不会被路由到 Calcite Agent。
     #[tokio::test]
     async fn test_unknown_connection_in_federation_syntax() {
-        let conns = vec![
-            create_test_connection("pg_db", DatabaseType::Postgres, "analytics", true),
-        ];
+        let conns = vec![create_test_connection("pg_db", DatabaseType::Postgres, "analytics", true)];
 
         // unknown_conn 不在连接列表中
         let sql = "SELECT * FROM pg_db.public.users u JOIN unknown_conn.public.orders o ON u.id = o.user_id";

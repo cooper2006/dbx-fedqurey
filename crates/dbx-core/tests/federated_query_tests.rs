@@ -88,7 +88,8 @@ mod tests {
         let pg_conn = make_test_connection("pg_db", DatabaseType::Postgres, "analytics");
         let mysql_conn = make_test_connection("mysql_db", DatabaseType::Mysql, "shop");
 
-        let sql = "SELECT p.name, o.total FROM pg_db.public.products p JOIN mysql_db.shop.orders o ON p.id = o.product_id";
+        let sql =
+            "SELECT p.name, o.total FROM pg_db.public.products p JOIN mysql_db.shop.orders o ON p.id = o.product_id";
 
         let analysis = analyze_federation(sql, &[pg_conn.clone(), mysql_conn.clone()]);
 
@@ -96,11 +97,11 @@ mod tests {
         assert!(!analysis.is_single_connection, "Should be multi-connection");
         assert_eq!(analysis.connections.len(), 2);
         assert_eq!(analysis.table_refs.len(), 2);
-        
+
         // Check first table reference
         assert_eq!(analysis.table_refs[0].connection_name, "pg_db");
         assert_eq!(analysis.table_refs[0].table_name, "products");
-        
+
         // Check second table reference
         assert_eq!(analysis.table_refs[1].connection_name, "mysql_db");
         assert_eq!(analysis.table_refs[1].table_name, "orders");

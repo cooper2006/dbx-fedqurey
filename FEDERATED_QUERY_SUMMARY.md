@@ -214,6 +214,8 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 |-----------|--------------|------|
 | PostgreSQL | `connection.db.schema."table" alias` | `myconn.mydb.public."users" u` |
 | MySQL | `connection.db."table" alias` | `myconn.shop."orders" o` |
+| VictoriaMetrics | HTTP API 查询 | `http://host:port?db=default` |
+| MQTT | 消息订阅/发布 | `tcp://host:port` |
 
 **连接名匹配**：前缀对应已保存的 `connection.name`，匹配**不区分大小写**（如 `postgresql.` 可命中连接 `PostgreSQL`）；匹配到的引用按连接配置中的规范名称处理。连接名含大写时建议在 SQL 中加引号（如 `"PostgreSQL".`），避免目标数据库对未加引号标识符的大小写折叠。
 
@@ -247,13 +249,14 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 ## 文件变更清单
 
 ### Rust (crates/dbx-core/src/)
-- ✅ `lib.rs` - 添加 calcite_agent 模块声明
-- ✅ `models/connection.rs` - 添加 DatabaseType::Calcite 和 federation_enabled 字段
+- ✅ `lib.rs` - 模块声明顺序调整
+- ✅ `models/connection.rs` - 添加 DatabaseType::Calcite/VictoriaMetrics/Mqtt 和 federation_enabled 字段
 - ✅ `agent_catalog.rs` - 添加 Calcite Catalog Entry
 - ✅ `query.rs` - 集成联邦分析逻辑
-- ✅ `connection.rs` - AppState 添加 calcite_agent 字段
+- ✅ `connection.rs` - AppState 添加 calcite_agent 字段、VictoriaMetrics/Mqtt 连接池支持
 - ✅ `federated.rs` - 核心联邦逻辑实现
 - ✅ `calcite_agent.rs` - Calcite Agent 生命周期管理（清理重复代码）
+- ✅ `federation_schema_visibility.rs` - 联邦模式 Schema 可见性控制
 
 ### TypeScript (apps/desktop/src/)
 - ✅ `types/database.ts` - 添加 federationEnabled 字段
