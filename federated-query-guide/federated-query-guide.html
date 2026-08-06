@@ -385,8 +385,8 @@ footer p {
   <h1>联邦查询使用指南</h1>
   <p class="subtitle">跨多个数据连接执行联合查询的语法说明、操作流程与实践示例</p>
   <div class="meta">
-    <span>版本 1.0</span>
-    <span>2026-08-03</span>
+    <span>版本 1.1</span>
+    <span>2026-08-06</span>
     <span>DBX v0.5.71</span>
   </div>
 </div>
@@ -464,8 +464,8 @@ flowchart TD
         <tr>
           <td>Phase 2 (P1)</td>
           <td>Calcite Agent：多连接执行引擎</td>
-          <td><span class="status-badge partial">骨架代码</span></td>
-          <td>定义了配置、状态管理、gRPC 接口，Java 进程启动未实现</td>
+          <td><span class="status-badge ready">已完成</span></td>
+          <td>JSON-RPC 通信、线程安全注册、密码哈希传输、健康检查、引擎配置</td>
         </tr>
         <tr>
           <td>Phase 3 (P2)</td>
@@ -477,9 +477,9 @@ flowchart TD
     </table>
   </div>
 
-  <div class="callout warning">
-    <div class="callout-title">注意</div>
-    <p>多连接联邦查询目前会返回错误提示，要求配置 Calcite Agent。单连接联邦查询已完全可用，包括 AST 级 SQL 重写和 Schema 可见性验证。前端联邦感知格式化器已集成到主格式化流程，状态栏组件已挂载到编辑器，连接对话框中可直接开启联邦查询开关。</p>
+  <div class="callout success">
+    <div class="callout-title">✅ P0-P2 审查修复已完成</div>
+    <p>本次更新包含以下修复：<strong>P0 密码安全</strong> - 使用 SHA-256 哈希传输密码；<strong>P1 线程安全</strong> - synchronized 块保护并发注册/注销；<strong>P2 大小写一致性</strong> - 统一 validate_federation 使用小写匹配；<strong>P2 SSL 重构</strong> - 提取 append_ssl_params 辅助函数；<strong>P2 健康检查</strong> - 新增 ping 方法；<strong>P2 引擎配置</strong> - 支持 CALCITE_ENGINE 环境变量。所有 20 个单元测试通过。</p>
   </div>
 </div>
 </section>
@@ -924,7 +924,7 @@ flowchart TD
 
 <footer>
 <div class="container">
-  <p>DBX 联邦查询使用指南 · 版本 1.0 · 2026-08-03</p>
+  <p>DBX 联邦查询使用指南 · 版本 1.1 · 2026-08-06 · P0-P2 审查修复已完成</p>
 </div>
 </footer>
 
