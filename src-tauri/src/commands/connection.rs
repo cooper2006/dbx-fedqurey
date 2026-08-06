@@ -1077,6 +1077,13 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::VictoriaMetrics => {
+                let client =
+                    db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &config, connect_timeout)?;
+                db::victoriametrics_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Nacos => {
                 let admin_config = state.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
@@ -1097,6 +1104,17 @@ async fn test_connection_with_info_inner(
             DatabaseType::MessageQueue => {
                 Err("Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
                     .to_string())
+            }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::Mqtt => {
+                let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
+                let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                client.disconnect().await;
+                Ok("Connection successful".to_string())
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::Mqtt => {
+                Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string())
             }
             db_type if database_capabilities::is_agent_type(&db_type) => {
                 match test_agent_connection(state, &config, &host, port).await {
@@ -1403,6 +1421,12 @@ pub async fn connect_db(
             db::influxdb_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::InfluxDb(client)
         }
+        DatabaseType::VictoriaMetrics => {
+            let client =
+                db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &db_config, connect_timeout)?;
+            db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::VictoriaMetrics(client)
+        }
         DatabaseType::Nacos => {
             let admin_config = state.nacos_admin_config_for_connection(&id, &config).await?;
             let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
@@ -1449,6 +1473,16 @@ pub async fn connect_db(
             state.external_driver_pool("jdbc", &jdbc_config).await?
         }
         DatabaseType::Jdbc => state.external_driver_pool("jdbc", &db_config).await?,
+        #[cfg(feature = "mq-admin")]
+        DatabaseType::Mqtt => {
+            let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&db_config)?;
+            let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+            PoolKind::Mqtt(client)
+        }
+        #[cfg(not(feature = "mq-admin"))]
+        DatabaseType::Mqtt => {
+            return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
+        }
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 

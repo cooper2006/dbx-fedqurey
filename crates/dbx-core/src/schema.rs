@@ -581,6 +581,10 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             drop(connections);
             return db::influxdb_driver::list_databases(&client).await;
         }
+        if let Some(client) = extract_pool!(&connections, connection_id, VictoriaMetrics) {
+            drop(connections);
+            return db::victoriametrics_driver::list_databases(&client).await;
+        }
         try_sqlserver!(connections, connection_id, list_databases);
         if let Some(client) = extract_pool!(&connections, connection_id, Agent) {
             let is_mongo =
@@ -1854,6 +1858,12 @@ async fn list_tables_once(
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
+        if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
+            drop(connections);
+            return db::victoriametrics_driver::list_tables(&client)
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
+        }
         if let Some(linked) = crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema) {
             if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
                 drop(connections);
@@ -2854,6 +2864,14 @@ mod tests {
     }
 
     #[test]
+    fn mysql_object_source_sql_emits_show_create_trigger() {
+        assert_eq!(
+            mysql_object_source_sql("tenant_db", "before_insert", &db::ObjectSourceKind::Trigger),
+            "SHOW CREATE TRIGGER `tenant_db`.`before_insert`"
+        );
+    }
+
+    #[test]
     fn mysql_object_source_sql_emits_show_create_materialized_view() {
         // Regression for the review comment: Doris / StarRocks ride on the MySQL
         // protocol, so the MV branch of mysql_object_source_sql must produce a
@@ -2880,6 +2898,7 @@ mod tests {
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::MaterializedView), 1);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Procedure), 2);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Function), 2);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Trigger), 2);
     }
 
     #[test]
@@ -4530,6 +4549,10 @@ async fn list_object_statistics_once(
             .await;
         }
     }
+    if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
+        drop(connections);
+        return db::victoriametrics_driver::list_object_statistics(&client).await;
+    }
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     match pool {
         PoolKind::Mysql(p, mode) => {
@@ -5208,6 +5231,10 @@ async fn get_columns_core_for_session_inner(
             if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
                 drop(connections);
                 return db::influxdb_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
+            }
+            if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
+                drop(connections);
+                return db::victoriametrics_driver::get_columns(&client, table).await.map(deduplicate_column_infos);
             }
             if let Some(linked) = crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema) {
                 if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
@@ -6597,8 +6624,8 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {qualified_name}"),
         db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {qualified_name}"),
         db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {qualified_name}"),
-        db::ObjectSourceKind::Trigger
-        | db::ObjectSourceKind::Sequence
+        db::ObjectSourceKind::Trigger => format!("SHOW CREATE TRIGGER {qualified_name}"),
+        db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
@@ -6622,7 +6649,7 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
 /// The shape of the result is dialect-dependent:
 /// - `SHOW CREATE VIEW`, Doris/StarRocks `SHOW CREATE MATERIALIZED VIEW` →
 ///   `(Name, DDL)` → DDL at index `1`.
-/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION` →
+/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION`, `SHOW CREATE TRIGGER` →
 ///   `(Name, sql_mode, DDL, …)` → DDL at index `2`.
 ///
 /// Encoded as a function so the index can be unit-tested without a live DB.

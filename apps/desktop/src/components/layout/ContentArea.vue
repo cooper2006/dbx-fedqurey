@@ -58,6 +58,7 @@ const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/Vec
 const HBaseBrowser = defineAsyncComponent(() => import("@/components/hbase/HBaseBrowser.vue"));
 const ElasticsearchJsonResponsePanel = defineAsyncComponent(() => import("@/components/common/ElasticsearchJsonResponsePanel.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
+const MqttAdminConsole = defineAsyncComponent(() => import("@/components/mqtt/MqttAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
 const NacosDashboard = defineAsyncComponent(() => import("@/components/nacos/NacosDashboard.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
@@ -107,10 +108,10 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   allNullColumnCount: number;
   canToggleAllNullColumns: boolean;
   toggleAllNullColumns: () => void;
-  defaultCopyExtractor: string;
-  defaultCopyExtractorLabel: string;
-  copyExtractorMenuItems: Array<{ value: string; label: string; disabled?: boolean; separatorBefore?: boolean }>;
-  setDefaultCopyExtractor: (value: string) => void;
+  defaultCopyPreference: string;
+  defaultCopyPreferenceLabel: string;
+  copyPreferenceMenuItems: Array<{ value: string; label: string; disabled?: boolean; separatorBefore?: boolean }>;
+  setDefaultCopyPreference: (value: string) => void;
   openExtractorConfiguration: () => void;
   showDdl: boolean;
   toggleDdl: (tab?: TableInfoTab) => void;
@@ -971,6 +972,10 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
+              :result-columns="activeTab.result?.columns"
+              :result-source-statement="activeTab.result?.sourceStatement"
+              :result-source-from="activeTab.result?.sourceFrom"
+              :result-source-to="activeTab.result?.sourceTo"
               :statement-execution-markers="activeStatementExecutionMarkers"
               :initial-viewport="activeTab.editorViewport"
               :initial-selection="activeTab.editorSelection"
@@ -1285,10 +1290,10 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                       <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
                     </div>
                     <DataGridCopyFormatControl
-                      :current-label="dataGridRef?.defaultCopyExtractorLabel ?? '-'"
-                      :current-value="dataGridRef?.defaultCopyExtractor ?? ''"
-                      :items="dataGridRef?.copyExtractorMenuItems ?? []"
-                      @select="dataGridRef?.setDefaultCopyExtractor($event)"
+                      :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+                      :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+                      :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+                      @select="dataGridRef?.setDefaultCopyPreference($event)"
                       @configure="openDataGridExtractorConfiguration"
                     />
                   </PopoverContent>
@@ -1731,10 +1736,10 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
               </div>
               <DataGridCopyFormatControl
-                :current-label="dataGridRef?.defaultCopyExtractorLabel ?? '-'"
-                :current-value="dataGridRef?.defaultCopyExtractor ?? ''"
-                :items="dataGridRef?.copyExtractorMenuItems ?? []"
-                @select="dataGridRef?.setDefaultCopyExtractor($event)"
+                :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+                :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+                :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+                @select="dataGridRef?.setDefaultCopyPreference($event)"
                 @configure="openDataGridExtractorConfiguration"
               />
             </PopoverContent>
@@ -1875,6 +1880,12 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'mq'">
       <div class="flex-1 min-h-0">
         <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="activeConnection?.read_only ?? false" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'mqtt'">
+      <div class="flex-1 min-h-0">
+        <MqttAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-topic="activeTab.mqttInitialTopic" />
       </div>
     </template>
 

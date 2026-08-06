@@ -4,6 +4,7 @@ export type ShortcutActionId =
   | "executeSql"
   | "executeSqlInNewResultTab"
   | "formatSql"
+  | "expandSelectStar"
   | "toggleLineComment"
   | "saveSql"
   | "acceptCompletion"
@@ -55,6 +56,7 @@ export type ShortcutActionId =
   | "pasteSidebarSelection"
   | "editSidebarConnection"
   | "openDataInNewTab"
+  | "viewTableDdl"
   | "sendSelectionToAi";
 
 export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar";
@@ -101,6 +103,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutFormatSql",
     scope: "editor",
     defaultShortcut: "Shift+Mod+F",
+  },
+  {
+    id: "expandSelectStar",
+    labelKey: "settings.shortcutExpandSelectStar",
+    scope: "editor",
+    defaultShortcut: "Mod+Shift+X",
   },
   {
     id: "toggleLineComment",
@@ -408,6 +416,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     scope: "sidebar",
     defaultShortcut: "Alt",
     inputKind: "modifier-only",
+  },
+  {
+    id: "viewTableDdl",
+    labelKey: "settings.shortcutViewTableDdl",
+    scope: "sidebar",
+    defaultShortcut: "Shift+Mod+D",
   },
   {
     id: "sendSelectionToAi",

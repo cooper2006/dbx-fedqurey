@@ -416,6 +416,7 @@ export const redisSetAdd = forward("redisSetAdd");
 export const redisSetRemove = forward("redisSetRemove");
 export const redisZadd = forward("redisZadd");
 export const redisZrem = forward("redisZrem");
+export const redisZsetUpdate = forward("redisZsetUpdate");
 export const redisStreamAdd = forward("redisStreamAdd");
 export const redisJsonSet = forward("redisJsonSet");
 export const redisCheckJsonModule = forward("redisCheckJsonModule");
@@ -491,6 +492,7 @@ export const mqListClientConnections = forward("mqListClientConnections");
 export const mqListClientChannels = forward("mqListClientChannels");
 export const mqCloseClientConnection = forward("mqCloseClientConnection");
 export const mqListSubscriptions = forward("mqListSubscriptions");
+export const mqEnrichSubscriptions = forward("mqEnrichSubscriptions");
 export const mqCreateSubscription = forward("mqCreateSubscription");
 export const mqDeleteSubscription = forward("mqDeleteSubscription");
 export const mqSkipMessages = forward("mqSkipMessages");
@@ -751,3 +753,13 @@ export type {
   AgentEvent,
   SqlFileEntry,
 } from "@/lib/backend/tauri";
+
+// MQTT
+export const mqttGetBrokerInfo = forward("mqttGetBrokerInfo");
+export const mqttSubscribe = forward("mqttSubscribe");
+export const mqttUnsubscribe = forward("mqttUnsubscribe");
+export const mqttPublish = forward("mqttPublish");
+export const mqttListTopics = forward("mqttListTopics");
+export const mqttGetTopicTree = forward("mqttGetTopicTree");
+export const mqttGetMessages = forward("mqttGetMessages");
+export const mqttClearMessages = forward("mqttClearMessages");

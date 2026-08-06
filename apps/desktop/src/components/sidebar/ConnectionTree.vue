@@ -10,7 +10,8 @@ import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeTy
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
 import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
-import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
+import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
@@ -222,7 +223,6 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
   }
 }
 
-const isSearching = computed(() => !!deferredSearchQuery.value);
 const sidebarFilterGuards = computed(() => resolveSidebarFilterGuards(showConnectedConnectionsOnly.value, searchQuery.value, hasSearchScopeFilter.value));
 // Connected-only filtering changes only root visibility, so descendant-local
 // features stay available while operations requiring the full root list pause.
@@ -1177,7 +1177,7 @@ function findSchemaNode(nodes: TreeNode[], connId: string, database: string, sch
 }
 
 function onSearchToggle(node: TreeNode) {
-  if (!isSearching.value || !node.children) return;
+  if (!isTreeSearchFiltering.value || !node.children) return;
   const next = new Set(searchCollapsedIds.value);
   if (node.isExpanded) next.add(node.id);
   else next.delete(node.id);
@@ -1262,6 +1262,14 @@ function openSidebarDdl(node: TreeNode) {
   beginSidebarAction();
   sidebarDdlTarget.value = createSidebarActionTarget(node);
   sidebarDdlOpen.value = true;
+}
+
+function openSidebarDdlForSelection(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
+  if (!node || !sidebarNodeSupportsDdlView(node)) return false;
+  openSidebarDdl(node);
+  return true;
 }
 
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
@@ -1432,7 +1440,9 @@ watch(sidebarTableNameFilterOpen, (open) => {
 
 function collapseAllTreeNodes() {
   store.collapseAllTreeNodes();
-  if (isSearching.value) {
+  // 与 onSearchToggle 一致：scope-only 过滤也要填充 searchCollapsedIds，
+  // 否则 filteredNodes 会用空集合把所有分组重建成展开态，“全部折叠”空操作。
+  if (isTreeSearchFiltering.value) {
     searchCollapsedIds.value = new Set(flatTreeIndex.value.expandableNodeIds);
   }
 }
@@ -1525,6 +1535,13 @@ function onWindowKeydown(event: KeyboardEvent) {
     }
     if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isPasteSidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts)) {
       if (requestSelectedSidebarPaste()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isViewTableDdlShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (openSidebarDdlForSelection()) {
         event.preventDefault();
         event.stopPropagation();
       }

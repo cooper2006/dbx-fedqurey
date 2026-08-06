@@ -36,7 +36,7 @@ import { getPostgresDataTypeHelp } from "@/lib/table/postgresDataTypeHelp";
 import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
-import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -55,6 +55,7 @@ import {
   dataTypeLengthInputValue,
   dataTypeLengthUnitValue,
   defaultNewColumnDataType,
+  filterStructureIndexColumnOptions,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
@@ -620,7 +621,7 @@ function onIndexColResize(e: MouseEvent, col: number) {
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
-const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type));
+const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
@@ -1143,7 +1144,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
     columns: columns.value,
-    indexes: indexes.value,
+    indexes: sanitizeStructureIndexesForCapabilities(indexes.value, structureCapabilities.value),
     foreignKeys: foreignKeys.value,
     triggers: triggers.value,
     tableComment: tableComment.value,
@@ -2108,11 +2109,10 @@ const availableColumnNames = computed(() =>
 );
 
 const colSearch = ref("");
-const filteredColumnNames = computed(() => {
-  const q = colSearch.value.toLowerCase().trim();
-  if (!q) return availableColumnNames.value;
-  return availableColumnNames.value.filter((c) => c.toLowerCase().includes(q));
-});
+
+function filteredIndexColumnNames(selectedColumns: readonly string[]): string[] {
+  return filterStructureIndexColumnOptions(availableColumnNames.value, selectedColumns, colSearch.value);
+}
 
 function toggleIndexColumn(index: EditableStructureIndex, col: string) {
   const previousColumns = [...index.columns];
@@ -3163,7 +3163,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                         <div class="px-[var(--structure-cell-px)] pb-1 pt-0.5">
                           <Input v-model="colSearch" :class="structureControlClass" :placeholder="t('grid.search')" @click.stop />
                         </div>
-                        <DropdownMenuCheckboxItem v-for="col in filteredColumnNames" :key="col" :checked="index.columns.includes(col)" :class="index.columns.includes(col) ? 'bg-primary/10' : ''" @select.prevent @click="toggleIndexColumn(index, col)">
+                        <DropdownMenuCheckboxItem v-for="col in filteredIndexColumnNames(index.columns)" :key="col" :checked="index.columns.includes(col)" :class="index.columns.includes(col) ? 'bg-primary/10' : ''" @select.prevent @click="toggleIndexColumn(index, col)">
                           {{ col }}
                         </DropdownMenuCheckboxItem>
                       </DropdownMenuContent>
@@ -3199,7 +3199,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                         <div class="px-[var(--structure-cell-px)] pb-1 pt-0.5">
                           <Input v-model="colSearch" :class="structureControlClass" :placeholder="t('grid.search')" @click.stop />
                         </div>
-                        <DropdownMenuCheckboxItem v-for="col in filteredColumnNames" :key="col" :checked="index.includedColumns.includes(col)" :class="index.includedColumns.includes(col) ? 'bg-primary/10' : ''" @select.prevent @click="toggleIncludedColumn(index, col)">
+                        <DropdownMenuCheckboxItem v-for="col in filteredIndexColumnNames(index.includedColumns)" :key="col" :checked="index.includedColumns.includes(col)" :class="index.includedColumns.includes(col) ? 'bg-primary/10' : ''" @select.prevent @click="toggleIncludedColumn(index, col)">
                           {{ col }}
                         </DropdownMenuCheckboxItem>
                       </DropdownMenuContent>

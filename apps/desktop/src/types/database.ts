@@ -66,8 +66,10 @@ export type DatabaseType =
   | "zookeeper"
   | "iris"
   | "influxdb"
+  | "victoriametrics"
   | "jdbc"
   | "mq"
+  | "mqtt"
   | "nacos";
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
@@ -241,6 +243,8 @@ export interface SshTunnelConfig {
    * for connections that already have `use_ssh_agent` configured.
    */
   auth_method?: "password" | "key" | "key+password" | "agent" | "none";
+  /** Allow `nc` through an SSH exec channel when direct-tcpip is prohibited. */
+  allow_exec_channel_proxy?: boolean;
   /**
    * When set, this layer references a shared tunnel profile; the profile's
    * configuration replaces this layer's fields at connect time (only `id`
@@ -579,6 +583,8 @@ export interface QueryResult {
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Set only for SQL Server informational messages emitted by the backend. */
+  server_message?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -821,7 +827,8 @@ export type TreeNodeType =
   | "mongo-collection"
   | "vector-database"
   | "vector-collection"
-  | "elasticsearch-index";
+  | "elasticsearch-index"
+  | "mqtt-topic";
 
 export interface ConnectionGroup {
   id: string;
@@ -1009,6 +1016,7 @@ export interface QueryTab {
     | "etcd-access-control"
     | "zookeeper"
     | "mq"
+    | "mqtt"
     | "nacos"
     | "nacos-dashboard"
     | "objects"
@@ -1022,6 +1030,7 @@ export interface QueryTab {
   hbaseCreateTableOnOpen?: boolean;
   mqTenant?: string;
   mqInitialTab?: "topics";
+  mqttInitialTopic?: string;
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   nacosTargetDataId?: string;
@@ -1055,6 +1064,7 @@ export interface QueryTab {
     primaryKeys: string[];
   };
   tableMetaUpdatedAt?: number;
+  pendingDataChangeCount?: number;
   /** 冷缓存打开表数据时元数据仍在途：行标识未知，编辑/保存必须等待其落地 */
   tableMetaPending?: boolean;
   /** 取消请求单调计数：isCancelling 是瞬态的（取消失败/查询先完成会被清），

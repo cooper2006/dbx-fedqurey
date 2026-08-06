@@ -66,6 +66,9 @@ const patterns: [RegExp, string][] = [
   [/^SOCKS proxy connect rejected \(code (\d+)\)$/, "settings.tunnelsSocksConnectRejected"],
   [/^Unsupported SOCKS bound address type: (\d+)$/, "settings.tunnelsSocksUnsupportedAddrType"],
 
+  // SSH keyboard-interactive prompts (for example JumpServer TOTP).
+  [/^(?:SSH layer \d+ failed:\s*)?SSH keyboard-interactive authentication was cancelled$/, "connection.sshTotpCancelled"],
+
   // Query result export limits (crates/dbx-core/src/query_result_export.rs)
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
   [/^Streaming export needs a result-set session, but this driver returned no session_id\.$/, "exportProgress.agentSessionMissing"],
@@ -125,7 +128,10 @@ function translateStructuredBackendError(t: BackendErrorTranslate, error: Backen
   const translated = t(error.messageKey, error.messageParams);
   const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
   const detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : undefined;
-  return detail && detail !== summary ? `${summary}\n\n${detail}` : summary;
+  const rawAdapterCode = error.diagnostics?.adapterCode;
+  const adapterCode = typeof rawAdapterCode === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawAdapterCode) ? rawAdapterCode : undefined;
+  const diagnosticDetail = detail && adapterCode ? `[${adapterCode}] ${detail}` : (detail ?? adapterCode);
+  return diagnosticDetail && diagnosticDetail !== summary ? `${summary}\n\n${diagnosticDetail}` : summary;
 }
 
 export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
