@@ -325,6 +325,11 @@ pub struct SshTunnelConfig {
     /// password auth if the key is rejected.
     #[serde(default)]
     pub auth_method: String,
+    /// Allow an SSH session exec channel to run `nc` when the server rejects
+    /// `direct-tcpip`. Disabled by default because this can bypass a server's
+    /// TCP-forwarding policy; enable only for trusted JumpServer/Koko setups.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_exec_channel_proxy: bool,
     /// When non-empty, this layer references a shared tunnel profile
     /// (Settings > Tunnels). The profile's configuration replaces this
     /// layer's own fields at connect time; only `id` and `enabled` are
@@ -538,6 +543,8 @@ pub enum DatabaseType {
     CloudflareD1,
     #[serde(rename = "influxdb")]
     InfluxDb,
+    #[serde(rename = "victoriametrics")]
+    VictoriaMetrics,
     #[serde(rename = "questdb")]
     Questdb,
     Jdbc,
@@ -545,6 +552,10 @@ pub enum DatabaseType {
     /// system is determined by `external_config.systemKind`.
     #[serde(rename = "mq")]
     MessageQueue,
+    /// MQTT broker connection. The broker address, client ID, and authentication
+    /// are stored in `external_config`.
+    #[serde(rename = "mqtt")]
+    Mqtt,
     /// Apache Calcite federation engine for multi-connection queries
     #[serde(rename = "calcite")]
     Calcite,

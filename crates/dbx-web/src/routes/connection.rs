@@ -161,9 +161,6 @@ async fn run_temporary_connection_test(
     app.configs.write().await.insert(temp_id.clone(), config.clone());
 
     let pool_result = app.get_or_create_pool(&temp_id, config.database.as_deref()).await;
-    if let Err(error) = &pool_result {
-        log::error!("connection test failed ({:?} {}:{} user={:?} db={:?}): {error}", config.db_type, config.host, config.port, config.username, config.database);
-    }
     let database_info = if include_database_info {
         match &pool_result {
             Ok(_) => match app.connection_database_info(&temp_id, config.database.as_deref()).await {

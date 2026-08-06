@@ -9,9 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{
-    visit_relations, visit_relations_mut, Ident, ObjectName, ObjectNamePart, Statement,
-};
+use sqlparser::ast::{visit_relations, visit_relations_mut, Ident, ObjectName, ObjectNamePart, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
@@ -49,6 +47,17 @@ pub struct FederatedAnalysis {
     pub uses_federation_syntax: bool,
 }
 
+/// Resolve a connection by name, preferring an exact (case-sensitive) match and
+/// falling back to a case-insensitive lookup. Exact priority avoids silently
+/// shadowing two connections whose names differ only by case.
+fn resolve_connection<'a>(
+    exact_map: &HashMap<&str, &'a ConnectionConfig>,
+    insensitive_map: &HashMap<String, &'a ConnectionConfig>,
+    name: &str,
+) -> Option<&'a ConnectionConfig> {
+    exact_map.get(name).copied().or_else(|| insensitive_map.get(&name.to_lowercase()).copied())
+}
+
 /// Parse SQL and detect federation patterns
 pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> FederatedAnalysis {
     let mut table_refs = Vec::new();
@@ -71,16 +80,17 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
         }
     };
 
-    // Build a map from lowercased connection name to config for quick lookup.
-    // Lookups are case-insensitive so `postgresql` matches a connection named `PostgreSQL`.
-    let conn_map: HashMap<String, &ConnectionConfig> = connections
-        .iter()
-        .map(|c| (c.name.to_lowercase(), c))
-        .collect();
+    // Build maps for connection lookup. Exact names take priority; a
+    // case-insensitive map is the fallback so `postgresql` matches a connection
+    // named `PostgreSQL`. Keeping both avoids silently shadowing two connections
+    // whose names differ only by case (e.g. "MyDB" vs "mydb").
+    let exact_map: HashMap<&str, &ConnectionConfig> = connections.iter().map(|c| (c.name.as_str(), c)).collect();
+    let insensitive_map: HashMap<String, &ConnectionConfig> =
+        connections.iter().map(|c| (c.name.to_lowercase(), c)).collect();
 
     // Walk through all statements and extract table references
     for stmt in &statements {
-        extract_table_refs(stmt, &conn_map, &mut table_refs, &mut uses_federation_syntax);
+        extract_table_refs(stmt, &exact_map, &insensitive_map, &mut table_refs, &mut uses_federation_syntax);
     }
 
     // Deduplicate and order connections (exclude empty connection names from non-federated refs)
@@ -92,11 +102,8 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
     }
 
     let is_single_connection = connections_seen.len() <= 1;
-    let single_connection = if is_single_connection && !connections_seen.is_empty() {
-        Some(connections_seen[0].clone())
-    } else {
-        None
-    };
+    let single_connection =
+        if is_single_connection && !connections_seen.is_empty() { Some(connections_seen[0].clone()) } else { None };
 
     FederatedAnalysis {
         table_refs,
@@ -110,7 +117,8 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
 /// Extract table references from a statement, detecting federation patterns
 fn extract_table_refs(
     stmt: &Statement,
-    conn_map: &HashMap<String, &ConnectionConfig>,
+    exact_map: &HashMap<&str, &ConnectionConfig>,
+    insensitive_map: &HashMap<String, &ConnectionConfig>,
     table_refs: &mut Vec<FederatedTableRef>,
     uses_federation: &mut bool,
 ) {
@@ -128,9 +136,9 @@ fn extract_table_refs(
         if parts.len() >= 3 {
             // 3 parts: connection.schema.table (PostgreSQL) or connection.database.table (MySQL)
             // 4 parts: connection.database.schema.table (full qualified)
-            // Try to match the first part as a connection name (case-insensitive)
+            // Try to match the first part as a connection name (exact first, then case-insensitive)
             let conn_name = parts[0];
-            if let Some(config) = conn_map.get(&conn_name.to_lowercase()) {
+            if let Some(config) = resolve_connection(exact_map, insensitive_map, conn_name) {
                 *uses_federation = true;
                 let (database_name, schema_name, table_name) = if parts.len() >= 4 {
                     // connection.database.schema.table
@@ -184,11 +192,25 @@ fn get_default_schema(db_type: &crate::models::connection::DatabaseType, databas
     use crate::models::connection::DatabaseType as DT;
     match db_type {
         // PostgreSQL 系 — 默认 schema 为 "public"
-        DT::Postgres | DT::Redshift | DT::Kingbase | DT::Highgo | DT::Uxdb
-        | DT::Vastbase | DT::Gaussdb | DT::OpenGauss | DT::Kwdb | DT::Oscar => "public".to_string(),
+        DT::Postgres
+        | DT::Redshift
+        | DT::Kingbase
+        | DT::Highgo
+        | DT::Uxdb
+        | DT::Vastbase
+        | DT::Gaussdb
+        | DT::OpenGauss
+        | DT::Kwdb
+        | DT::Oscar => "public".to_string(),
         // MySQL 系 — schema 等同于 database 名
-        DT::Mysql | DT::Doris | DT::StarRocks | DT::Goldendb | DT::Gbase
-        | DT::ManticoreSearch | DT::Databend | DT::ClickHouse => database.to_string(),
+        DT::Mysql
+        | DT::Doris
+        | DT::StarRocks
+        | DT::Goldendb
+        | DT::Gbase
+        | DT::ManticoreSearch
+        | DT::Databend
+        | DT::ClickHouse => database.to_string(),
         // SQL Server — 默认 schema 为 "dbo"
         DT::SqlServer => "dbo".to_string(),
         // Oracle 系 — 默认 schema 等同于用户名（此处用 database 代替）
@@ -276,7 +298,11 @@ impl std::fmt::Display for FederationValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FederationValidationError::FederationNotEnabled(conn) => {
-                write!(f, "Connection '{}' does not have federated query enabled. Enable it in the connection settings.", conn)
+                write!(
+                    f,
+                    "Connection '{}' does not have federated query enabled. Enable it in the connection settings.",
+                    conn
+                )
             }
             FederationValidationError::SchemaNotVisible { connection, schema } => {
                 write!(f, "Schema '{}' is not visible for connection '{}'. Check the connection's visible schemas configuration.", schema, connection)
@@ -294,11 +320,11 @@ pub fn validate_federation(
     analysis: &FederatedAnalysis,
     connections: &[ConnectionConfig],
 ) -> Result<(), FederationValidationError> {
-    // Use lowercase keys for case-insensitive lookup, matching `analyze_federation`.
-    let conn_map: HashMap<String, &ConnectionConfig> = connections
-        .iter()
-        .map(|c| (c.name.to_lowercase(), c))
-        .collect();
+    // Exact names take priority; case-insensitive lookup is the fallback,
+    // matching `analyze_federation`.
+    let exact_map: HashMap<&str, &ConnectionConfig> = connections.iter().map(|c| (c.name.as_str(), c)).collect();
+    let insensitive_map: HashMap<String, &ConnectionConfig> =
+        connections.iter().map(|c| (c.name.to_lowercase(), c)).collect();
 
     for ref_ in &analysis.table_refs {
         // Skip non-federated references (no connection name)
@@ -306,17 +332,15 @@ pub fn validate_federation(
             continue;
         }
 
-        // Case-insensitive lookup matching analyze_federation
-        let config = match conn_map.get(&ref_.connection_name.to_lowercase()) {
-            Some(c) => *c,
+        // Exact-then-insensitive lookup matching analyze_federation
+        let config = match resolve_connection(&exact_map, &insensitive_map, &ref_.connection_name) {
+            Some(c) => c,
             None => continue, // Unknown connection - will be caught later during execution
         };
 
         // Check federation_enabled flag
         if !config.federation_enabled {
-            return Err(FederationValidationError::FederationNotEnabled(
-                ref_.connection_name.clone(),
-            ));
+            return Err(FederationValidationError::FederationNotEnabled(ref_.connection_name.clone()));
         }
 
         // Check schema visibility if configured
@@ -445,7 +469,8 @@ mod tests {
         let pg_conn = make_test_connection("pg_db", DatabaseType::Postgres, "analytics");
         let mysql_conn = make_test_connection("mysql_db", DatabaseType::Mysql, "shop");
 
-        let sql = "SELECT p.name, o.total FROM pg_db.public.products p JOIN mysql_db.shop.orders o ON p.id = o.product_id";
+        let sql =
+            "SELECT p.name, o.total FROM pg_db.public.products p JOIN mysql_db.shop.orders o ON p.id = o.product_id";
 
         let analysis = analyze_federation(sql, &[pg_conn.clone(), mysql_conn.clone()]);
 
@@ -546,7 +571,7 @@ mod tests {
         let sql = "SELECT * FROM nonexistent.public.users";
 
         let analysis = analyze_federation(sql, &[conn.clone()]);
-        
+
         // Should NOT match as federation since connection doesn't exist
         assert!(!analysis.uses_federation_syntax);
         assert!(analysis.table_refs.is_empty() || analysis.table_refs[0].connection_name.is_empty());

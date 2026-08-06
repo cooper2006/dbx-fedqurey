@@ -522,7 +522,7 @@ footer {
 
     <div class="callout warn">
       <div class="callout-title">关键规则</div>
-      所有查询都走联邦查询逻辑。连接名、数据库名、schema 名、表名直接拼接，不使用反引号、方括号或双引号包裹。如果用户输入了引号，解析阶段应剥离后按规则重新生成。
+      所有查询都走联邦查询逻辑。连接名、数据库名、schema 名、表名直接拼接，不使用反引号、方括号或双引号包裹。如果用户输入了引号，解析阶段应剥离后按规则重新生成。连接名前缀与已保存连接名称的匹配<strong>不区分大小写</strong>（如 <code>postgresql</code> 可命中连接 <code>PostgreSQL</code>），匹配到的引用按连接配置中的规范名称处理。
     </div>
   </div>
 </section>

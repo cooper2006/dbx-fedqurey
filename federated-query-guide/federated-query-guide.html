@@ -864,7 +864,7 @@ flowchart TD
 
   <h3>使用注意事项</h3>
   <ul>
-    <li><strong>连接名区分大小写</strong>：SQL 中的连接名前缀必须与 DBX 中保存的连接名称完全一致（区分大小写）。</li>
+    <li><strong>连接名不区分大小写</strong>：SQL 中的连接名前缀只需对应 DBX 中保存的连接名称，匹配时不区分大小写（如连接名为 <code>PostgreSQL</code>，写 <code>postgresql.</code> 亦可命中）。连接名含大写时建议加引号书写（如 <code>"PostgreSQL".</code>）。</li>
     <li><strong>连接名冲突</strong>：如果连接名与数据库中已有的 Schema 名相同，可能导致解析歧义。建议连接名使用具有辨识度的命名。</li>
     <li><strong>SQL 格式化风险</strong>：当前 SQL 编辑器使用的格式化器（<code>sql-formatter</code> 库）不感知联邦语法，格式化操作可能破坏 <code>连接.库.Schema.表</code> 的引用结构。在格式化联邦查询 SQL 时需谨慎。</li>
     <li><strong>解析方言限制</strong>：联邦查询的 SQL 解析统一使用 PostgreSQL 方言。如果 SQL 中使用了目标数据库特有的语法（如 MySQL 的反引号引用、SQL Server 的方括号引用），可能导致解析失败。建议使用 ANSI 标准语法编写联邦查询。</li>

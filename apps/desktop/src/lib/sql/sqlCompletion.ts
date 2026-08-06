@@ -10,6 +10,7 @@ import { findActiveSqlStatementSpan, tokenizeSqlSemantic } from "@/lib/sql/seman
 import type { SqlSemanticBuildOptions, SqlSemanticSpan } from "@/lib/sql/semantic/types";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 import { requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -2866,6 +2867,69 @@ export function quoteSqlIdentifier(identifier: string, dialect?: "mysql" | "post
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+const PLAIN_SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Quote a column name per database type, but only when it isn't already a plain
+ * SQL identifier. Simple names like `id`/`created_at` are left untouched.
+ */
+function quoteExpansionColumn(name: string, databaseType?: DatabaseType): string {
+  if (PLAIN_SQL_IDENTIFIER.test(name)) return name;
+  switch (databaseType) {
+    case "mysql":
+      return "`" + name.replaceAll("`", "``") + "`";
+    case "sqlserver":
+      return "[" + name.replaceAll("]", "]]") + "]";
+    default:
+      return '"' + name.replaceAll('"', '""') + '"';
+  }
+}
+
+/**
+ * Expand `SELECT <qualifier?>.*` into the column list of the referenced table.
+ *
+ * When the star is qualified (e.g. `SELECT ap.*`), columns after the first are
+ * prefixed with the qualifier so the expansion still refers to the alias. The
+ * first column is emitted bare to keep the replacement minimal.
+ */
+export function buildSelectStarExpansion(context: SqlCompletionContext, columnsByTable: Map<string, Array<{ name: string; table?: string }>>, dialect?: string, qualifierSql?: string, databaseType?: DatabaseType): string {
+  const firstKey = columnsByTable.keys().next().value as string | undefined;
+  if (!firstKey) return "";
+  const columns = columnsByTable.get(firstKey) ?? [];
+  if (columns.length === 0) return "";
+  const qualifier = qualifierSql ?? context.qualifier;
+  return columns
+    .map((column, index) => {
+      const name = quoteExpansionColumn(column.name, databaseType);
+      if (index === 0) return name;
+      return qualifier ? `${qualifier}.${name}` : name;
+    })
+    .join(", ");
+}
+
+export interface SelectStarResultColumnsMatchArgs {
+  currentSql: string;
+  targetFrom: number;
+  targetTo: number;
+  statementSql?: string;
+  sourceStatement?: string;
+  sourceFrom?: number;
+  sourceTo?: number;
+}
+
+/**
+ * Accept SELECT * result-column fallback only when the target star still falls
+ * inside the source statement's slice of the current SQL and that source
+ * statement text still matches the current statement.
+ */
+export function selectStarResultColumnsMatch(args: SelectStarResultColumnsMatchArgs): boolean {
+  const { currentSql, targetFrom, targetTo, statementSql, sourceStatement, sourceFrom, sourceTo } = args;
+  if (sourceFrom === undefined || sourceTo === undefined || sourceStatement === undefined) return false;
+  if (targetFrom < sourceFrom || targetFrom >= sourceTo) return false;
+  if (statementSql && sourceStatement !== statementSql) return false;
+  return currentSql.slice(targetFrom, targetTo) === "*";
+}
+
 const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()));
 
 /**
@@ -4367,6 +4431,18 @@ function computeMatchScore(candidate: string, prefix: string): number {
   if (initials && initials.startsWith(p)) {
     const exactInitialsBonus = initials === p ? 400 : 0;
     return 2400 + exactInitialsBonus - c.length;
+  }
+
+  // DataGrip-style pinyin initials for Chinese column/table names. Only applies
+  // to Han candidates with an ASCII query, so ASCII matching is unaffected.
+  if (containsHan(candidate) && /^[a-z0-9]+$/.test(p)) {
+    const hanInitials = pinyinFirstLetters(candidate);
+    if (hanInitials.startsWith(p)) {
+      const exactInitialsBonus = hanInitials === p ? 400 : 0;
+      return 2400 + exactInitialsBonus - c.length;
+    }
+    const span = orderedSubsequenceSpan(hanInitials, p);
+    if (span) return 1500 - span.span - c.length;
   }
 
   const substringIndex = c.indexOf(p);

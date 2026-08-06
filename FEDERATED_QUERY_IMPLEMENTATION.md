@@ -143,6 +143,8 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 
 注意：原始设计中"不添加任何引号"的说法是错误的。PostgreSQL 规范要求双引号，MySQL 使用反引号。
 
+连接名匹配**不区分大小写**：前缀对应已保存的 `connection.name`，例如 `postgresql.` 可命中连接 `PostgreSQL`，匹配到的引用按连接配置中的规范名称处理（见 `crates/dbx-core/src/federated.rs` 的 `analyze_federation`/`extract_table_refs`）。
+
 ## 已知限制
 
 1. **多连接联邦查询需要 Calcite Agent** - Phase 2 尚未完成

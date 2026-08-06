@@ -215,6 +215,8 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 | PostgreSQL | `connection.db.schema."table" alias` | `myconn.mydb.public."users" u` |
 | MySQL | `connection.db."table" alias` | `myconn.shop."orders" o` |
 
+**连接名匹配**：前缀对应已保存的 `connection.name`，匹配**不区分大小写**（如 `postgresql.` 可命中连接 `PostgreSQL`）；匹配到的引用按连接配置中的规范名称处理。连接名含大写时建议在 SQL 中加引号（如 `"PostgreSQL".`），避免目标数据库对未加引号标识符的大小写折叠。
+
 ---
 
 ## 已知限制
