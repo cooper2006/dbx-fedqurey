@@ -5,7 +5,7 @@ use crate::db::mongo_driver::{
 };
 use crate::document_ops::CollectionInfo;
 use crate::mongo_shell::MongoCommand;
-use crate::types::QueryResult;
+use crate::types::{IndexInfo, QueryResult};
 
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
@@ -751,17 +751,8 @@ pub async fn execute_mongo_command_core(
             Ok(mongo_documents_query_result(limit_mongo_documents(result, max_rows).documents))
         }
         MongoCommand::GetIndexes { collection } => {
-            let result = mongo_aggregate_documents_core(
-                state,
-                connection_id,
-                database,
-                collection,
-                r#"[{"$indexStats":{}}]"#,
-                Some(max_rows),
-                None,
-            )
-            .await?;
-            Ok(mongo_documents_query_result(result.documents))
+            let indexes = crate::schema::list_indexes_core(state, connection_id, database, "", collection).await?;
+            Ok(mongo_indexes_query_result(indexes, max_rows))
         }
         MongoCommand::CollectionStats { collection, metric, scale } => {
             let stats = mongo_collection_stats_core(state, connection_id, database, collection, scale.clone()).await?;
@@ -889,6 +880,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affecte
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 
@@ -898,6 +890,38 @@ fn scalar_query_result(column: impl Into<String>, value: serde_json::Value) -> Q
 
 fn affected_query_result(affected_rows: u64) -> QueryResult {
     query_result(Vec::new(), Vec::new(), affected_rows)
+}
+
+pub fn mongo_indexes_query_result(indexes: Vec<IndexInfo>, max_rows: usize) -> QueryResult {
+    use serde_json::Value;
+
+    let rows = indexes
+        .into_iter()
+        .take(max_rows.max(1))
+        .map(|index| {
+            vec![
+                Value::String(index.name),
+                Value::String(index.columns.join(", ")),
+                Value::Bool(index.is_unique),
+                Value::Bool(index.is_primary),
+                index.index_type.map(Value::String).unwrap_or(Value::Null),
+                index.filter.map(Value::String).unwrap_or(Value::Null),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let affected_rows = rows.len() as u64;
+    query_result(
+        vec![
+            "name".to_string(),
+            "columns".to_string(),
+            "unique".to_string(),
+            "primary".to_string(),
+            "type".to_string(),
+            "filter".to_string(),
+        ],
+        rows,
+        affected_rows,
+    )
 }
 
 fn mongo_drop_indexes_query_result(
@@ -1236,6 +1260,49 @@ for line in sys.stdin:
             mongo_create_index_core(&state, "legacy", "app", "users", keys_json, Some(options_json)).await.unwrap();
 
         assert_eq!(name, "email_1");
+    }
+
+    #[test]
+    fn mongo_indexes_query_result_matches_desktop_contract_and_limits_rows() {
+        let result = mongo_indexes_query_result(
+            vec![
+                IndexInfo {
+                    name: "_id_".to_string(),
+                    columns: vec!["_id".to_string()],
+                    is_unique: false,
+                    is_primary: true,
+                    filter: None,
+                    index_type: Some("_id: 1".to_string()),
+                    included_columns: None,
+                    comment: None,
+                },
+                IndexInfo {
+                    name: "email_1".to_string(),
+                    columns: vec!["email".to_string()],
+                    is_unique: true,
+                    is_primary: false,
+                    filter: Some("{\"active\":true}".to_string()),
+                    index_type: Some("email: 1".to_string()),
+                    included_columns: None,
+                    comment: None,
+                },
+            ],
+            1,
+        );
+
+        assert_eq!(result.columns, ["name", "columns", "unique", "primary", "type", "filter"]);
+        assert_eq!(
+            result.rows,
+            [vec![
+                serde_json::json!("_id_"),
+                serde_json::json!("_id"),
+                serde_json::json!(false),
+                serde_json::json!(true),
+                serde_json::json!("_id: 1"),
+                serde_json::Value::Null,
+            ]]
+        );
+        assert_eq!(result.affected_rows, 1);
     }
 
     #[cfg(unix)]

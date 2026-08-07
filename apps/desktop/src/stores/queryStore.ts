@@ -2383,6 +2383,7 @@ export const useQueryStore = defineStore("query", () => {
     try {
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: conn?.driver_profile,
         identifierQuote,
         database: tableMeta.database,
         schema: tableMeta.schema,
@@ -5125,6 +5126,7 @@ export const useQueryStore = defineStore("query", () => {
         while (true) {
           const sql = await api.buildTableSelectSql({
             databaseType: effectiveDbType,
+            driverProfile: conn?.driver_profile,
             identifierQuote,
             database: tableMeta.database,
             schema: tableMeta.schema,
