@@ -181,6 +181,46 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 
 ---
 
+## 联邦查询稳定性修复 (2026-08-07)
+
+### 问题 1: 连接名被误判为 catalog 导致 "Backend request failed"
+
+联邦查询使用连接名作为表引用前缀（如 `doris.freequery.DIM_BM_AD_PS`）。可编辑性分析在解析 3-part 名称时，将连接名作为 catalog 参数传递给后端元数据接口。由于连接名并非真实的数据库 catalog，Doris 等引擎会返回 "Backend request failed" 错误。
+
+| 层级 | 文件 | 修复内容 |
+|------|------|----------|
+| 前端 | `apps/desktop/src/stores/queryStore.ts` | `resolveEditableSourceMetadataTarget()` 检测 catalog 前缀是否匹配某个连接名，若匹配则剥离 catalog，避免传递给后端；同时将元数据请求重定向到联邦目标连接 |
+| 后端 | `crates/dbx-core/src/schema.rs` | `resolve_external_doris_catalog()` 在 catalog 与连接名匹配时返回 `None`，回退到默认元数据路径 |
+
+**跨连接联邦元数据重定向**：当 catalog 前缀匹配的是另一个连接（而非当前查询标签页的连接）时，元数据请求自动重定向到被引用的连接，确保从正确的数据库引擎获取列信息。
+
+**非 schema 感知数据库处理**：对 Doris、MySQL 等无 schema 概念的数据库，3-part 联邦名称的第二部分被识别为数据库名（而非 schema），从而正确获取列元数据。
+
+### 问题 2: 含特殊字符的连接名导致 SQL 解析失败
+
+连接名含连字符（如 `doris-Local`）时，SQL 解析器将 `doris-Local` 解释为算术表达式 `doris - Local`，而非单个标识符，导致联邦语法检测失败。
+
+| 文件 | 修复内容 |
+|------|----------|
+| `crates/dbx-core/src/federated.rs` | 新增 `preprocess_federated_sql()` 函数：在解析前自动为含特殊字符的连接名添加双引号（如 `doris-Local` → `"doris-Local"`）；新增 `validate_connection_name()` 函数：在创建/编辑连接时提前校验名称合法性 |
+| `crates/dbx-core/src/federated.rs` | SQL 方言从 `PostgreSqlDialect` 切换为 `GenericDialect`，以支持更广泛的语法兼容性 |
+
+新增测试：
+- `test_hyphenated_connection_name` - 含连字符连接名的检测与重写
+- `test_hyphenated_connection_name_case_insensitive` - 大小写不敏感匹配
+- `test_normal_connection_name_unaffected_by_preprocessing` - 普通连接名不受影响
+
+### 问题 3: Web 端 session 不持久化
+
+Web 服务重启后所有登录 session 丢失，用户需重新登录。
+
+| 文件 | 修复内容 |
+|------|----------|
+| `crates/dbx-web/src/auth.rs` | 新增 `persist_sessions()` / `restore_sessions()` 函数：将 session token 持久化到 SQLite，服务器启动时自动恢复 |
+| `crates/dbx-web/src/main.rs` | 启动时调用 `restore_sessions()` 恢复持久化 session |
+
+---
+
 ## 下一步计划
 
 ### 已完成 ✅
@@ -221,6 +261,6 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 
 ---
 *实现日期: 2026-08-03*
-*最近更新: 2026-08-06*
-*版本: 1.2*
-*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成，新增 VictoriaMetrics/Mqtt 支持*
+*最近更新: 2026-08-07*
+*版本: 1.3*
+*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成，新增 VictoriaMetrics/Mqtt 支持，修复连接名误判 catalog 及含特殊字符连接名解析问题*

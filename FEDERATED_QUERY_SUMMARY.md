@@ -314,4 +314,52 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 
 ---
 
-## 关键设计决策
+## 联邦查询稳定性修复 (2026-08-07)
+
+### 修复 1: 连接名被误判为 catalog
+
+联邦查询使用连接名作为表引用前缀（如 `doris.freequery.DIM_BM_AD_PS`）。可编辑性分析将连接名作为 catalog 传递给后端，导致 Doris 等引擎报 "Backend request failed"。
+
+| 层级 | 文件 | 修复 |
+|------|------|------|
+| 前端 | `apps/desktop/src/stores/queryStore.ts` | `resolveEditableSourceMetadataTarget()` 剥离匹配连接名的 catalog 前缀，并重定向元数据到联邦目标连接 |
+| 后端 | `crates/dbx-core/src/schema.rs` | `resolve_external_doris_catalog()` 在 catalog 与连接名匹配时返回 `None` |
+
+**关键增强**：跨连接联邦查询时，元数据请求自动重定向到被引用的连接；对 Doris/MySQL 等非 schema 感知数据库，3-part 名称第二部分正确识别为数据库名。
+
+### 修复 2: 含特殊字符的连接名解析
+
+连接名含连字符（如 `doris-Local`）时 SQL 解析器将其误认为算术表达式。
+
+- 新增 `preprocess_federated_sql()`：解析前自动为含特殊字符的连接名加引号
+- 新增 `validate_connection_name()`：创建/编辑连接时提前校验名称合法性
+- SQL 方言从 `PostgreSqlDialect` 切换为 `GenericDialect`
+- 新增 3 个单元测试覆盖含连字符连接名场景
+
+### 修复 3: Web 端 session 持久化
+
+| 文件 | 修复 |
+|------|------|
+| `crates/dbx-web/src/auth.rs` | `persist_sessions()` / `restore_sessions()` 将 session token 持久化到 SQLite |
+| `crates/dbx-web/src/main.rs` | 启动时恢复持久化 session |
+
+### 本次新增/修改文件
+
+- `crates/dbx-core/src/federated.rs` - 含特殊字符连接名预处理、名称校验、GenericDialect
+- `crates/dbx-core/src/schema.rs` - 连接名 catalog 过滤
+- `crates/dbx-core/tests/federated_query_tests.rs` - 新增 3 个测试
+- `apps/desktop/src/stores/queryStore.ts` - 联邦元数据 catalog 剥离与连接重定向
+- `apps/desktop/src/stores/connectionStore.ts` - 连接管理增强
+- `apps/desktop/src/components/connection/ConnectionDialog.vue` - 连接对话框更新
+- `apps/desktop/src/components/ssh/SshHostKeyPromptDialog.vue` - SSH 主机密钥对话框增强
+- `crates/dbx-web/src/auth.rs` - session 持久化
+- `crates/dbx-web/src/main.rs` - 启动恢复 session
+- `crates/dbx-web/src/routes/connection.rs` - 路由更新
+- i18n 四语言文件（en/ja/ko/zh-CN）
+
+---
+
+*生成日期: 2026-08-03*
+*最近更新: 2026-08-07*
+*版本: 1.3*
+*状态: 全部完成，含 P0-P2 审查修复、VictoriaMetrics/Mqtt 支持、连接名 catalog 误判修复、含特殊字符连接名解析修复、Web session 持久化*
