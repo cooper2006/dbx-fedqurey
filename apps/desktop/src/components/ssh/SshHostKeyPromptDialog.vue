@@ -167,9 +167,32 @@ function setupWebPromptBridge() {
   if (!pendingTimer) pendingTimer = setInterval(fetchPendingPrompts, 2000);
 }
 
+/// Web 模式下，SSE 端点受认证中间件保护。
+/// 如果在认证完成前就创建 EventSource，SSE 端点会返回 401，浏览器报 ERR_ABORTED。
+/// 此函数持续轮询认证状态，仅在认证成功后才建立 SSE 连接；
+/// 若认证尚未完成（用户未登录 / 尚未设置密码），则每 3 秒重试，直到认证成功或组件卸载。
+/// 不再在超时后回退创建 EventSource —— 未认证时后端必然返回 401，回退只会产生无意义的错误日志。
+async function setupWebPromptBridgeWhenAuthenticated() {
+  while (mounted) {
+    try {
+      const res = await fetch(apiUrl("/api/auth/check"), { credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.authenticated) {
+          if (mounted) setupWebPromptBridge();
+          return;
+        }
+      }
+    } catch {
+      // 后端尚未就绪，稍后重试
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+}
+
 onMounted(() => {
   if (isTauriRuntime()) void setupTauriPromptBridge();
-  else setupWebPromptBridge();
+  else void setupWebPromptBridgeWhenAuthenticated();
 });
 
 onBeforeUnmount(() => {

@@ -538,6 +538,13 @@ pub async fn list_doris_catalog_triggers_core(
 /// Returns `Some(catalog)` only when `catalog` is a non-empty, non-`internal`
 /// name and the connection is a Doris-family engine that supports
 /// `SHOW CATALOGS`. Otherwise `None` (caller uses the default metadata path).
+///
+/// Federated queries use the connection name as a table-reference prefix
+/// (e.g., `doris.freequery.DIM_BM_AD_PS`). The editability analysis parses
+/// the resulting 3-part name and may pass the connection name as the catalog
+/// parameter. Since the connection name is not a real database catalog,
+/// detect and reject it here so metadata requests fall through to the default
+/// path instead of failing with "Backend request failed" on Doris.
 pub async fn resolve_external_doris_catalog(
     state: &AppState,
     connection_id: &str,
@@ -549,6 +556,11 @@ pub async fn resolve_external_doris_catalog(
         return None;
     }
     let config = connection_config(state, connection_id).await?;
+    // Reject the catalog when it matches the connection's own name — it is a
+    // federated query prefix, not a real Doris catalog.
+    if config.name.eq_ignore_ascii_case(catalog) {
+        return None;
+    }
     if is_doris_family_catalog_capable_config(&config) {
         Some(catalog.to_string())
     } else {

@@ -192,6 +192,7 @@ export default {
     title: "New Connection",
     name: "Name",
     namePlaceholder: "Connection name, auto-generated if empty",
+    nameInvalid: "Connection name may only contain letters, digits, and underscores, and must not start with a digit (hyphens, spaces, and other special characters are not allowed)",
     note: "Notes",
     notePlaceholder: "Do not store passwords in plaintext in notes",
     type: "Type",

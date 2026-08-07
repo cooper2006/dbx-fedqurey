@@ -124,6 +124,7 @@ import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseN
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
+const CONNECTED_IDS_STORAGE_KEY = "dbx-connected-ids";
 const SIDEBAR_TABLE_NAME_FILTERS_STORAGE_KEY = "dbx-sidebar-table-name-filters";
 const CONNECTION_HEALTH_CHECK_TTL_MS = 2000;
 const CONNECTION_HEALTH_CHECK_TIMEOUT_MS = 5000;
@@ -325,6 +326,28 @@ export const useConnectionStore = defineStore("connection", () => {
   const activePinnedTreeNodeReorderKey = ref<string | null>(null);
   let pinnedTreeNodePersistQueue: Promise<void> = Promise.resolve();
   const connectedIds = ref<Set<string>>(new Set());
+
+  // --- connectedIds 持久化：浏览器刷新后恢复连接状态 ---
+  function persistConnectedIds() {
+    try {
+      localStorage.setItem(CONNECTED_IDS_STORAGE_KEY, JSON.stringify([...connectedIds.value]));
+    } catch {
+      /* localStorage 不可用时静默忽略 */
+    }
+  }
+
+  function loadConnectedIdsFromStorage(): Set<string> {
+    try {
+      const saved = localStorage.getItem(CONNECTED_IDS_STORAGE_KEY);
+      if (saved) return new Set(JSON.parse(saved) as string[]);
+    } catch {
+      /* 解析失败时返回空集合 */
+    }
+    return new Set();
+  }
+
+  // 监听 connectedIds 变化，自动持久化到 localStorage
+  watch(connectedIds, () => persistConnectedIds(), { deep: true });
   const identifierQuotes = ref<Record<string, string>>({});
   const lastConnectionHealthCheckAt = ref<Record<string, number>>({});
   const agentDrivers = ref<AgentDriverInstallState[]>([]);
@@ -6770,6 +6793,26 @@ export const useConnectionStore = defineStore("connection", () => {
           savedLayout ?? currentLayout,
         );
         rebuildTreeNodes();
+
+        // 恢复之前已连接的连接：从 localStorage 读取 connectedIds，
+        // 对仍存在于连接列表中的 ID 自动发起重连（后台异步，不阻塞 UI）
+        const savedConnectedIds = loadConnectedIdsFromStorage();
+        const validIds = savedConnectedIds.size ? [...savedConnectedIds].filter((id) => connections.value.some((c) => c.id === id)) : [];
+        if (validIds.length) {
+          // 先恢复 connectedIds 标记，让 UI 立即显示"已连接"状态
+          for (const id of validIds) {
+            connectedIds.value.add(id);
+          }
+          // 异步重连，不阻塞 initFromDisk 完成
+          void Promise.allSettled(
+            validIds.map((id) =>
+              ensureConnected(id).catch(() => {
+                // 重连失败时移除标记，UI 会回退到未连接状态
+                connectedIds.value.delete(id);
+              }),
+            ),
+          );
+        }
       })().finally(() => {
         initFromDiskPromise = null;
       });

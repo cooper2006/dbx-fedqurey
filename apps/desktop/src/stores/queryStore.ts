@@ -34,7 +34,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
 import { canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -2929,28 +2929,55 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function resolveEditableSourceMetadataTarget(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string): EditableSourceMetadataTarget {
+    // Federated queries use the connection name as a table-reference prefix
+    // (e.g., `doris.freequery.DIM_BM_AD_PS`). The editability analysis parses
+    // the resulting 3-part name and treats the connection name as a catalog.
+    // Since the connection name is not a real database catalog, strip it so
+    // metadata requests do not pass it as a catalog parameter — which would
+    // cause "Backend request failed" on engines like Doris.
+    //
+    // The prefix may reference a DIFFERENT connection than the query tab's
+    // connection (cross-connection federated query). In that case, redirect
+    // the metadata request to the referenced connection so columns are fetched
+    // from the correct database engine.
+    const connStore = useConnectionStore();
+    const federatedConn = source.catalog ? connStore.connections.find((c) => c.name.toLowerCase() === source.catalog!.toLowerCase()) : undefined;
+    const isConnectionNamePrefix = !!federatedConn;
+    const effectiveCatalog = isConnectionNamePrefix ? undefined : source.catalog;
+    const effectiveCatalogQuoted = isConnectionNamePrefix ? false : source.catalogQuoted;
+    // Use the federated target connection for metadata when the catalog prefix
+    // matches a different connection. Otherwise, keep the tab's connection.
+    const metadataConn = federatedConn || conn;
+    const metadataConnId = federatedConn?.id || tab.connectionId!;
+    const metadataDbType = metadataConn?.db_type || dbType;
+    // For non-schema-aware databases (Doris, MySQL, etc.), the second part of
+    // a 3-part federated name is the database, not a schema. Use it as the
+    // database so the agent fetches columns from the correct database.
+    const federatedDatabase = isConnectionNamePrefix && !isSchemaAware(metadataDbType as DatabaseType) ? source.schema : undefined;
     // Metadata must resolve in the same namespace as the query execution. An
     // empty query-tab database still executes in the connection's default DB,
     // while database-tree dialects and SQL Server 3-part names may override it
     // with a qualified source.
-    const qualifiedSourceDatabase = dbType === "sqlserver" ? source.catalog : connectionUsesDatabaseObjectTreeMode(conn) ? source.schema : undefined;
-    const metadataDatabase = qualifiedSourceDatabase || executionDatabase || conn?.database || tab.database;
+    const qualifiedSourceDatabase = metadataDbType === "sqlserver" ? effectiveCatalog : connectionUsesDatabaseObjectTreeMode(metadataConn) ? source.schema : undefined;
+    const metadataDatabase = federatedDatabase || qualifiedSourceDatabase || executionDatabase || metadataConn?.database || tab.database;
     // SQL Server does not apply the query tab's selected schema to an
     // unqualified object reference. Resolve metadata through the login's
     // default schema (with the driver's dbo fallback) so metadata and writes
     // target the same object as the original SELECT.
-    let schema = source.schema || (dbType === "sqlserver" ? "" : tab.schema);
+    // For non-schema-aware federated targets, the second part was already used
+    // as the database, so the schema should be empty.
+    let schema = isConnectionNamePrefix && !isSchemaAware(metadataDbType as DatabaseType) ? "" : source.schema || (metadataDbType === "sqlserver" ? "" : tab.schema);
     if (!schema) {
-      if (dbType === "postgres" || dbType === "kwdb") schema = "public";
+      if (metadataDbType === "postgres" || metadataDbType === "kwdb") schema = "public";
       else schema = "";
     }
     // Oracle-family connection databases are service names, not schemas. When
     // the query does not qualify a schema, let the driver resolve the current
     // login user's schema instead of looking up metadata under the service name.
-    const resolvedSchema = (dbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema) ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
-    const metadataSchema = normalizeOracleLikeMetadataIdentifier(dbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
-    const metadataTableName = normalizeOracleLikeMetadataIdentifier(dbType, source.tableName, source.tableNameQuoted)!;
-    const metadataCatalog = normalizeOracleLikeMetadataIdentifier(dbType, source.catalog, source.catalogQuoted);
+    const resolvedSchema = (metadataDbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(metadataDbType) && !schema) ? "" : metadataSchemaForConnection(metadataConn, metadataDatabase, schema || undefined);
+    const metadataSchema = normalizeOracleLikeMetadataIdentifier(metadataDbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
+    const metadataTableName = normalizeOracleLikeMetadataIdentifier(metadataDbType, source.tableName, source.tableNameQuoted)!;
+    const metadataCatalog = normalizeOracleLikeMetadataIdentifier(metadataDbType, effectiveCatalog, effectiveCatalogQuoted);
     const metadataSource: EditableQuerySource = {
       ...source,
       catalog: metadataCatalog,
@@ -2959,20 +2986,20 @@ export const useQueryStore = defineStore("query", () => {
     };
     // Keep SQL Server writes unqualified unless the SELECT source explicitly
     // named a schema, so SELECT and UPDATE resolve the same object.
-    const writeSchema = dbType === "sqlserver" && !source.schema ? undefined : metadataSchema || undefined;
+    const writeSchema = metadataDbType === "sqlserver" && !source.schema ? undefined : metadataSchema || undefined;
     const knownTableType = tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined;
     return {
       source: metadataSource,
-      analysis: normalizeOracleLikeQueryAnalysis(dbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
+      analysis: normalizeOracleLikeQueryAnalysis(metadataDbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
       writeSchema,
       request: {
-        connectionId: tab.connectionId!,
+        connectionId: metadataConnId,
         database: metadataDatabase,
         schema: metadataSchema,
         tableName: metadataTableName,
         tableType: knownTableType,
-        databaseType: dbType,
-        driverProfile: conn?.driver_profile || conn?.db_type,
+        databaseType: metadataDbType,
+        driverProfile: metadataConn?.driver_profile || metadataConn?.db_type,
         catalog: metadataCatalog,
       },
     };

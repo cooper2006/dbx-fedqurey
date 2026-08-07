@@ -194,6 +194,7 @@ export default withEnglishFallback({
     title: "新建连接",
     name: "名称",
     namePlaceholder: "连接名称，留空则自动生成",
+    nameInvalid: "连接名称只能包含字母、数字和下划线，且不能以数字开头（不支持连字符、空格等特殊字符）",
     note: "备注",
     notePlaceholder: "请勿在备注中明文保存密码",
     type: "类型",

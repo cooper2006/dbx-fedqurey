@@ -4317,9 +4317,28 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
   });
 }
 
+function validateConnectionName(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return null; // 空名称由自动生成逻辑处理
+  const first = trimmed[0];
+  const validStart = /^[\p{L}_]$/u.test(first);
+  const validChars = /^[\p{L}\p{N}_]+$/u.test(trimmed);
+  if (!validStart || !validChars) {
+    return t("connection.nameInvalid");
+  }
+  return null;
+}
+
+const connectionNameError = computed(() => validateConnectionName(form.value.name));
+
 async function save() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (isSaving.value) return;
+  const nameError = validateConnectionName(form.value.name);
+  if (nameError) {
+    showConnectionError(nameError);
+    return;
+  }
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
   isSaving.value = true;
   try {
@@ -4897,6 +4916,9 @@ function openExternalUrl(url: string) {
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.name") }}</Label>
                   <Input v-model="form.name" v-connection-dialog-auto-focus class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
+                </div>
+                <div v-if="connectionNameError" class="grid grid-cols-4 gap-4">
+                  <div class="col-start-2 col-span-3 text-sm text-destructive">{{ connectionNameError }}</div>
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">

@@ -193,6 +193,7 @@ export default withEnglishFallback({
     title: "新しい接続",
     name: "名前",
     namePlaceholder: "接続名（空の場合は自動生成）",
+    nameInvalid: "接続名には英字、数字、アンダースコアのみ使用できます（ハイフンやスペースなどの特殊文字は使用できません）",
     note: "メモ",
     notePlaceholder: "メモにパスワードを平文で保存しないでください",
     type: "タイプ",

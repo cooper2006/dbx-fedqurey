@@ -9,8 +9,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
+use regex::Regex;
 use sqlparser::ast::{visit_relations, visit_relations_mut, Ident, ObjectName, ObjectNamePart, Statement};
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
 use crate::models::connection::ConnectionConfig;
@@ -58,15 +59,83 @@ fn resolve_connection<'a>(
     exact_map.get(name).copied().or_else(|| insensitive_map.get(&name.to_lowercase()).copied())
 }
 
+/// Check if a name contains characters that make it invalid as an unquoted
+/// SQL identifier (i.e., anything other than letters, digits, and underscores,
+/// or starting with a digit).
+fn needs_quoting(name: &str) -> bool {
+    let first = name.chars().next();
+    let valid_start = first.is_some_and(|c| c.is_alphabetic() || c == '_');
+    let valid_chars = name.chars().all(|c| c.is_alphanumeric() || c == '_');
+    !valid_start || !valid_chars
+}
+
+/// Validate a connection name to ensure it can be safely used as an unquoted
+/// SQL identifier in federated queries. Returns `Err` with a descriptive
+/// message if the name contains characters that would cause SQL parsing errors
+/// (e.g., hyphens, spaces, dots) or starts with a digit.
+///
+/// Empty names are allowed — they are handled by auto-generation logic elsewhere.
+/// Call this when creating or editing a connection to provide early feedback
+/// and prevent SQL syntax errors at query time.
+pub fn validate_connection_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if needs_quoting(trimmed) {
+        return Err(format!(
+            "Connection name '{}' contains characters that are invalid in SQL identifiers. \
+             Only letters, digits, and underscores are allowed, and the name must not start with a digit.",
+            trimmed
+        ));
+    }
+    Ok(())
+}
+
+/// Preprocess SQL to quote connection names that contain special characters
+/// (e.g., hyphens) so the SQL parser can correctly identify them as identifier
+/// parts in multi-part table references.
+///
+/// For example, if a connection is named "doris-Local", the user's SQL
+/// `FROM doris-Local.freequery.DIM_BM_AD_PS` is rewritten to
+/// `FROM "doris-Local".freequery.DIM_BM_AD_PS` before parsing.
+///
+/// This is necessary because the SQL parser interprets `doris-Local` as the
+/// arithmetic expression `doris - Local`, not as a single identifier.
+fn preprocess_federated_sql(sql: &str, connection_names: &[&str]) -> String {
+    let special_names: Vec<&str> = connection_names.iter().copied().filter(|n| needs_quoting(n)).collect();
+    if special_names.is_empty() {
+        return sql.to_string();
+    }
+    let mut result = sql.to_string();
+    for name in &special_names {
+        let escaped = regex::escape(name);
+        // Match the connection name when preceded by a non-identifier character
+        // (or start of string) and followed by a dot. Case-insensitive to handle
+        // different casing in user SQL. The preceding character is captured so
+        // it can be reinserted in the replacement.
+        let pattern = format!(r#"(?i)(^|[^A-Za-z0-9_`"])({})\."#, escaped);
+        if let Ok(re) = Regex::new(&pattern) {
+            result = re.replace_all(&result, r#"$1"$2"."#).to_string();
+        }
+    }
+    result
+}
+
 /// Parse SQL and detect federation patterns
 pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> FederatedAnalysis {
     let mut table_refs = Vec::new();
     let mut connections_seen: Vec<String> = Vec::new();
     let mut uses_federation_syntax = false;
 
+    // Preprocess SQL to quote connection names containing special characters
+    // (e.g., hyphens) so the parser can correctly identify them as identifiers.
+    let connection_names: Vec<&str> = connections.iter().map(|c| c.name.as_str()).collect();
+    let preprocessed_sql = preprocess_federated_sql(sql, &connection_names);
+
     // Parse the SQL
-    let dialect = PostgreSqlDialect {};
-    let statements = match Parser::parse_sql(&dialect, sql) {
+    let dialect = GenericDialect {};
+    let statements = match Parser::parse_sql(&dialect, &preprocessed_sql) {
         Ok(stmts) => stmts,
         Err(_) => {
             // If parsing fails, return empty analysis
@@ -267,8 +336,12 @@ pub fn rewrite_federated_sql(sql: &str, analysis: &FederatedAnalysis) -> Option<
     }
 
     // Parse the SQL and rewrite at AST level
-    let dialect = PostgreSqlDialect {};
-    let mut statements = match Parser::parse_sql(&dialect, sql) {
+    // Preprocess SQL to quote connection names with special characters,
+    // matching the preprocessing done in analyze_federation.
+    let connection_names: Vec<&str> = analysis.connections.iter().map(|s| s.as_str()).collect();
+    let preprocessed_sql = preprocess_federated_sql(sql, &connection_names);
+    let dialect = GenericDialect {};
+    let mut statements = match Parser::parse_sql(&dialect, &preprocessed_sql) {
         Ok(stmts) => stmts,
         Err(_) => return None,
     };
@@ -592,5 +665,60 @@ mod tests {
         assert!(rewritten.contains("ihrcore.public.users"));
         assert!(!rewritten.contains("postgresql."));
         assert!(rewritten.contains("u"));
+    }
+
+    #[test]
+    fn test_hyphenated_connection_name() {
+        // Connection name contains a hyphen, which is invalid as an unquoted
+        // SQL identifier. The preprocessor should quote it before parsing.
+        let conn = make_test_connection("doris-Local", DatabaseType::Doris, "freequery");
+        let sql = "SELECT `BM0000`, `MC0000` FROM doris-Local.freequery.DIM_BM_AD_PS";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax, "should detect hyphenated connection name");
+        assert!(analysis.is_single_connection);
+        assert_eq!(analysis.single_connection, Some("doris-Local".to_string()));
+        assert_eq!(analysis.table_refs.len(), 1);
+        assert_eq!(analysis.table_refs[0].connection_name, "doris-Local");
+        assert_eq!(analysis.table_refs[0].schema_name, Some("freequery".to_string()));
+        assert_eq!(analysis.table_refs[0].table_name, "DIM_BM_AD_PS");
+
+        // Rewrite must strip the hyphenated connection prefix entirely.
+        let rewritten = rewrite_federated_sql(sql, &analysis).expect("rewrite should succeed");
+        assert!(
+            rewritten.contains("freequery.DIM_BM_AD_PS") && !rewritten.contains("doris-Local"),
+            "rewritten SQL should drop the hyphenated connection prefix, got: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn test_hyphenated_connection_name_case_insensitive() {
+        // User writes connection name in different case than the config.
+        let conn = make_test_connection("doris-Local", DatabaseType::Doris, "freequery");
+        let sql = "SELECT * FROM doris-local.freequery.DIM_BM_AD_PS";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax, "should match case-insensitively");
+        assert_eq!(analysis.single_connection, Some("doris-Local".to_string()));
+
+        let rewritten = rewrite_federated_sql(sql, &analysis).expect("rewrite should succeed");
+        assert!(
+            !rewritten.contains("doris-local") && !rewritten.contains("doris-Local"),
+            "rewritten SQL should drop the connection prefix, got: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn test_normal_connection_name_unaffected_by_preprocessing() {
+        // Connection names without special characters should work as before.
+        let conn = make_test_connection("my_pg", DatabaseType::Postgres, "mydb");
+        let sql = "SELECT * FROM my_pg.public.users WHERE id = 1";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax);
+        assert_eq!(analysis.single_connection, Some("my_pg".to_string()));
+
+        let rewritten = rewrite_federated_sql(sql, &analysis).expect("rewrite should succeed");
+        assert_eq!(rewritten, "SELECT * FROM public.users WHERE id = 1");
     }
 }

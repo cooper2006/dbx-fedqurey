@@ -212,4 +212,32 @@ mod tests {
         assert_eq!(analysis.table_refs.len(), 1);
         assert_eq!(analysis.table_refs[0].table_name, "users");
     }
+
+    /// Regression: MySQL/Doris connections use backtick-quoted identifiers.
+    /// The federation parser previously used PostgreSqlDialect which does not
+    /// recognize backticks, so `doris.freequery.\`DIM_BM_A01SFZJLX\`` failed
+    /// to parse and the connection-name prefix was left in the SQL sent to the
+    /// server — producing "Unknown catalog 'doris'". GenericDialect accepts
+    /// backtick-quoted identifiers and correctly strips the prefix.
+    #[test]
+    fn test_backtick_identifiers_doris_connection() {
+        let conn = make_test_connection("doris", DatabaseType::Doris, "freequery");
+        let sql = "SELECT `BM0000`, `MC0000` FROM doris.freequery.`DIM_BM_A01SFZJLX`";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax, "Should detect federation syntax with backtick identifiers");
+        assert!(analysis.is_single_connection);
+        assert_eq!(analysis.single_connection, Some("doris".to_string()));
+        assert_eq!(analysis.table_refs.len(), 1);
+        assert_eq!(analysis.table_refs[0].connection_name, "doris");
+        assert_eq!(analysis.table_refs[0].schema_name, Some("freequery".to_string()));
+        assert_eq!(analysis.table_refs[0].table_name, "DIM_BM_A01SFZJLX");
+
+        let rewritten = rewrite_federated_sql(sql, &analysis);
+        assert!(rewritten.is_some(), "Should rewrite single-connection federated SQL with backticks");
+        let result = rewritten.unwrap();
+        assert!(!result.contains("doris."), "Should remove connection prefix");
+        assert!(result.contains("freequery."), "Should preserve database name");
+        assert!(result.contains("DIM_BM_A01SFZJLX"), "Should preserve table name");
+    }
 }

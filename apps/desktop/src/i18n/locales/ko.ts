@@ -188,6 +188,7 @@ export default withEnglishFallback({
     title: "새 연결",
     name: "이름",
     namePlaceholder: "연결 이름, 비워두면 자동 생성",
+    nameInvalid: "연결 이름에는 문자, 숫자, 밑줄만 사용할 수 있으며 숫자로 시작할 수 없습니다 (하이픈, 공백 등 특수 문자는 사용할 수 없습니다)",
     note: "메모",
     notePlaceholder: "메모에 비밀번호를 평문으로 저장하지 마세요",
     type: "유형",

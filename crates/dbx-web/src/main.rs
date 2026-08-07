@@ -270,6 +270,9 @@ async fn main() {
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
 
+    // 从 SQLite 恢复之前持久化的 session token，使服务器重启后用户无需重新登录
+    auth::restore_sessions(&web_state).await;
+
     // API routes
     let api = Router::new()
         // Auth

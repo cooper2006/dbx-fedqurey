@@ -351,6 +351,7 @@ pub async fn save_connections(
     Json(body): Json<SaveConnectionsRequest>,
 ) -> Result<Json<()>, AppError> {
     for config in &body.configs {
+        dbx_core::federated::validate_connection_name(&config.name).map_err(AppError::bad_request)?;
         if config.db_type == dbx_core::models::connection::DatabaseType::Sqlite {
             dbx_core::db::sqlite::validate_persistent_attachments(
                 &config.host,
@@ -372,6 +373,7 @@ pub async fn mcp_add_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<McpAddConnectionRequest>,
 ) -> Result<Json<ConnectionConfig>, AppError> {
+    dbx_core::federated::validate_connection_name(&body.config.name).map_err(AppError::bad_request)?;
     let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError::from)?;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
     Ok(Json(saved))

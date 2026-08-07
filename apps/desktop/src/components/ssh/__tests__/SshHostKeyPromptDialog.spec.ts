@@ -90,7 +90,16 @@ beforeEach(() => {
   resolveSshPromptMock.mockReset().mockResolvedValue(undefined);
   MockEventSource.instances = [];
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => [] } as Response));
+  // fetch mock: /api/auth/check 返回 authenticated:true，其余端点返回空数组
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/api/auth/check")) {
+        return Promise.resolve({ ok: true, json: async () => ({ authenticated: true, required: true, setup_required: false }) } as Response);
+      }
+      return Promise.resolve({ ok: true, json: async () => [] } as Response);
+    }),
+  );
   i18n.global.locale.value = "en";
 });
 
@@ -114,6 +123,10 @@ async function mountDialog() {
   app.use(i18n);
   app.mount(container);
   await nextTick();
+  // 认证检查是异步的，等待 EventSource 创建完成
+  await vi.waitFor(() => {
+    expect(MockEventSource.instances.length).toBeGreaterThan(0);
+  });
 }
 
 describe("SshHostKeyPromptDialog web bridge", () => {
@@ -187,6 +200,12 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     // has it pending, but the SSE `Prompt` event never reached the dialog. The
     // polling fallback must surface it so the user can still confirm.
     const fetchMock = vi.mocked(fetch);
+    // 第一个 fetch 是认证检查，返回 authenticated:true
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ authenticated: true, required: true, setup_required: false }),
+    } as Response);
+    // 第二个 fetch 是 pending prompts，返回待处理的 prompt
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => [

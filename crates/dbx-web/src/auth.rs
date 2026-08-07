@@ -33,8 +33,33 @@ pub struct AuthCheckResponse {
 const MAX_ATTEMPTS: u32 = 5;
 const LOCKOUT_SECS: u64 = 60;
 
+const SESSIONS_STORAGE_KEY: &str = "web_sessions";
+
 fn session_cookie_path(state: &WebState) -> &str {
     state.public_base_path.as_str()
+}
+
+/// 将当前所有 session token 持久化到 SQLite，使服务器重启后 session 仍然有效
+async fn persist_sessions(state: &WebState) {
+    let sessions: Vec<String> = state.sessions.read().await.iter().cloned().collect();
+    let json = match serde_json::to_string(&sessions) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    let _ = state.app.storage.save_state(SESSIONS_STORAGE_KEY, json.as_bytes(), "application/json").await;
+}
+
+/// 从 SQLite 恢复之前持久化的 session token（服务器启动时调用）
+pub async fn restore_sessions(state: &WebState) {
+    if let Ok(Some((data, _))) = state.app.storage.load_state(SESSIONS_STORAGE_KEY).await {
+        if let Ok(sessions) = serde_json::from_slice::<Vec<String>>(&data) {
+            let mut set = state.sessions.write().await;
+            for token in sessions {
+                set.insert(token);
+            }
+            log::info!("Restored {} persisted session(s) from storage", set.len());
+        }
+    }
 }
 
 fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
@@ -107,6 +132,7 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 
     let token = uuid::Uuid::new_v4().to_string();
     state.sessions.write().await.insert(token.clone());
+    persist_sessions(&state).await;
 
     let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
@@ -141,6 +167,7 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     // Auto-login: create session
     let token = uuid::Uuid::new_v4().to_string();
     state.sessions.write().await.insert(token.clone());
+    persist_sessions(&state).await;
 
     let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
@@ -196,6 +223,7 @@ pub async fn change_password(
 pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Response {
     if let Some(token) = extract_session_token(&req) {
         state.sessions.write().await.remove(&token);
+        persist_sessions(&state).await;
     }
     let cookie = format!("dbx_session=; Path={}; HttpOnly; Max-Age=0", session_cookie_path(&state));
     (StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response()

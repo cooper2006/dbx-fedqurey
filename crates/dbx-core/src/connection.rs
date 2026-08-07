@@ -5628,6 +5628,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             profile_id: String::new(),
+            allow_exec_channel_proxy: false,
         });
         assert!(state.test_tunnel_profile(&ssh).await.is_err());
 
@@ -7302,6 +7303,7 @@ for line in sys.stdin:
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
             profile_id: profile_id.to_string(),
+            allow_exec_channel_proxy: false,
         }
     }
 
