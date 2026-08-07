@@ -487,6 +487,8 @@ flowchart TD
     <p><strong>连接名误判 catalog</strong>：联邦查询中连接名前缀（如 <code>doris.freequery.DIM_BM_AD_PS</code>）被误作为 catalog 传递给后端，导致 Doris 等引擎报 "Backend request failed"。前端 <code>queryStore.ts</code> 剥离匹配连接名的 catalog 并重定向元数据到目标连接；后端 <code>schema.rs</code> 过滤同名 catalog。</p>
     <p><strong>含特殊字符连接名</strong>：连接名含连字符（如 <code>doris-Local</code>）时 SQL 解析器误认为算术表达式。新增 <code>preprocess_federated_sql()</code> 自动加引号预处理，SQL 方言从 PostgreSQL 切换为 GenericDialect 以兼容更广泛语法。</p>
     <p><strong>Web session 持久化</strong>：session token 持久化到 SQLite，服务器重启后自动恢复登录状态。</p>
+    <p><strong>Session cookie 传递</strong>：<code>apps/desktop/src/lib/backend/http.ts</code> 添加 <code>credentials: "include"</code>，确保 fetch 请求携带 session cookie。</p>
+    <p><strong>Calcite Agent 启动超时</strong>：<code>crates/dbx-core/src/calcite_agent.rs</code> 修复 timeout 参数，增加启动超时到 60 秒。</p>
   </div>
 </div>
 </section>
@@ -931,7 +933,7 @@ flowchart TD
 
 <footer>
 <div class="container">
-  <p>DBX 联邦查询使用指南 · 版本 1.2 · 2026-08-07 · 含稳定性修复（catalog 误判、含特殊字符连接名、session 持久化）</p>
+  <p>DBX 联邦查询使用指南 · 版本 1.3 · 2026-08-07 · 含稳定性修复（catalog 误判、含特殊字符连接名、session 持久化、session cookie 传递、Agent 启动超时）</p>
 </div>
 </footer>
 

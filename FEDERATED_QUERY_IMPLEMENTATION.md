@@ -219,6 +219,22 @@ Web 服务重启后所有登录 session 丢失，用户需重新登录。
 | `crates/dbx-web/src/auth.rs` | 新增 `persist_sessions()` / `restore_sessions()` 函数：将 session token 持久化到 SQLite，服务器启动时自动恢复 |
 | `crates/dbx-web/src/main.rs` | 启动时调用 `restore_sessions()` 恢复持久化 session |
 
+### 问题 4: 浏览器刷新后 session 丢失
+
+浏览器刷新后前端未携带 session cookie，导致 API 返回 401 认证失败。
+
+| 文件 | 修复内容 |
+|------|----------|
+| `apps/desktop/src/lib/backend/http.ts` | `get()`/`del()` 函数添加 `credentials: "include"`，确保 fetch 请求携带 session cookie |
+
+### 问题 5: Calcite Agent 启动超时
+
+联邦查询时 Calcite Agent 启动失败，报错 "Agent process closed stdout during startup"。
+
+| 文件 | 修复内容 |
+|------|----------|
+| `crates/dbx-core/src/calcite_agent.rs` | 修复 `wait_for_ready()` 的 timeout 参数被忽略问题，增加启动超时到 60 秒，添加超时检查逻辑 |
+
 ---
 
 ## 下一步计划
@@ -262,5 +278,5 @@ Web 服务重启后所有登录 session 丢失，用户需重新登录。
 ---
 *实现日期: 2026-08-03*
 *最近更新: 2026-08-07*
-*版本: 1.3*
-*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成，新增 VictoriaMetrics/Mqtt 支持，修复连接名误判 catalog 及含特殊字符连接名解析问题*
+*版本: 1.4*
+*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成，新增 VictoriaMetrics/Mqtt 支持，修复连接名误判 catalog 及含特殊字符连接名解析问题，修复 session cookie 传递和 Calcite Agent 启动超时*

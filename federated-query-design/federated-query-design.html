@@ -1650,6 +1650,8 @@ flowchart TB
       <p><strong>连接名误判 catalog</strong>：联邦查询的连接名前缀（如 <code>doris.freequery.DIM_BM_AD_PS</code>）被可编辑性分析误作为 catalog 传递给后端元数据接口，导致 Doris 等引擎报 "Backend request failed"。修复方案：前端 <code>queryStore.ts</code> 的 <code>resolveEditableSourceMetadataTarget()</code> 检测并剥离匹配连接名的 catalog，同时将元数据请求重定向到联邦目标连接；后端 <code>schema.rs</code> 的 <code>resolve_external_doris_catalog()</code> 在 catalog 与连接名匹配时返回 None。对 Doris/MySQL 等非 schema 感知数据库，3-part 名称第二部分正确识别为数据库名。</p>
       <p><strong>含特殊字符连接名解析</strong>：连接名含连字符（如 <code>doris-Local</code>）时 SQL 解析器将其误认为算术表达式。新增 <code>preprocess_federated_sql()</code> 在解析前自动为含特殊字符的连接名加引号；新增 <code>validate_connection_name()</code> 提前校验名称合法性；SQL 方言从 PostgreSqlDialect 切换为 GenericDialect 以兼容更广泛语法。新增 3 个单元测试。</p>
       <p><strong>Web session 持久化</strong>：<code>dbx-web/src/auth.rs</code> 新增 <code>persist_sessions()</code> / <code>restore_sessions()</code>，将 session token 持久化到 SQLite，服务器重启后自动恢复登录状态。</p>
+      <p><strong>Session cookie 传递</strong>：<code>apps/desktop/src/lib/backend/http.ts</code> 的 <code>get()</code>/<code>del()</code> 函数添加 <code>credentials: "include"</code>，确保浏览器刷新后仍携带 session cookie。</p>
+      <p><strong>Calcite Agent 启动超时</strong>：<code>crates/dbx-core/src/calcite_agent.rs</code> 修复 timeout 参数被忽略问题，增加启动超时到 60 秒。</p>
     </div>
   </div>
 </section>
@@ -2248,7 +2250,7 @@ flowchart TB
 
 <footer>
   <div class="container">
-    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.3 · 2026-08-07</p>
+    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.4 · 2026-08-07</p>
     <p>基于 dbx 真实代码库架构分析生成 · Rust + Tauri 2.x + Vue 3 + CodeMirror 6 + Java Agent</p>
   </div>
 </footer>

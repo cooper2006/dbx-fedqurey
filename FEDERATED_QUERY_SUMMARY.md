@@ -343,6 +343,18 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 | `crates/dbx-web/src/auth.rs` | `persist_sessions()` / `restore_sessions()` 将 session token 持久化到 SQLite |
 | `crates/dbx-web/src/main.rs` | 启动时恢复持久化 session |
 
+### 修复 4: 前端 session cookie 传递
+
+| 文件 | 修复 |
+|------|------|
+| `apps/desktop/src/lib/backend/http.ts` | `get()`/`del()` 函数添加 `credentials: "include"`，确保 fetch 请求携带 session cookie |
+
+### 修复 5: Calcite Agent 启动超时
+
+| 文件 | 修复 |
+|------|------|
+| `crates/dbx-core/src/calcite_agent.rs` | 修复 `wait_for_ready()` 的 timeout 参数被忽略问题，增加启动超时到 60 秒，添加超时检查逻辑 |
+
 ### 本次新增/修改文件
 
 - `crates/dbx-core/src/federated.rs` - 含特殊字符连接名预处理、名称校验、GenericDialect
@@ -361,5 +373,5 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 
 *生成日期: 2026-08-03*
 *最近更新: 2026-08-07*
-*版本: 1.3*
-*状态: 全部完成，含 P0-P2 审查修复、VictoriaMetrics/Mqtt 支持、连接名 catalog 误判修复、含特殊字符连接名解析修复、Web session 持久化*
+*版本: 1.4*
+*状态: 全部完成，含 P0-P2 审查修复、VictoriaMetrics/Mqtt 支持、连接名 catalog 误判修复、含特殊字符连接名解析修复、Web session 持久化、session cookie 传递修复、Calcite Agent 启动超时修复*
