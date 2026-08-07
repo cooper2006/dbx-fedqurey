@@ -1812,6 +1812,7 @@ async fn execute_multi_connection_federated_query(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: vec![],
     };
 
     Ok(result)
