@@ -235,13 +235,13 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function get<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url));
+  const res = await fetch(apiUrl(url), { credentials: "include" });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
 async function del<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url), { method: "DELETE" });
+  const res = await fetch(apiUrl(url), { method: "DELETE", credentials: "include" });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
