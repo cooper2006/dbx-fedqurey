@@ -268,23 +268,23 @@ importers:
   packages/cli:
     optionalDependencies:
       '@dbx-app/cli-darwin-arm64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/cli-darwin-x64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/cli-linux-arm64-gnu':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/cli-linux-x64-gnu':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/cli-win32-arm64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/cli-win32-x64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
 
   packages/cli-darwin-arm64: {}
 
@@ -316,23 +316,23 @@ importers:
         version: 4.1.8(@types/node@22.19.19)(happy-dom@20.10.6)(vite@8.0.16(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(stylus@0.57.0)(tsx@4.22.4)(yaml@2.8.4))
     optionalDependencies:
       '@dbx-app/mcp-darwin-arm64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/mcp-darwin-x64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/mcp-linux-arm64-gnu':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/mcp-linux-x64-gnu':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/mcp-win32-arm64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
       '@dbx-app/mcp-win32-x64':
-        specifier: 0.4.55
-        version: 0.4.55
+        specifier: 0.4.56
+        version: 0.4.56
 
   packages/mcp-win32-arm64: {}
 
@@ -596,74 +596,74 @@ packages:
   '@codemirror/view@6.43.0':
     resolution: {integrity: sha512-V7ZCLQO3Jus9hzh2jVCCPW3mO4IBMr43O37PqSUYautJSnnJF41YlgLw21x0fLJTYvJ+Vkm6Gp+qKGH9pltgXA==}
 
-  '@dbx-app/cli-darwin-arm64@0.4.55':
-    resolution: {integrity: sha512-Cr8vaF26/skMZBDF3x2t6CRmwtCyVm/T2QX3Sr92ZF2tI14HxeCsQZNcS599lmHb1GIWAka6pqCRtXwl+CVzfg==}
+  '@dbx-app/cli-darwin-arm64@0.4.56':
+    resolution: {integrity: sha512-lD5IAc0CQjcz8n+xZzyfFjLplpUBHuoXnQ5qumEM6fmST6PLaWQUFIVUj0ZEDrdYTDcrTnmCFvxy9svQ+md1bg==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/cli-darwin-x64@0.4.55':
-    resolution: {integrity: sha512-MFr79B76MTC+rZAp26ICsNdS1BMx22dSWCdzU6q7hLuxtZJM9+E9nLgYlGCT1tpZ83I4SzWpAQtJxrmdfbJpiA==}
+  '@dbx-app/cli-darwin-x64@0.4.56':
+    resolution: {integrity: sha512-C5pHX72igsLFvwiyy/3jH5uGlDM9hmp7sW6W8mE9FQg+Wmro854qQxlqCk5V88X6f19WHk1wmx1Ii+eceJavqQ==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/cli-linux-arm64-gnu@0.4.55':
-    resolution: {integrity: sha512-LrCf70vLb8zcfWvpSikwEYCj5ITxLMzM5XGgfR8/ir3vEwMsjh25fcrs7HVnwPz+Ey/1HvTNTVDD4vyRYhdoBw==}
+  '@dbx-app/cli-linux-arm64-gnu@0.4.56':
+    resolution: {integrity: sha512-SLVakZGa3cRmu67DmYjf391OUS/aeBAAyzn82gWdrMGWqkA4iXXwNBnzRbcqF9qpSsNOJ+B7rcbm/iLRzO2GDg==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/cli-linux-x64-gnu@0.4.55':
-    resolution: {integrity: sha512-hI1ureJzqp4w5btVNaCPfbG74jWEy3YGfQtwU73WBvUZB3xJ8KS7RmS9azjD6hqyXIyOS90My5DT5wcrgGsafA==}
+  '@dbx-app/cli-linux-x64-gnu@0.4.56':
+    resolution: {integrity: sha512-tEjo6lk6OM5eA7NXgyRF5g47TNS6VFaKiDdojyKhHjv0JB4iv3u3wInYkXt/9q24Fuetp865vgEDp46sE11PSA==}
     cpu: [x64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/cli-win32-arm64@0.4.55':
-    resolution: {integrity: sha512-kboBOkaw2Sked1JPuKHGRSVLsqV4PVp9tqVDP/Ka0rMYGbppR0q4UT3s5gvvwHgriu/o164zWdA0hQwY5jUDpA==}
+  '@dbx-app/cli-win32-arm64@0.4.56':
+    resolution: {integrity: sha512-7gc8qKEOe7amF+XUa/dlgpYUY2KNeqccLq+5GLH09qPQLjfN96JYj5pV/UinBggJq3u7midIdThNNKWaZvDbmA==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/cli-win32-x64@0.4.55':
-    resolution: {integrity: sha512-6+HgnSH0d+tiz3iy6Elqgbyg0HqTVSt8+arTwJPNqiZvyOtD3zWSTa1iK/zLv7v4c+ahclCM4lWG5EszAnC9mQ==}
+  '@dbx-app/cli-win32-x64@0.4.56':
+    resolution: {integrity: sha512-7ISXxrkdhbcHDrLUblYvd5I3j6IUqtb/fqlVuvL6IhS/4elC6MlOp4p3p08tekxVrAfGD6sO9eMsOvPImbxeew==}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/mcp-darwin-arm64@0.4.55':
-    resolution: {integrity: sha512-4u2ufouNTmEf0GJpmwYSaHwFO75EUgQSPLnLCbt+/ZcAIq13N/j3v+6s6KVoGvBnj8A4wCaJSdh33FBnvUTRZw==}
+  '@dbx-app/mcp-darwin-arm64@0.4.56':
+    resolution: {integrity: sha512-AU7mrv1eXHT6Zhrsm0pkncQbav77nzJl5oPyc2DjssdQz04ddbhzayhIhqi42E9pM5lRC4rDe42QaNAFJ7ZB/Q==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/mcp-darwin-x64@0.4.55':
-    resolution: {integrity: sha512-es3Z0LLjA1c5rcbCAatfIu1vJiz3jpUEJN+lBQf4jpl3C3uwmxmM6hRocQTfuuXaxHf1NnzeX4i0v+4RmRXBAQ==}
+  '@dbx-app/mcp-darwin-x64@0.4.56':
+    resolution: {integrity: sha512-xod2XHns2ZiVOgkx05/zPUQfrAtX18Uv5hP+nLWd4ZQn8GYho0PL7uovBpNmFCWEA54DVM8JsLuDbssJSjBjrA==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.55':
-    resolution: {integrity: sha512-CF7wlkFP8fLZp7TvnNzCx9f9SnEgEGmLzfpOu5TgP7nHiHDI2TP3cHYIjaLq2vFAMUR/N21WKuMC0KC8NEByNQ==}
+  '@dbx-app/mcp-linux-arm64-gnu@0.4.56':
+    resolution: {integrity: sha512-wOMH5Y2hR6fANOh9noZ2dlJHLKg+FAKXVxQrCcGBAqMybUvGtN/mQ1+cRc+fjImzvFn+meyYw7z7JqtVpvJeFA==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/mcp-linux-x64-gnu@0.4.55':
-    resolution: {integrity: sha512-3I+HNwDNktysPzoqMrXmK7sY2pdHj8JkARXuJ78eVygqn/2lKMtBLxzBaLjo1wBOLIQ9Hnvdfw9+S+/ueQOUeA==}
+  '@dbx-app/mcp-linux-x64-gnu@0.4.56':
+    resolution: {integrity: sha512-kavdbOi7qRiw3f5Dy/UCjFDd2McrJBWH9Nh9IYykvwpF8uHDYXW3rlDz8iCMi1268Ms5k2RtNToUEEcK9U6wEg==}
     cpu: [x64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/mcp-win32-arm64@0.4.55':
-    resolution: {integrity: sha512-5QlJ737hx9S8QGDxCGfyPnbDSOVg6KGGg/+12Xq62Odb+cWp3apehkUrVp+J42MSsrf9dRoPZkhW7IWdLC+nHw==}
+  '@dbx-app/mcp-win32-arm64@0.4.56':
+    resolution: {integrity: sha512-ow11sRIsRJWvYsJUuYW6LaOCHPbPrtUy9S50PlepxYXuSWmFm7dGo51vKqRjhVZ9mAcHqJVbEof7ttgV+2giXg==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/mcp-win32-x64@0.4.55':
-    resolution: {integrity: sha512-1FPfbJhlpYlFRuFAMdRVWpqhD1gWtY584D25Pptjdxo2gfzPZ2eePTlqQ08PLWPVBhPlon6u3sk0xLwTjuWr3g==}
+  '@dbx-app/mcp-win32-x64@0.4.56':
+    resolution: {integrity: sha512-diwIYajaQRJD+3wxvTf6eN0eyqjCHIQ2lRACdlPD+DQHvMrY3v7VQ+oRmxYjcVYNJjpLB4sZXRK23CeS9PT6GQ==}
     cpu: [x64]
     os: [win32]
     hasBin: true
@@ -4585,40 +4585,40 @@ snapshots:
       style-mod: 4.1.3
       w3c-keyname: 2.2.8
 
-  '@dbx-app/cli-darwin-arm64@0.4.55':
+  '@dbx-app/cli-darwin-arm64@0.4.56':
     optional: true
 
-  '@dbx-app/cli-darwin-x64@0.4.55':
+  '@dbx-app/cli-darwin-x64@0.4.56':
     optional: true
 
-  '@dbx-app/cli-linux-arm64-gnu@0.4.55':
+  '@dbx-app/cli-linux-arm64-gnu@0.4.56':
     optional: true
 
-  '@dbx-app/cli-linux-x64-gnu@0.4.55':
+  '@dbx-app/cli-linux-x64-gnu@0.4.56':
     optional: true
 
-  '@dbx-app/cli-win32-arm64@0.4.55':
+  '@dbx-app/cli-win32-arm64@0.4.56':
     optional: true
 
-  '@dbx-app/cli-win32-x64@0.4.55':
+  '@dbx-app/cli-win32-x64@0.4.56':
     optional: true
 
-  '@dbx-app/mcp-darwin-arm64@0.4.55':
+  '@dbx-app/mcp-darwin-arm64@0.4.56':
     optional: true
 
-  '@dbx-app/mcp-darwin-x64@0.4.55':
+  '@dbx-app/mcp-darwin-x64@0.4.56':
     optional: true
 
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.55':
+  '@dbx-app/mcp-linux-arm64-gnu@0.4.56':
     optional: true
 
-  '@dbx-app/mcp-linux-x64-gnu@0.4.55':
+  '@dbx-app/mcp-linux-x64-gnu@0.4.56':
     optional: true
 
-  '@dbx-app/mcp-win32-arm64@0.4.55':
+  '@dbx-app/mcp-win32-arm64@0.4.56':
     optional: true
 
-  '@dbx-app/mcp-win32-x64@0.4.55':
+  '@dbx-app/mcp-win32-x64@0.4.56':
     optional: true
 
   '@dotenvx/dotenvx@1.75.1':

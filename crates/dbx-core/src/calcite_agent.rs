@@ -154,7 +154,7 @@ impl CalciteAgentRuntime {
         let pending = Arc::new(Mutex::new(HashMap::<RpcId, PendingResponse>::new()));
         let failed = Arc::new(AtomicBool::new(false));
 
-        let (stdout_reader, ready_err) = wait_for_ready(stdout, Duration::from_secs(30));
+        let (stdout_reader, ready_err) = wait_for_ready(stdout, Duration::from_secs(60));
         if let Some(err) = ready_err {
             let _ = child.kill();
             return Err(err);
@@ -254,13 +254,17 @@ impl CalciteAgentRuntime {
 /// 返回 reader（供后续响应读取线程使用）和可能的错误。
 fn wait_for_ready(
     stdout: std::process::ChildStdout,
-    _timeout: Duration,
+    timeout: Duration,
 ) -> (BufReader<std::process::ChildStdout>, Option<String>) {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
 
+    let start = std::time::Instant::now();
     loop {
         line.clear();
+        if start.elapsed() > timeout {
+            return (reader, Some("Agent startup timed out".to_string()));
+        }
         match reader.read_line(&mut line) {
             Ok(0) => return (reader, Some("Agent process closed stdout during startup".to_string())),
             Ok(_) => {
