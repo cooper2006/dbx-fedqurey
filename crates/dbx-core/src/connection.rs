@@ -1646,7 +1646,28 @@ impl AppState {
     ) -> Result<String, String> {
         let config = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).ok_or("Connection config not found")?.clone()
+            if let Some(config) = configs.get(connection_id) {
+                config.clone()
+            } else {
+                drop(configs);
+                // Cache miss: connections created/edited in another session (e.g. the DBX
+                // desktop UI) after this process started update storage but not this
+                // process's in-memory cache. Reconcile from storage before failing so a
+                // query on a connection that exists in storage is not reported as
+                // "Connection config not found".
+                let loaded = self
+                    .storage
+                    .load_connections()
+                    .await
+                    .map_err(|e| format!("Connection config not found: failed to load connections from storage: {e}"))?;
+                let config = loaded
+                    .iter()
+                    .find(|c| c.id == connection_id)
+                    .cloned()
+                    .ok_or_else(|| "Connection config not found".to_string())?;
+                self.configs.write().await.insert(config.id.clone(), config.clone());
+                config
+            }
         };
         validate_connection_url_params(&config)?;
         let db_type = Some(config.db_type);

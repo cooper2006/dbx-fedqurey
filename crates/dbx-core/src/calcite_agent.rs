@@ -142,22 +142,34 @@ impl CalciteAgentRuntime {
         let stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
         let stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
 
-        // stderr 收集线程
+        // stderr 收集线程：把 agent 的 stderr 缓存起来，启动失败时并入错误信息，便于定位
+        // （例如 Java 未安装、版本不符、JAR 缺类或 main 启动异常）。
+        let stderr_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_log_clone = stderr_log.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
                 log::debug!("[calcite-agent:stderr] {line}");
+                stderr_log_clone.lock().unwrap().push(line);
             }
         });
 
-        // 等待就绪信号（超时 30 秒）
+        // 等待就绪信号（超时 60 秒）
         let pending = Arc::new(Mutex::new(HashMap::<RpcId, PendingResponse>::new()));
         let failed = Arc::new(AtomicBool::new(false));
 
         let (stdout_reader, ready_err) = wait_for_ready(stdout, Duration::from_secs(60));
         if let Some(err) = ready_err {
             let _ = child.kill();
-            return Err(err);
+            // 把 agent 的 stderr 并入错误，便于定位（例如 Java 未安装/版本不符/启动异常）
+            let stderr_lines: Vec<String> = stderr_log.lock().unwrap().clone();
+            let suffix = if stderr_lines.is_empty() {
+                String::new()
+            } else {
+                format!(" Agent stderr: {}", stderr_lines.join(" | "))
+            };
+            log::warn!("Calcite Agent failed to start: {err}{suffix}");
+            return Err(format!("{err}{suffix}"));
         }
 
         let runtime = Arc::new(Self {
@@ -302,6 +314,12 @@ fn start_response_reader(
             match reader.read_line(&mut line) {
                 Ok(0) => {
                     log::info!("[calcite-agent] stdout closed");
+                    failed.store(true, Ordering::SeqCst);
+                    // 通知所有等待中的请求，避免它们永久阻塞
+                    let mut map = pending.lock().unwrap();
+                    for (_, sender) in map.drain() {
+                        let _ = sender.send(Err("Agent process terminated".to_string()));
+                    }
                     break;
                 }
                 Ok(_) => {
@@ -330,6 +348,11 @@ fn start_response_reader(
                 }
                 Err(e) => {
                     log::error!("[calcite-agent] failed to read stdout: {e}");
+                    failed.store(true, Ordering::SeqCst);
+                    let mut map = pending.lock().unwrap();
+                    for (_, sender) in map.drain() {
+                        let _ = sender.send(Err("Agent process terminated".to_string()));
+                    }
                     break;
                 }
             }
@@ -400,9 +423,11 @@ impl CalciteAgentManager {
             "connectionId": config.name,
             "jdbcUrl": jdbc_url,
             "username": config.username,
+            "password": config.password,
             "passwordHash": password_hash,
             "driverClass": driver_class,
         });
+        log::debug!("register_connection params: {}", serde_json::to_string(&params).unwrap_or_default().replace(&config.password, "***"));
 
         let result = runtime.call("registerSource", params, Some(Duration::from_secs(30))).await?;
 

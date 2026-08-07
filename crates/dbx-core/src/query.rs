@@ -18,6 +18,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
+use crate::agent_manager::DEFAULT_JRE_KEY;
 use crate::calcite_agent::{CalciteAgentConfig, CalciteAgentManager};
 use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
@@ -1732,7 +1733,16 @@ async fn execute_multi_connection_federated_query(
         if let Some(ref mgr) = *guard {
             mgr.clone()
         } else {
-            let config = CalciteAgentConfig::auto_discover();
+            let mut config = CalciteAgentConfig::auto_discover();
+            // 让 Calcite Agent 使用与其它驱动 Agent 一致的 Java 运行时（受 Driver Manager 的
+            // Managed/System/Custom 配置控制）。否则会固定用 PATH 上的 `java`，在 macOS 下
+            // 通常落到 /usr/bin/java 占位符而无法启动，报 "Agent process closed stdout during startup"。
+            if let Ok(java) = state
+                .agent_manager
+                .resolve_java_runtime(&state.agent_manager.load_state(), DEFAULT_JRE_KEY)
+            {
+                config.java_path = java.to_string_lossy().to_string();
+            }
             if !config.is_jar_available() {
                 return Err(QueryExecutionError::Sql(format!(
                     "Calcite Agent JAR not found. Federated queries across multiple connections require the Calcite Agent.\n\
@@ -1927,6 +1937,23 @@ pub async fn execute_sql_statement_with_options_typed(
     // Check for federated query patterns
     let mut effective_sql = sql.to_string();
     {
+        // Reconcile the in-memory configs cache with storage so connections created or edited
+        // in another session (e.g. the DBX desktop UI) after this process started are visible.
+        // Otherwise the connection set built below from the cache won't recognize `conn.schema.table`
+        // prefixes and the query falls through to the single-connection pool path, which surfaces
+        // "Connection config not found" for a connection that exists in storage.
+        if let Ok(stored) = state.storage.load_connections().await {
+            let mut configs = state.configs.write().await;
+            for config in stored {
+                if !configs.contains_key(&config.id) {
+                    configs.insert(config.id.clone(), config);
+                }
+            }
+            drop(configs);
+        } else {
+            log::warn!("Failed to reload connections from storage for federation analysis");
+        }
+
         let configs = state.configs.read().await;
         let all_connections: Vec<ConnectionConfig> = configs.values().cloned().collect();
         drop(configs);
