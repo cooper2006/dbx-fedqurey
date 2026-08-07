@@ -441,7 +441,7 @@ footer {
     <h1>dbx 联邦查询与 SQL 格式化设计</h1>
     <p class="subtitle">基于 Apache Calcite 实现跨数据连接联邦查询，并在现有 SQL 编辑器中增强格式化能力。设计基于 dbx 真实技术栈：Rust + Tauri 2.x 后端、Vue 3 + CodeMirror 6 前端、Java Agent 子进程驱动架构。</p>
     <div class="meta">
-      <span><strong>版本</strong> 2.3</span>
+      <span><strong>版本</strong> 2.5</span>
       <span><strong>日期</strong> 2026-08-07</span>
       <span><strong>状态</strong> Phase 1-4 已实现 · 43 种数据库支持 · 稳定性修复完成</span>
     </div>
@@ -1652,6 +1652,9 @@ flowchart TB
       <p><strong>Web session 持久化</strong>：<code>dbx-web/src/auth.rs</code> 新增 <code>persist_sessions()</code> / <code>restore_sessions()</code>，将 session token 持久化到 SQLite，服务器重启后自动恢复登录状态。</p>
       <p><strong>Session cookie 传递</strong>：<code>apps/desktop/src/lib/backend/http.ts</code> 的 <code>get()</code>/<code>del()</code> 函数添加 <code>credentials: "include"</code>，确保浏览器刷新后仍携带 session cookie。</p>
       <p><strong>Calcite Agent 启动超时</strong>：<code>crates/dbx-core/src/calcite_agent.rs</code> 修复 timeout 参数被忽略问题，增加启动超时到 60 秒。</p>
+      <p><strong>Calcite Agent 使用配置的 Java 运行时</strong>：修复 macOS 下 Agent 启动失败（"Agent process closed stdout during startup"）。<code>query.rs</code> 创建 CalciteAgentConfig 时改用 <code>agent_manager.resolve_java_runtime()</code> 解析的 Java 运行时（Managed/System/Custom），不再硬编码 <code>java</code>。桌面 GUI 应用不继承终端 PATH，需在 Driver Store → Java 运行时选 Custom 并填 JDK 21 绝对路径（如 ServBay）。</p>
+      <p><strong>连接缓存与存储同步</strong>：<code>query.rs</code> 联邦分析前从存储补齐连接缓存；<code>connection.rs</code> 连接池查找缓存 miss 时回落存储。避免连接存在却因缓存与存储不同步而误报 "Connection config not found"。</p>
+      <p><strong>Agent 启动诊断增强</strong>：<code>calcite_agent.rs</code> 启动失败时把 Agent stderr 并入错误信息，便于定位 Java 未安装/版本不符等问题；stdout 关闭时通知所有等待中的请求，避免永久阻塞。</p>
     </div>
   </div>
 </section>
@@ -2250,7 +2253,7 @@ flowchart TB
 
 <footer>
   <div class="container">
-    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.4 · 2026-08-07</p>
+    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.5 · 2026-08-07</p>
     <p>基于 dbx 真实代码库架构分析生成 · Rust + Tauri 2.x + Vue 3 + CodeMirror 6 + Java Agent</p>
   </div>
 </footer>

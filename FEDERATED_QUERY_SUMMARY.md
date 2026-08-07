@@ -355,6 +355,37 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 |------|------|
 | `crates/dbx-core/src/calcite_agent.rs` | 修复 `wait_for_ready()` 的 timeout 参数被忽略问题，增加启动超时到 60 秒，添加超时检查逻辑 |
 
+### 修复 6: Calcite Agent 使用配置的 Java 运行时（macOS 启动失败）
+
+macOS 下联邦查询报 "Agent process closed stdout during startup"。根因是 Calcite Agent 用 `CalciteAgentConfig::auto_discover()` 硬编码 `java_path = "java"`（仅从 PATH 查找）。桌面 GUI 应用从 Finder/Dock 启动**不继承终端 PATH**，`java` 落到 `/usr/bin/java` 占位符，输出 `Unable to locate a Java Runtime` 后退出，Agent 标准输出立即关闭。
+
+| 文件 | 修复 |
+|------|------|
+| `crates/dbx-core/src/query.rs` | 创建 CalciteAgentConfig 时用 `agent_manager.resolve_java_runtime(...)` 解析 Java 运行时（Managed/System/Custom），覆盖 `config.java_path`，与其它驱动 Agent 行为一致 |
+
+**使用方式**：Driver Store → Java 运行时 → 模式选 **Custom**，`custom_java_path` 填 JDK 21 的绝对路径（如 ServBay `/Applications/ServBay/package/openjdk/21/21.0.12/Contents/Home/bin/java`）。
+
+### 修复 7: 连接缓存与存储不同步导致 "Connection config not found"
+
+连接存在于存储但不在当前进程 `state.configs` 缓存时（例如另一进程/桌面 UI 新增或修改连接后），联邦分析无法识别 `连接名.schema.table` 前缀，查询被当作普通单连接处理，最终连接池查找报 "Connection config not found"。
+
+| 文件 | 修复 |
+|------|------|
+| `crates/dbx-core/src/query.rs` | 联邦分析前从存储补齐缺失连接进缓存，确保联邦前缀被识别并正确路由 |
+| `crates/dbx-core/src/connection.rs` | 连接池查找缓存 miss 时回落从存储加载并插回缓存，不再直接报错 |
+
+### 修复 8: Agent 启动诊断增强
+
+| 文件 | 修复 |
+|------|------|
+| `crates/dbx-core/src/calcite_agent.rs` | 启动失败时将 Agent stderr 并入错误信息（如 "Unable to locate a Java Runtime"），便于快速定位 Java 未安装/版本不符等问题；stdout 关闭时通知所有等待中的请求，避免永久阻塞 |
+
+### 修复 9: 适配上游新增的 QueryResult.messages 字段
+
+| 文件 | 修复 |
+|------|------|
+| `crates/dbx-core/src/query.rs` | 合并上游后新增的 `messages: Vec<QueryMessage>` 字段，联邦结果构造处补上 `messages: vec![]`，修复编译错误 |
+
 ### 本次新增/修改文件
 
 - `crates/dbx-core/src/federated.rs` - 含特殊字符连接名预处理、名称校验、GenericDialect
@@ -373,5 +404,5 @@ Java Agent（`agents/drivers/calcite/`）通过 `JdbcSchema` 将每个 JDBC 连�
 
 *生成日期: 2026-08-03*
 *最近更新: 2026-08-07*
-*版本: 1.4*
-*状态: 全部完成，含 P0-P2 审查修复、VictoriaMetrics/Mqtt 支持、连接名 catalog 误判修复、含特殊字符连接名解析修复、Web session 持久化、session cookie 传递修复、Calcite Agent 启动超时修复*
+*版本: 1.5*
+*状态: 全部完成，含 P0-P2 审查修复、VictoriaMetrics/Mqtt 支持、连接名 catalog 误判修复、含特殊字符连接名解析修复、Web session 持久化、session cookie 传递修复、Calcite Agent 启动超时修复、Calcite Agent 使用配置 Java 运行时、连接缓存与存储同步、Agent 启动诊断增强、适配上游 QueryResult.messages 字段*
