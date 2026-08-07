@@ -143,6 +143,21 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   }
 }
 
+function isSqlFormatterParseError(error: unknown): boolean {
+  if (!(error instanceof Error) || !error.message.startsWith("Parse error at token:")) return false;
+  const candidate = error as Error & { offset?: unknown; token?: unknown };
+  return typeof candidate.offset === "number" && candidate.token !== undefined;
+}
+
+export async function formatSqlForEditing(sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
+  try {
+    return await formatSqlText(sql, dialect, settings);
+  } catch (error) {
+    if (isSqlFormatterParseError(error)) return sql;
+    throw error;
+  }
+}
+
 /**
  * SQL keyword set used to avoid false positives when detecting federation references.
  * A dot-separated identifier chain is only treated as federated if the first segment

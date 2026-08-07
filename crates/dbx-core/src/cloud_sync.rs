@@ -1471,6 +1471,7 @@ mod tests {
 
     fn postgres_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Postgres".to_string(),
             note: String::new(),
@@ -1529,6 +1530,7 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -1624,6 +1626,7 @@ mod tests {
     #[test]
     fn scrubs_connection_secret_fields() {
         let mut config = ConnectionConfig {
+            docs_notes_path: None,
             id: "id".to_string(),
             name: "name".to_string(),
             note: String::new(),

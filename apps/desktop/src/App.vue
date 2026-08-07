@@ -30,6 +30,7 @@ import { useTauriEvents } from "@/composables/useTauriEvents";
 import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
+import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -156,6 +157,19 @@ const pendingCloseActionChoice = ref(false);
 const ROOT_SAVED_SQL_FOLDER = "__root__";
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
+
+const externalSqlFileChanges = useExternalSqlFileChanges({
+  activeTab,
+  recreateFile: async (tab) => {
+    const result = await writeExternalSqlTab(tab, { expectedMissing: true });
+    if (result === "retry") toast(t("externalSqlFile.changedAgain"), 5000);
+    return result === "saved";
+  },
+  saveAsFile: (tab) => saveExternalSqlTabAs(tab),
+  closeTab: (tab) => queryStore.closeTab(tab.id),
+  reportError: (message) => toast(message, 5000),
+});
+const externalSqlFilePrompt = externalSqlFileChanges.pendingPrompt;
 
 const activeConnection = computed(() => {
   const tab = activeTab.value;
@@ -611,17 +625,17 @@ function handleCloseActionPromptOpenChange(open: boolean) {
   }
 }
 
-async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: boolean } = {}): Promise<boolean> {
-  if (!tab.externalSqlPath || !isTauriRuntime()) return false;
+async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: boolean; expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<"saved" | "retry" | "failed"> {
+  if (!tab.externalSqlPath || !isTauriRuntime()) return "failed";
   try {
     await api.writeExternalSqlFile(tab.externalSqlPath, tab.sql);
     queryStore.markTabClean(tab);
     toast(t("savedSql.saved"), 2000);
     if (options.closeAfterSave) queryStore.closeTab(tab.id, { force: true });
-    return true;
+    return "saved";
   } catch (e: any) {
     toast(t("toolbar.sqlSaveFailed", { message: e?.message || String(e) }), 5000);
-    return true;
+    return "failed";
   }
 }
 
@@ -798,9 +812,8 @@ async function confirmSaveSqlToLibrary() {
   }
 }
 
-async function saveActiveSqlAsLocalFile() {
-  const tab = activeTab.value;
-  if (!tab || !canSaveSqlTab(tab) || !isTauriRuntime()) return;
+async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
+  if (!canSaveSqlTab(tab) || !isTauriRuntime()) return false;
   try {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const path = await save({
@@ -813,8 +826,10 @@ async function saveActiveSqlAsLocalFile() {
     showSaveSqlDialog.value = false;
     closePendingSavedTab();
     toast(t("savedSql.saved"), 2000);
+    return true;
   } catch (e: any) {
     toast(t("toolbar.sqlSaveFailed", { message: e?.message || String(e) }), 5000);
+    return false;
   }
 }
 
@@ -1969,6 +1984,7 @@ onUnmounted(() => {
           @download-and-install="downloadAndInstallUpdate"
           @restart="restartApp"
         />
+        <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />
         <QuickOpenDialog :open="showQuickOpen" @update:open="showQuickOpen = $event" @select="handleQuickOpenSelect" />
       </div>
