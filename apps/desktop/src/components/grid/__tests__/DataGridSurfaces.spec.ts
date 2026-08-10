@@ -25,8 +25,10 @@ vi.mock("@lucide/vue", async () => {
     ChevronRight: icon,
     ChevronsLeft: icon,
     ChevronsRight: icon,
+    Download: icon,
     Filter: icon,
     Loader2: icon,
+    FileUp: icon,
     Upload: icon,
     Search: icon,
     X: icon,
@@ -384,6 +386,32 @@ describe("DataGridColumnHeader", () => {
     expect(findAll(mounted.root, (node) => node.props["data-grid-header-type-line"] === "")).toHaveLength(0);
     expect(findAll(mounted.root, (node) => node.props["data-grid-header-comment-line"] === "")).toHaveLength(0);
   });
+
+  it("shows column nullability in the header tooltip without an inline badge", () => {
+    const baseProps = {
+      name: "nickname",
+      actualColumnIndex: 1,
+      visibleColumnIndex: 1,
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+      nullableLabel: "nullable",
+      yesLabel: "yes",
+      noLabel: "no",
+      columnIndexLabel: "index",
+      columnPrimaryIndexLabel: "primary",
+      columnUniqueIndexLabel: "unique",
+      columnRegularIndexLabel: "regular",
+    };
+    const nullable = mountComponent(DataGridColumnHeader, { ...baseProps, columnNullability: "nullable" });
+    const required = mountComponent(DataGridColumnHeader, { ...baseProps, columnNullability: "required" });
+
+    expect(findAll(nullable.root, (node) => node.props["data-grid-header-nullable"] === "")).toHaveLength(0);
+    expect(findAll(required.root, (node) => node.props["data-grid-header-nullable"] === "")).toHaveLength(0);
+    expect(hostText(nullable.root)).toContain("nullableyes");
+    expect(hostText(required.root)).toContain("nullableno");
+  });
 });
 
 describe("DataGridFilterBuilder", () => {
@@ -415,7 +443,8 @@ describe("DataGridFilterBuilder", () => {
     const triggers = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectTrigger");
     const selectValues = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectValue");
     const items = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem");
-    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[minmax(0,210px)_92px_minmax(0,210px)_auto]"));
+    const filterBuilder = findOne(mounted.root, (node) => String(node.props.class).includes("w-fit max-w-full"));
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]"));
     const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
 
@@ -429,7 +458,8 @@ describe("DataGridFilterBuilder", () => {
     expect(items.every((item) => String(item.props.class).includes("rounded-none"))).toBe(true);
     expect(searchInput.props.placeholder).toBe("grid.filterBuilderSearchColumns");
     expect(valueEditor.props.placeholder).toBe("grid.filterBuilderValue");
-    expect(String(ruleGrid.props.class)).toContain("grid-cols-[minmax(0,210px)_92px_minmax(0,210px)_auto]");
+    expect(filterBuilder.props.style).toEqual({ "--filter-builder-column-width": "178px", "--filter-builder-value-width": "178px" });
+    expect(String(ruleGrid.props.class)).toContain("grid-cols-[var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]");
     expect(String(ruleGrid.props.class)).toContain("justify-start");
     for (const trigger of triggers) {
       expect(String(trigger.props.class)).toContain("w-full");
@@ -437,6 +467,19 @@ describe("DataGridFilterBuilder", () => {
       expect(String(trigger.props.class)).toContain("[&_[data-slot=select-value]]:min-w-0");
       expect(String(trigger.props.class)).toContain("[&_[data-slot=select-value]]:truncate");
     }
+  });
+
+  it("sizes the column control from the longest available column", () => {
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["id", "name"],
+      filteredColumns: ["id", "name"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+    });
+    const filterBuilder = findOne(mounted.root, (node) => String(node.props.class).includes("w-fit max-w-full"));
+
+    expect(filterBuilder.props.style).toEqual({ "--filter-builder-column-width": "88px", "--filter-builder-value-width": "178px" });
   });
 
   it("keeps search focus while navigating and selecting filtered columns", async () => {
@@ -459,6 +502,15 @@ describe("DataGridFilterBuilder", () => {
 
     let columnItems = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").slice(0, 2);
     expect(columnItems[0].props["data-filter-active"]).toBe("");
+    const imeKeyCodeEnter = dispatch(searchInput, "keydown", { key: "Enter", keyCode: 229 });
+    expect(imeKeyCodeEnter.defaultPrevented).toBe(false);
+    expect(imeKeyCodeEnter.propagationStopped).toBe(true);
+    dispatch(searchInput, "compositionstart");
+    dispatch(searchInput, "compositionend");
+    const imeCompositionEndEnter = dispatch(searchInput, "keydown", { key: "Enter", keyCode: 13 });
+    expect(imeCompositionEndEnter.defaultPrevented).toBe(false);
+    expect(imeCompositionEndEnter.propagationStopped).toBe(true);
+    expect(onUpdateRule).not.toHaveBeenCalled();
     expect(dispatch(searchInput, "keydown", { key: "a" }).propagationStopped).toBe(true);
     expect(dispatch(searchInput, "keydown", { key: "Backspace" }).propagationStopped).toBe(true);
 
@@ -596,6 +648,17 @@ describe("DataGridFilterBuilder", () => {
     dispatch(exhaustedSecondValueEditor, "focus");
     await nextTick();
     expect(hostText(exhaustedMounted.root)).not.toContain("grid.filterBuilderValueShortcutHint");
+
+    const imeKeyCodeEnter = dispatch(secondValueEditor, "keydown", { key: "Enter", keyCode: 229 });
+    expect(imeKeyCodeEnter.defaultPrevented).toBe(false);
+    expect(imeKeyCodeEnter.propagationStopped).toBe(true);
+    dispatch(secondValueEditor, "compositionstart");
+    dispatch(secondValueEditor, "compositionend");
+    const imeCompositionEndEnter = dispatch(secondValueEditor, "keydown", { key: "Enter", keyCode: 13 });
+    expect(imeCompositionEndEnter.defaultPrevented).toBe(false);
+    expect(imeCompositionEndEnter.propagationStopped).toBe(true);
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(onApply).not.toHaveBeenCalled();
 
     const shiftEnter = dispatch(secondValueEditor, "keydown", { key: "Enter", shiftKey: true, repeat: false });
     expect(shiftEnter.defaultPrevented).toBe(true);
@@ -739,8 +802,8 @@ describe("DataGridQueryControls", () => {
     });
     const popoverContent = findOne(mounted.root, (node) => node.props["data-stub"] === "PopoverContent");
 
-    expect(String(popoverContent.props.class)).toContain("w-[624px]");
-    expect(String(popoverContent.props.class)).toContain("max-w-[calc(100vw-24px)]");
+    expect(String(popoverContent.props.class)).toContain("w-fit");
+    expect(String(popoverContent.props.class)).toContain("max-w-[calc(100vw-16px)]");
   });
 
   it("keeps filter actions available in the popover", () => {
@@ -810,7 +873,20 @@ describe("cell detail surfaces", () => {
     const copyText = vi.fn();
     const edit = vi.fn();
     const updateOpen = vi.fn();
-    const mounted = mountComponent(DataGridCellDetailDialog, { open: true, detail: detail(), typeColorClass: () => "", openImagePreview: vi.fn(), copyText, canDownloadBinaryValue: () => false, downloadBinaryValue: vi.fn(), onEdit: edit, "onUpdate:open": updateOpen });
+    const importBinaryValue = vi.fn();
+    const mounted = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: detail({ type: "BYTEA", isEditable: true }),
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText,
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => true,
+      importBinaryValue,
+      onEdit: edit,
+      "onUpdate:open": updateOpen,
+    });
     await nextTick();
     await nextTick();
 
@@ -822,6 +898,11 @@ describe("cell detail surfaces", () => {
       "click",
     );
     expect(edit).toHaveBeenCalledOnce();
+    dispatch(
+      findOne(mounted.root, (node) => node.props.title === "grid.importBinaryValue"),
+      "click",
+    );
+    expect(importBinaryValue).toHaveBeenCalledOnce();
 
     await mounted.setProps({ detail: detail({ rawValue: '{"b":2}', formattedJson: '{\n  "b": 2\n}' }) });
     expect(mocks.editor.setValue).toHaveBeenCalledWith('{\n  "b": 2\n}', "json");
@@ -833,7 +914,7 @@ describe("cell detail surfaces", () => {
     expect(updateOpen).toHaveBeenCalledWith(false);
   });
 
-  it("forwards panel edit/copy/cancel actions and exposes search", () => {
+  it("forwards panel actions and only starts JSON editing from preview whitespace", async () => {
     const startEdit = vi.fn();
     const copyValue = vi.fn();
     const cancel = vi.fn();
@@ -849,6 +930,8 @@ describe("cell detail surfaces", () => {
       typeColorClass: () => "",
       canDownloadBinaryValue: () => false,
       downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
       openImagePreview: vi.fn(),
       canCopySqlCondition: () => true,
       onStartEdit: startEdit,
@@ -874,6 +957,26 @@ describe("cell detail surfaces", () => {
     expect(cancel).toHaveBeenCalledOnce();
     mounted.exposed.value.openSearch();
     expect(mocks.panelOpenSearch).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ detail: detail() });
+    const jsonPreview = findOne(mounted.root, (node) => node.props["data-cell-detail-json-preview"] === "");
+    const doubleClickCapture = jsonPreview.props.onDblclickCapture;
+    const textLine = {
+      ownerDocument: {
+        createRange: () => ({
+          selectNodeContents: vi.fn(),
+          getClientRects: () => [{ left: 10, right: 110, top: 20, bottom: 40 }],
+        }),
+      },
+    };
+    const lineTarget = { closest: (selector: string) => (selector === ".cm-line" ? textLine : null) };
+
+    doubleClickCapture({ target: lineTarget, clientX: 60, clientY: 30 });
+    expect(startEdit).toHaveBeenCalledTimes(2);
+
+    doubleClickCapture({ target: lineTarget, clientX: 160, clientY: 30 });
+    doubleClickCapture({ target: { closest: () => null }, clientX: 60, clientY: 80 });
+    expect(startEdit).toHaveBeenCalledTimes(4);
   });
 });
 

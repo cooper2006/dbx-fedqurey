@@ -99,6 +99,7 @@ import type {
   DocumentQueryResult,
   MongoDocumentResult,
   MongoCollectionStatsResult,
+  MongoCloneCollectionResult,
   MongoDropIndexesResult,
   MongoGridFsBucketInfo,
   HistoryEntry,
@@ -858,6 +859,21 @@ export async function applyDocsAnnotations(connectionId: string, snapshot: Schem
 
 export async function saveDocsAnnotations(connectionId: string, annotations: AnnotationFile): Promise<void> {
   return post("/api/docs/annotations/save", { connectionId, annotations });
+}
+
+export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot, annotations: AnnotationFile, lang: string): Promise<void> {
+  const result = await post<{ content: string }>("/api/docs/export", { snapshot, annotations, lang });
+  // No `downloadTextFile` here: it prepends a BOM, which the Tauri command's
+  // `std::fs::write(&file_path, html)` does not. The two callers must produce
+  // byte-identical output for the same inputs.
+  const fileName = filePath.split(/[\\/]/).pop() || "docs.html";
+  const blob = new Blob([result.content], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ---------------------------------------------------------------------------
@@ -2990,6 +3006,15 @@ export async function mongoRenameCollection(connectionId: string, database: stri
   });
 }
 
+export async function mongoCloneCollection(connectionId: string, database: string, sourceCollection: string, targetCollection: string): Promise<MongoCloneCollectionResult> {
+  return post("/api/mongo/clone-collection", {
+    connectionId,
+    database,
+    sourceCollection,
+    targetCollection,
+  });
+}
+
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
   const collections = await documentListCollections(connectionId, "default");
   return collections.map((c) => c.name);
@@ -3184,6 +3209,15 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
     collection,
     keysJson,
     optionsJson,
+  });
+}
+
+export async function mongoCreateUser(connectionId: string, database: string, userJson: string, writeConcernJson?: string): Promise<{ affected_rows: number }> {
+  return post("/api/mongo/create-user", {
+    connectionId,
+    database,
+    userJson,
+    writeConcernJson,
   });
 }
 

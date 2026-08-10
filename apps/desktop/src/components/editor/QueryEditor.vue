@@ -16,8 +16,8 @@ import { completionMatchRanges } from "@/lib/common/completionMatch";
 import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
-import { currentStatementFrameRangeTo, shouldRebuildCurrentStatementFrame, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
-import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
+import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
+import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlForEditing, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
@@ -46,7 +46,8 @@ import {
   shouldChainSqlCompletionAfterAccept,
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
-import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSource } from "@/lib/sql/semantic/completion";
+import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearch/elasticsearchCompletion";
@@ -101,6 +102,7 @@ import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentat
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
+import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh } from "@/lib/editor/codemirrorInsertValueHints";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
@@ -113,6 +115,8 @@ import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
+import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
+import { analyzeIntentionActions, prepareExpandWildcardContext, buildExpandWildcardReplacement, type IntentionAction } from "@/lib/editor/sqlIntentionActions";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, queryTableNavigationTargetAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
@@ -220,6 +224,7 @@ const snippetDatabaseType = computed(() => {
   const connection = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
   return sqlSnippetDatabaseTypeForConnection(connection) ?? props.databaseType;
 });
+const sqlDriverProfile = computed(() => (props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined));
 
 const SQL_FUNCTION_NAMES = [
   "COUNT",
@@ -305,6 +310,7 @@ const completionTranslations = computed(() => ({
   numericLiteral: t("editor.completion.numericLiteral"),
   booleanValue: t("editor.completion.booleanValue"),
   starExpansionColumns: t("editor.completion.starExpansionColumns"),
+  tableAlias: t("editor.completion.tableAlias"),
   functionDescriptions: Object.fromEntries(SQL_FUNCTION_NAMES.map((name) => [name, t(`editor.completion.functionDescriptions.${name}`)])) as Record<string, string>,
 }));
 const MAX_COMPLETION_TABLES = 200;
@@ -324,7 +330,7 @@ const contextObjectTarget = ref<SqlObjectNavigationTarget | null>(null);
 interface SelectStarExpansionTarget {
   from: number;
   to: number;
-  reference: SqlCompletionReferencedTable;
+  references: SqlCompletionReferencedTable[];
   context: SqlCompletionContext;
   qualifierSql?: string;
   statementSql: string;
@@ -363,6 +369,121 @@ function applyDelimitedListResult(result: string) {
   if (!currentView || props.readOnly) return;
   if (!replaceSelectedEditorText(currentView, result)) return;
   focusEditor();
+}
+
+// ==================== Intention Popup ====================
+
+interface IntentionPopupState {
+  visible: boolean;
+  // 直接复用 IntentionAction 类型，避免手动重声明导致 replacements 等字段丢失（TS2551）
+  actions: IntentionAction[];
+  position: { x: number; y: number };
+  selectedIndex: number;
+}
+
+const intentionPopup = ref<IntentionPopupState | null>(null);
+
+function getIntentionActionLabel(kind: string): string {
+  switch (kind) {
+    case "expand_wildcard":
+      return t("intentionExpandWildcard");
+    case "qualify_identifier":
+      return t("intentionQualifyIdentifier");
+    case "unqualify_identifier":
+      return t("intentionUnqualifyIdentifier");
+    case "batch_qualify_identifiers":
+      return t("intentionBatchQualifyIdentifiers");
+    default:
+      return kind;
+  }
+}
+
+function closeIntentionPopup() {
+  document.removeEventListener("keydown", onIntentionPopupKey);
+  intentionPopup.value = null;
+  focusEditor();
+}
+
+function onIntentionPopupKey(e: KeyboardEvent) {
+  if (!intentionPopup.value?.visible) return;
+  switch (e.key) {
+    case "Escape":
+      e.preventDefault();
+      closeIntentionPopup();
+      break;
+    case "ArrowDown":
+      e.preventDefault();
+      intentionPopup.value.selectedIndex = Math.min(intentionPopup.value.selectedIndex + 1, intentionPopup.value.actions.length - 1);
+      break;
+    case "ArrowUp":
+      e.preventDefault();
+      intentionPopup.value.selectedIndex = Math.max(intentionPopup.value.selectedIndex - 1, 0);
+      break;
+    case "Enter":
+      e.preventDefault();
+      executeIntentionAction(intentionPopup.value.actions[intentionPopup.value.selectedIndex]);
+      break;
+  }
+}
+
+function executeIntentionAction(action: IntentionPopupState["actions"][number]) {
+  if (!intentionPopup.value) return;
+  closeIntentionPopup();
+
+  const currentView = view.value;
+  if (!currentView) return;
+
+  switch (action.kind) {
+    case "expand_wildcard": {
+      const sql = currentView.state.doc.toString();
+      const cursor = currentView.state.selection.main.head;
+      void (async () => {
+        try {
+          const ctx = prepareExpandWildcardContext(sql, cursor, props.databaseType, sqlBehaviorDialect());
+          if (!ctx) return;
+
+          const replacement = await buildExpandWildcardReplacement(props.databaseType, ctx.rowSources, async (source) => {
+            const schema = source.metadataTarget?.schema;
+            const tableName = source.metadataTarget?.table ?? source.name;
+            if (!tableName) return [];
+            const result = await loadTableMetadata({
+              connectionId: props.connectionId ?? "",
+              database: props.database ?? "",
+              schema,
+              tableName,
+              databaseType: props.databaseType ?? "mysql",
+              force: false,
+            });
+            return result.metadata.columns.map((c) => c.name);
+          });
+          const v = view.value;
+          if (!v || v.state.doc.toString() !== sql) return;
+          v.dispatch({ changes: { from: ctx.starSpan.start, to: ctx.starSpan.end, insert: replacement } });
+        } catch {
+          // metadata load failed
+        }
+      })();
+      break;
+    }
+    case "qualify_identifier":
+    case "unqualify_identifier":
+      currentView.dispatch({
+        changes: { from: action.span.start, to: action.span.end, insert: action.replacement },
+      });
+      break;
+
+    case "batch_qualify_identifiers": {
+      // 按从后往前的顺序逐一替换，避免 offset 漂移
+      const reps = action.replacements ?? [];
+      for (let i = reps.length - 1; i >= 0; i--) {
+        const r = reps[i];
+        currentView.dispatch({
+          changes: { from: r.span.start, to: r.span.end, insert: r.replacement },
+        });
+      }
+      break;
+    }
+  }
 }
 
 const executeContextMenuLabel = computed(() => t(hasSelectedSql.value ? "editor.contextMenu.executeSelection" : "editor.contextMenu.executeCurrent"));
@@ -404,6 +525,7 @@ let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snipp
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
+let codeMirrorCloseCompletion: typeof import("@codemirror/autocomplete").closeCompletion | null = null;
 let codeMirrorInsertCompletionText: typeof import("@codemirror/autocomplete").insertCompletionText | null = null;
 let codeMirrorNextSnippetField: typeof import("@codemirror/autocomplete").nextSnippetField | null = null;
 let codeMirrorIndentMore: typeof import("@codemirror/commands").indentMore | null = null;
@@ -811,6 +933,20 @@ function closePicker() {
   view.value?.focus();
 }
 
+function insertLineBelow(currentView: EditorViewType): boolean {
+  if (props.readOnly) return false;
+  const line = currentView.state.doc.lineAt(currentView.state.selection.main.head);
+  const indentation = line.text.match(/^\s*/)?.[0] ?? "";
+  const insertion = `\n${indentation}`;
+  const cursor = line.to + insertion.length;
+  currentView.dispatch({
+    changes: { from: line.to, to: line.to, insert: insertion },
+    selection: { anchor: cursor },
+    userEvent: "input.insertLineBelow",
+  });
+  return true;
+}
+
 function syncContextMenuState(currentView: EditorViewType, starPosition?: number) {
   selectedSql.value = selectedSqlFromView(currentView);
   executableSql.value = executableSqlFromView(currentView);
@@ -861,23 +997,25 @@ function selectStarExpansionTargetForView(currentView: EditorViewType, position?
   }
   if (!isSelectProjection) return null;
 
-  const source = sqlSemanticSelectStarTableSource(model);
-  if (!source) return null;
+  const sources = sqlSemanticSelectStarTableSources(model);
+  if (sources.length === 0) return null;
 
-  const sourceTarget = queryTableCandidateAtSqlPosition({
-    connectionId: props.connectionId,
-    database: props.database,
-    schema: props.schema,
-    databaseType: props.databaseType,
-    sql,
-    position: source.qualifiedName?.span.start ?? source.sourceSpan.start,
+  const references = sources.map((source): SqlCompletionReferencedTable => {
+    const identifierParts = source.qualifiedName?.parts ?? [];
+    return {
+      // Use the semantic metadata target instead of reparsing the table token at
+      // its source span. The latter can resolve the alias token in aliased
+      // sources, causing column metadata requests for `tv` instead of
+      // `tVillage`.
+      name: source.metadataTarget?.table ?? source.name,
+      nameQuoted: !!identifierParts[identifierParts.length - 1]?.quote,
+      database: source.metadataTarget?.database,
+      schema: source.metadataTarget?.schema ?? source.qualifierParts[source.qualifierParts.length - 1],
+      schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+      alias: source.alias,
+      aliasSql: source.aliasSpan ? sql.slice(source.aliasSpan.start, source.aliasSpan.end) : source.alias,
+    };
   });
-  const reference: SqlCompletionReferencedTable = {
-    name: sourceTarget?.tableName ?? source.metadataTarget?.table ?? source.name,
-    database: sourceTarget?.database ?? source.metadataTarget?.database,
-    schema: sourceTarget?.schema ?? source.metadataTarget?.schema,
-    alias: source.alias,
-  };
   const legacyContext = getSqlCompletionContext(sql, cursor, sqlCompletionDialectOptions());
   const context = sqlCompletionContextFromSemantic(model, legacyContext);
   if (context.statementKind !== "select" || !context.onStar) return null;
@@ -885,11 +1023,11 @@ function selectStarExpansionTargetForView(currentView: EditorViewType, position?
   return {
     from: intent.replacementRange.start,
     to: intent.replacementRange.end,
-    reference,
-    context: { ...context, referencedTables: [reference] },
+    references,
+    context: { ...context, referencedTables: references },
     qualifierSql: sqlSemanticSelectStarQualifierSql(model),
     statementSql: model.statement.text,
-    allowResultColumnsFallback: model.rowSources.length === 1 && sqlSemanticSelectStarIsOnlyProjection(model),
+    allowResultColumnsFallback: references.length === 1 && model.rowSources.length === 1 && sqlSemanticSelectStarIsOnlyProjection(model),
   };
 }
 
@@ -1523,6 +1661,41 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
   ];
 });
 
+function handleSqlIntentionActions(currentView: EditorViewType): boolean {
+  if (props.readOnly) return false;
+  try {
+    const sql = currentView.state.doc.toString();
+    const sel = currentView.state.selection.main;
+
+    const actions = analyzeIntentionActions({
+      sql,
+      cursor: sel.head,
+      databaseType: props.databaseType,
+      dialect: sqlBehaviorDialect(),
+      selection: sel.from !== sel.to ? { from: sel.from, to: sel.to } : undefined,
+    });
+
+    if (actions.length === 0) return false;
+
+    // 计算光标视口坐标，用于定位弹出菜单
+    const coords = currentView.coordsAtPos(sel.head);
+    if (!coords) return false;
+
+    // 显示弹出菜单（参考 DataGrip Alt+Enter 意图操作弹出菜单）
+    intentionPopup.value = {
+      visible: true,
+      actions,
+      position: { x: coords.right + 8, y: coords.bottom + 4 },
+      selectedIndex: 0,
+    };
+    document.addEventListener("keydown", onIntentionPopupKey);
+    return true;
+  } catch (err) {
+    console.error("[SQL Intention] error:", err);
+    return false;
+  }
+}
+
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
@@ -1537,7 +1710,6 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         {
           key: "Enter",
           run: codeMirrorInsertNewlineKeepIndent ?? undefined,
-          shift: codeMirrorInsertNewlineKeepIndent ?? undefined,
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
@@ -1559,6 +1731,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         }),
         ...binding(shortcuts.indentMore, (view) => codeMirrorIndentMore?.(view) ?? false),
         ...binding(shortcuts.indentLess, (view) => codeMirrorIndentLess?.(view) ?? false),
+        ...binding(shortcuts.insertLineBelow, insertLineBelow),
         ...binding(shortcuts.duplicateLine, (view) => codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.deleteLine, (view) => codeMirrorDeleteLine?.(view) ?? false),
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorMoveLineUp?.(view) ?? false),
@@ -1583,6 +1756,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           if (sql.trim()) emit("sendSelectionToAi", sql);
           return true;
         }),
+        ...binding(shortcuts.sqlIntentionActions, handleSqlIntentionActions),
         ...createQueryEditorSearchKeymap({
           openSearch,
           openReplace,
@@ -1604,7 +1778,7 @@ function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean
   const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "victoriametrics" ? "text" : "sql";
   return extendQueryEditorSelection(currentView, {
     databaseType,
-    dialect: props.syntaxDialect ?? props.dialect,
+    dialect: sqlBehaviorDialect(),
     language,
   });
 }
@@ -1855,13 +2029,19 @@ function allowsOnDemandQualifiedTableCompletion(prefix: string): boolean {
 function completionMetadataTarget(table: { name: string; catalog?: string | null; database?: string | null; schema?: string | null }, scope?: CompletionMetadataScope): { database: string; schema?: string; catalog?: string } | null {
   const currentDatabase = scope?.database ?? props.database;
   if (currentDatabase == null) return null;
+  // SQL Server metadata queries require a schema even when the SQL uses an
+  // unqualified table name. The query editor commonly has no schema selected
+  // when the user is working from a database-level tab, so use the same
+  // default as the table/DDL metadata paths instead of returning no columns.
+  const selectedSchema = table.schema ?? scope?.schema ?? props.schema;
+  const effectiveSchema = selectedSchema ?? (props.databaseType === "sqlserver" ? metadataSchemaForConnection(connectionStore.getConfig(props.connectionId ?? ""), currentDatabase, undefined) : undefined);
   if (supportsDatabaseSchemaQualifierCompletion() && table.database) {
-    return { database: table.database, schema: table.schema ?? undefined, catalog: table.catalog ?? props.catalog };
+    return { database: table.database, schema: effectiveSchema, catalog: table.catalog ?? props.catalog };
   }
-  if (supportsDatabaseQualifierCompletion() && table.schema) {
-    return { database: table.schema, catalog: table.catalog ?? props.catalog };
+  if (supportsDatabaseQualifierCompletion() && effectiveSchema) {
+    return { database: effectiveSchema, catalog: table.catalog ?? props.catalog };
   }
-  return { database: currentDatabase, schema: table.schema ?? scope?.schema ?? props.schema, catalog: table.catalog ?? props.catalog };
+  return { database: currentDatabase, schema: effectiveSchema, catalog: table.catalog ?? props.catalog };
 }
 
 function isVirtualCompletionTableReference(table: { name: string; database?: string | null; schema?: string | null }): boolean {
@@ -1893,7 +2073,10 @@ async function findExactSemanticDiagnosticTable(table: SqlTableReference): Promi
   if (!target) return null;
   const localMatches = connectionStore.lookupLocalCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema, target.catalog);
   const localExact = localMatches.find((item) => completionTablesMatch(item, table));
-  if (localExact) return localExact;
+  if (localExact) {
+    cachedTables = mergeCompletionTables(cachedTables, [localExact]);
+    return localExact;
+  }
 
   const remoteMatches = await connectionStore.listCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema, false, props.schema, target.catalog);
   cachedTables = mergeCompletionTables(cachedTables, remoteMatches);
@@ -1913,15 +2096,68 @@ async function ensureColumnsForTable(table: { name: string; database?: string | 
     loadedColumnsByTable.add(cacheKey.toLowerCase());
     return true;
   }
-  const columns = await listCompletionColumnsForEditor(props.connectionId, target.database, table.name, target.schema, target.catalog, reference);
-  cachedColumnsByTable.set(cacheKey, columns);
-  loadedColumnsByTable.add(cacheKey.toLowerCase());
+  let columns = await listCompletionColumnsForEditor(props.connectionId, target.database, table.name, target.schema, target.catalog, reference);
+
+  // A schema-aware connection can legitimately return an empty result when
+  // the editor has no selected schema. Resolve the physical table from the
+  // local/remote table cache and retry with its schema before reporting that
+  // star expansion is unavailable. This is especially important for aliased
+  // sources because the alias itself must never be sent as the table name.
+  if (columns.length === 0 && !table.schema && !target.schema && !supportsDatabaseQualifierCompletion()) {
+    const schemaCandidates: string[] = [];
+    const seenSchemas = new Set<string>();
+    const addSchema = (schema?: string | null) => {
+      const normalized = schema?.trim();
+      if (!normalized) return;
+      const key = normalized.toLowerCase();
+      if (seenSchemas.has(key)) return;
+      seenSchemas.add(key);
+      schemaCandidates.push(normalized);
+    };
+
+    if (props.databaseType === "sqlserver") {
+      addSchema(metadataSchemaForConnection(connectionStore.getConfig(props.connectionId), target.database, undefined));
+    }
+
+    const localTables = connectionStore.lookupLocalCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, undefined, target.catalog);
+    localTables.forEach((candidate) => {
+      if (candidate.name.toLowerCase() === table.name.toLowerCase()) addSchema(candidate.schema);
+    });
+    if (schemaCandidates.length === 0 && !usesLocalOnlyCompletionMetadata()) {
+      const remoteTables = await connectionStore.listCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, undefined, false, undefined, target.catalog);
+      remoteTables.forEach((candidate) => {
+        if (candidate.name.toLowerCase() === table.name.toLowerCase()) addSchema(candidate.schema);
+      });
+    }
+
+    for (const schema of schemaCandidates) {
+      const schemaTarget = completionMetadataTarget({ ...table, schema });
+      if (!schemaTarget) continue;
+      const retryColumns = await listCompletionColumnsForEditor(props.connectionId, schemaTarget.database, table.name, schemaTarget.schema, schemaTarget.catalog, reference);
+      if (retryColumns.length > 0) {
+        columns = retryColumns;
+        break;
+      }
+    }
+  }
+  // Do not memoize an empty response as a successful load. Empty results are
+  // commonly caused by a temporarily unresolved schema; keeping that value
+  // would prevent the next expansion attempt from retrying after metadata has
+  // become available.
+  if (columns.length > 0) {
+    cachedColumnsByTable.set(cacheKey, columns);
+    loadedColumnsByTable.add(cacheKey.toLowerCase());
+  } else {
+    cachedColumnsByTable.delete(cacheKey);
+    loadedColumnsByTable.delete(cacheKey.toLowerCase());
+  }
   return true;
 }
 
 function resultColumnsForSelectStar(target: SelectStarExpansionTarget, sql: string): SqlCompletionColumn[] {
   if (
     !target.allowResultColumnsFallback ||
+    target.references.length !== 1 ||
     !selectStarResultColumnsMatch({
       currentSql: sql,
       targetFrom: target.from,
@@ -1936,7 +2172,7 @@ function resultColumnsForSelectStar(target: SelectStarExpansionTarget, sql: stri
   return (props.resultColumns ?? [])
     .map((name) => name.trim())
     .filter(Boolean)
-    .map((name) => ({ name, table: target.reference.name, schema: target.reference.schema }));
+    .map((name) => ({ name, table: target.references[0]!.name, schema: target.references[0]!.schema }));
 }
 
 async function expandSelectStar(target = selectStarExpansionTarget.value) {
@@ -1946,19 +2182,25 @@ async function expandSelectStar(target = selectStarExpansionTarget.value) {
 
   const originalDocument = currentView.state.doc.toString();
   try {
-    await ensureColumnsForTable(target.reference, target.reference);
+    await Promise.all(target.references.map((reference) => ensureColumnsForTable(reference, reference)));
   } catch (error) {
     console.warn("expandSelectStar: failed to load columns", error);
-  }
-
-  if (view.value !== currentView || currentView.state.doc.toString() !== originalDocument || currentView.state.sliceDoc(target.from, target.to) !== "*") return;
-  const columns = cachedColumnsByTable.get(completionCacheKey(target.reference));
-  const expansionColumns = columns?.length ? columns : resultColumnsForSelectStar(target, originalDocument);
-  if (expansionColumns.length === 0) {
     toast(t("editor.contextMenu.expandSelectStarUnavailable"), 3000);
     return;
   }
-  const expansion = buildSelectStarExpansion(target.context, new Map([[completionCacheKey(target.reference), expansionColumns]]), props.dialect, target.qualifierSql, props.databaseType);
+
+  if (view.value !== currentView || currentView.state.doc.toString() !== originalDocument || currentView.state.sliceDoc(target.from, target.to) !== "*") return;
+  const columnsByReference = new Map<string, SqlCompletionColumn[]>();
+  for (const reference of target.references) {
+    const columns = cachedColumnsByTable.get(completionCacheKey(reference));
+    const expansionColumns = columns?.length ? columns : target.references.length === 1 ? resultColumnsForSelectStar(target, originalDocument) : [];
+    if (expansionColumns.length === 0) {
+      toast(t("editor.contextMenu.expandSelectStarUnavailable"), 3000);
+      return;
+    }
+    columnsByReference.set(completionCacheKey(reference), expansionColumns);
+  }
+  const expansion = buildSelectStarExpansion(target.context, columnsByReference, props.dialect, target.qualifierSql, props.databaseType);
   if (!expansion) {
     toast(t("editor.contextMenu.expandSelectStarUnavailable"), 3000);
     return;
@@ -2666,6 +2908,7 @@ let completionEpoch = 0;
 let completionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let typedCompletionActivationUntil = 0;
 let suppressNextSqlCompletionAutoStartUntil = 0;
+let activeCompletionOrigin: SqlCompletionTriggerOrigin | null = null;
 
 type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
 
@@ -2940,13 +3183,56 @@ async function provideSqlCompletions(context: CompletionContext) {
   const epoch = ++completionEpoch;
 
   try {
+    // 1. Suppressed context (comment / string literal) rejects everything, including explicit.
     if (isSqlCompletionSuppressedContext(fullDoc, position)) return null;
+
+    // 2. Determine completion origin (session-level marker).
+    activeCompletionOrigin = originForSqlCompletionProvider(activeCompletionOrigin, context.explicit);
+    const origin = activeCompletionOrigin;
+
+    // 3. Explicit (manual shortcut) -> always proceed. No mode gating.
+    // 4. For typing sessions, apply mode gating with lazy fact computation.
     const useDatabaseCompletion = resolveSqlServerUseDatabaseCompletion({
       sql: fullDoc,
       cursor: position,
       databaseType: props.databaseType,
     });
-    if (!explicit && !useDatabaseCompletion && !shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions())) return null;
+    const useDatabasePrefix = useDatabaseCompletion?.prefix ?? null;
+
+    if (origin !== "explicit") {
+      const mode = settingsStore.editorSettings.completionTriggerMode;
+
+      // manual: never auto-open. Return before computing any context.
+      if (mode === "manual") return null;
+
+      // require-prefix: only compute local facts (no positionalEligible).
+      if (mode === "require-prefix") {
+        const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+        const prevChar = fullDoc[position - 1] ?? "";
+        const facts: SqlCompletionTriggerFacts = {
+          origin,
+          hasIdentifierPrefix: ctx.prefix.length > 0,
+          qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+          useDatabasePrefix,
+        };
+        if (!shouldAllowSqlCompletionTrigger(mode, facts)) return null;
+      }
+
+      // positional: compute positionalEligible (lazy).
+      if (mode === "positional") {
+        const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+        const prevChar = fullDoc[position - 1] ?? "";
+        const positionalEligible = shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+        const facts: SqlCompletionTriggerFacts = {
+          origin,
+          hasIdentifierPrefix: ctx.prefix.length > 0,
+          qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+          useDatabasePrefix,
+          positionalEligible,
+        };
+        if (!shouldAllowSqlCompletionTrigger(mode, facts)) return null;
+      }
+    }
 
     if (useDatabaseCompletion) {
       const currentDatabase = props.database ?? "";
@@ -2990,6 +3276,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
         databaseType: snippetDatabaseType.value,
+        driverProfile: sqlDriverProfile.value,
         currentSchema: props.schema,
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
@@ -3050,6 +3337,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
         databaseType: snippetDatabaseType.value,
+        driverProfile: sqlDriverProfile.value,
         currentSchema: props.schema,
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
@@ -3112,6 +3400,7 @@ function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
   window.setTimeout(() => {
     if (!codeMirrorStartCompletion || isEditorComposing(currentView)) return;
     markTypedCompletionActivation();
+    activeCompletionOrigin = originForTypedSqlCompletionStart(activeCompletionOrigin);
     codeMirrorStartCompletion(currentView);
   }, delayMs);
 }
@@ -3130,34 +3419,83 @@ function flushImeComposition() {
   if (editorIsActive) emitEditorSelection(latestSelection);
   const fullDoc = currentView.state.doc.toString();
   const position = currentView.state.selection.main.head;
-  if (resolveSqlServerUseDatabaseCompletion({ sql: fullDoc, cursor: position, databaseType: props.databaseType }) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions())) {
+  if (shouldTriggerSqlCompletionForPosition(fullDoc, position)) {
     scheduleSqlCompletionStart(currentView);
   }
+}
+
+/**
+ * Returns true when the current SQL position should trigger completion under the active trigger mode.
+ * Used by flushImeComposition and shouldStartSqlCompletionAfterInput.
+ */
+function shouldTriggerSqlCompletionForPosition(fullDoc: string, position: number): boolean {
+  if (isSqlCompletionSuppressedContext(fullDoc, position)) return false;
+  const mode = settingsStore.editorSettings.completionTriggerMode;
+  if (mode === "manual") return false;
+
+  const useDatabaseCompletion = resolveSqlServerUseDatabaseCompletion({
+    sql: fullDoc,
+    cursor: position,
+    databaseType: props.databaseType,
+  });
+  const useDatabasePrefix = useDatabaseCompletion?.prefix ?? null;
+
+  if (mode === "require-prefix") {
+    const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+    const prevChar = fullDoc[position - 1] ?? "";
+    const facts: SqlCompletionTriggerFacts = {
+      origin: "typing",
+      hasIdentifierPrefix: ctx.prefix.length > 0,
+      qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+      useDatabasePrefix,
+    };
+    return shouldAllowSqlCompletionTrigger(mode, facts);
+  }
+
+  // positional
+  const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+  const prevChar = fullDoc[position - 1] ?? "";
+  const positionalEligible = shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+  const facts: SqlCompletionTriggerFacts = {
+    origin: "typing",
+    hasIdentifierPrefix: ctx.prefix.length > 0,
+    qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+    useDatabasePrefix,
+    positionalEligible,
+  };
+  return shouldAllowSqlCompletionTrigger(mode, facts);
 }
 
 function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: string, currentView: EditorViewType): boolean {
   const position = currentView.state.selection.main.head;
   const fullDoc = currentView.state.doc.toString();
-  if (resolveSqlServerUseDatabaseCompletion({ sql: fullDoc, cursor: position, databaseType: props.databaseType })) return true;
+
+  // Non-SQL providers: keep existing behavior (trigger mode policy does not apply).
   if (props.databaseType === "mongodb") {
     return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
   }
   if (props.databaseType === "victoriametrics") return false;
-  if (!insertedText && removedText) {
+  if (props.databaseType === "redis" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
+    // Preserve old character-based checks for non-SQL providers.
+    if (!insertedText && removedText) {
+      const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+      return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+    }
+    if (insertedText.endsWith(".")) return true;
+    if (/[,(]$/.test(insertedText)) {
+      const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+      return !!completionContext.insertTable;
+    }
+    if (/\s$/.test(insertedText)) {
+      return shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+    }
+    if (!/[\w$@]$/.test(insertedText)) return false;
     const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
-    return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+    return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
   }
-  if (insertedText.endsWith(".")) return true;
-  if (/[,(]$/.test(insertedText)) {
-    const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
-    return !!completionContext.insertTable;
-  }
-  if (/\s$/.test(insertedText)) {
-    return shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
-  }
-  if (!/[\w$@]$/.test(insertedText)) return false;
-  const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
-  return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+
+  // SQL providers: use unified trigger mode policy.
+  return shouldTriggerSqlCompletionForPosition(fullDoc, position);
 }
 
 function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
@@ -3275,6 +3613,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
     databaseType: snippetDatabaseType.value,
+    driverProfile: sqlDriverProfile.value,
     currentSchema: scope.schema,
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
     functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
@@ -3735,6 +4074,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
     databaseType: snippetDatabaseType.value,
+    driverProfile: sqlDriverProfile.value,
     currentSchema: scope.schema,
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
     functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
@@ -3837,10 +4177,32 @@ onMounted(async () => {
   })();
 
   const [
-    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, closeHoverTooltips, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, scrollPastEnd, ViewPlugin },
+    {
+      EditorView,
+      keymap,
+      rectangularSelection,
+      hoverTooltip,
+      showTooltip,
+      closeHoverTooltips,
+      Decoration,
+      tooltips,
+      gutter,
+      GutterMarker,
+      lineNumberMarkers,
+      lineNumbers,
+      highlightActiveLineGutter,
+      highlightSpecialChars,
+      drawSelection,
+      dropCursor,
+      crosshairCursor,
+      scrollPastEnd,
+      ViewPlugin,
+      layer,
+      RectangleMarker,
+    },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
-    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
+    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree },
     { searchKeymap },
@@ -3874,6 +4236,7 @@ onMounted(async () => {
   setSqlDiagnosticsEffect = StateEffect.define<SqlSemanticDiagnostic[]>();
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
+  codeMirrorCloseCompletion = closeCompletion;
   codeMirrorStartCompletion = startCompletion;
   codeMirrorInsertCompletionText = insertCompletionText;
   codeMirrorNextSnippetField = nextSnippetField;
@@ -4091,7 +4454,7 @@ onMounted(async () => {
   };
   buildSqlSignatureExtension = () =>
     showTooltip.compute(["doc", "selection"], (currentState) => {
-      const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head, props.databaseType);
+      const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head, props.databaseType, sqlDriverProfile.value);
       if (!signature) return null;
       return {
         pos: currentState.selection.main.head,
@@ -4109,7 +4472,7 @@ onMounted(async () => {
 
   buildSqlLanguageExtension = () =>
     langSql.sql({
-      dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType),
+      dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
     });
   buildSqlSemanticHighlightExtension = () => [
     ViewPlugin.fromClass(
@@ -4162,74 +4525,43 @@ onMounted(async () => {
     await ensureCodeMirrorVim();
   }
 
-  const currentStatementFrameHighlighter = ViewPlugin.fromClass(
-    class {
-      decorations: import("@codemirror/view").DecorationSet;
-      private configuration: string;
-      constructor(view: import("@codemirror/view").EditorView) {
-        this.configuration = this.currentConfiguration();
-        this.decorations = this.getDeco(view);
-      }
-      update(update: import("@codemirror/view").ViewUpdate) {
-        const configuration = this.currentConfiguration();
-        if (!shouldRebuildCurrentStatementFrame({ docChanged: update.docChanged, selectionSet: update.selectionSet, configurationChanged: configuration !== this.configuration })) return;
-        this.configuration = configuration;
-        this.decorations = this.getDeco(update.view);
-      }
-      currentConfiguration() {
-        return `${settingsStore.editorSettings.showCurrentStatementFrame}:${settingsStore.editorSettings.showInsertValueHints}:${props.databaseType ?? ""}`;
-      }
-      getDeco(view: import("@codemirror/view").EditorView) {
-        if (!settingsStore.editorSettings.showCurrentStatementFrame) return Decoration.none;
-        if (view.state.selection.ranges.some((range) => !range.empty)) return Decoration.none;
-        const range = currentExecutableStatementRange(view);
-        if (!range) return Decoration.none;
-
-        const startLine = view.state.doc.lineAt(range.from);
-        const frameTo = currentStatementFrameTo(view, range);
-        const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
-        let insertValueHints: Array<{ from: number; column: string }> = [];
-        try {
-          if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics") {
-            const statementSql = view.state.doc.sliceString(range.from, range.to);
-            if (/\binsert\b/i.test(statementSql)) {
-              insertValueHints = parseInsertValueHints(statementSql, { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
-                ...hint,
-                from: hint.from + range.from,
-              }));
+  const currentStatementFrameExtension = currentStatementFrameLayer({ layer, RectangleMarker }, (view) => {
+    if (!settingsStore.editorSettings.showCurrentStatementFrame) return null;
+    if (view.state.selection.ranges.some((range) => !range.empty)) return null;
+    let range = currentExecutableStatementRange(view);
+    if (!range) {
+      const cursorPos = view.state.selection.main.head;
+      const cursorLine = view.state.doc.lineAt(cursorPos);
+      executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, view.state.doc, props.databaseType, sqlStatementParameterOptions());
+      // Find ranges that overlap the cursor line, then expand to include
+      // adjacent ranges (handles parser fragments from edge cases like
+      // ultra-long comments splitting a statement).
+      let mergedFrom = cursorLine.from;
+      let mergedTo = cursorLine.from;
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const cachedRange of executableStatementRangeCache.ranges) {
+          // Only merge ranges that overlap the cursor line or are adjacent
+          // to the current merged region
+          if (cachedRange.from <= mergedTo && cachedRange.to >= mergedFrom) {
+            const newFrom = Math.min(mergedFrom, cachedRange.from);
+            const newTo = Math.max(mergedTo, cachedRange.to);
+            if (newFrom !== mergedFrom || newTo !== mergedTo) {
+              mergedFrom = newFrom;
+              mergedTo = newTo;
+              changed = true;
             }
           }
-        } catch {
-          insertValueHints = [];
         }
-        let maxWidth = 1;
-        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
-          const line = view.state.doc.line(lineNumber);
-          const lineRangeTo = Math.min(line.to, frameTo);
-          maxWidth = Math.max(maxWidth, visualSqlColumnsWithInlineHints(view.state.doc.sliceString(line.from, lineRangeTo), line.from, lineRangeTo, insertValueHints));
-        }
-
-        const deco: any[] = [];
-        const frameWidth = `calc(${maxWidth}ch + 2ch)`;
-        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
-          const line = view.state.doc.line(lineNumber);
-          const classes = ["cm-db-current-statement-line"];
-          if (lineNumber === startLine.number) classes.push("cm-db-current-statement-line--first");
-          if (lineNumber === endLine.number) classes.push("cm-db-current-statement-line--last");
-          deco.push(
-            Decoration.line({
-              class: classes.join(" "),
-              attributes: {
-                style: `--dbx-current-statement-frame-width: ${frameWidth};`,
-              },
-            }).range(line.from),
-          );
-        }
-        return Decoration.set(deco);
       }
-    },
-    { decorations: (v) => v.decorations },
-  );
+      if (mergedTo > mergedFrom) {
+        range = { from: mergedFrom, to: mergedTo, sql: view.state.doc.sliceString(mergedFrom, mergedTo) };
+      }
+    }
+    if (!range) return null;
+    return { from: range.from, to: currentStatementFrameTo(view, range) };
+  });
 
   function currentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
     return currentStatementFrameRangeTo(view.state.doc, range);
@@ -4283,7 +4615,7 @@ onMounted(async () => {
           mousedown: selectSqlLineFromGutter,
         },
       }),
-      currentStatementFrameHighlighter,
+      currentStatementFrameExtension,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
@@ -4406,6 +4738,13 @@ onMounted(async () => {
           emit("cursorChange", update.state.selection.main.head);
           latestSelection = readEditorSelection(update.view);
           if (editorIsActive) emitEditorSelection(latestSelection);
+        }
+        // Clear activeCompletionOrigin when the completion session ends.
+        if (codeMirrorCompletionStatus) {
+          const status = codeMirrorCompletionStatus(update.state) ?? null;
+          if (status === null) {
+            activeCompletionOrigin = null;
+          }
         }
       }),
       fontThemeComp.of(
@@ -4758,6 +5097,29 @@ onMounted(async () => {
   });
 });
 
+// When completionTriggerMode changes, close any open typing session
+// that would no longer be allowed under the new mode.
+watch(
+  () => settingsStore.editorSettings.completionTriggerMode,
+  (newMode) => {
+    if (!view.value || !codeMirrorCompletionStatus || !codeMirrorCloseCompletion) return;
+    const status = codeMirrorCompletionStatus(view.value.state);
+    if (!status || activeCompletionOrigin !== "typing") return;
+    // If switching to manual, close all typing sessions.
+    if (newMode === "manual") {
+      codeMirrorCloseCompletion(view.value);
+      return;
+    }
+    // For other mode changes, re-evaluate the policy.
+    // If the current position would not trigger under the new mode, close.
+    const fullDoc = view.value.state.doc.toString();
+    const position = view.value.state.selection.main.head;
+    if (!shouldTriggerSqlCompletionForPosition(fullDoc, position)) {
+      codeMirrorCloseCompletion(view.value);
+    }
+  },
+);
+
 watch(
   () => props.modelValue,
   (val) => {
@@ -4846,7 +5208,7 @@ watch([() => props.clientSessionId, () => props.completionContextVersion], () =>
   scheduleSemanticDiagnostics();
 });
 
-watch([() => props.databaseType, () => props.dialect, () => props.syntaxDialect], () => {
+watch([() => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlDriverProfile], () => {
   executableStatementRangeCache = null;
   if (!view.value || !sqlLanguageComp || !buildSqlLanguageExtension || !sqlSemanticHighlightComp || !buildSqlSemanticHighlightExtension || !sqlSignatureComp || !buildSqlSignatureExtension) return;
   // Signature tooltips depend on the external dialect, so refresh them even when the document and selection stay unchanged.
@@ -5157,6 +5519,17 @@ defineExpose({
     <FederatedQueryStatusBar :sql="props.modelValue" :connection-id="props.connectionId" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
+    <!-- SQL 意图操作弹出菜单（参考 DataGrip Alt+Enter） -->
+    <Teleport to="body">
+      <div v-if="intentionPopup?.visible" class="intention-popup-overlay" @click.self="closeIntentionPopup">
+        <div class="intention-popup" :style="{ left: intentionPopup.position.x + 'px', top: intentionPopup.position.y + 'px' }">
+          <div v-for="(action, i) in intentionPopup.actions" :key="i" class="intention-popup-item" :class="{ 'intention-popup-item--active': i === intentionPopup.selectedIndex }" @click="executeIntentionAction(action)" @mouseenter="intentionPopup.selectedIndex = i">
+            <span class="intention-popup-item__icon">💡</span>
+            <span class="intention-popup-item__label">{{ action.label || getIntentionActionLabel(action.kind) }}</span>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -5179,29 +5552,15 @@ defineExpose({
   color: rgb(216 180 254) !important;
 }
 
-:deep(.cm-db-current-statement-line) {
-  position: relative;
-}
-
-:deep(.cm-db-current-statement-line::after) {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  box-sizing: border-box;
-  width: var(--dbx-current-statement-frame-width, 100%);
-  border-right: 1px solid rgb(34 197 94 / 0.75);
-  border-left: 1px solid rgb(34 197 94 / 0.75);
+:deep(.cm-db-currentStatementFrameLayer) {
   pointer-events: none;
 }
 
-:deep(.cm-db-current-statement-line--first::after) {
-  border-top: 1px solid rgb(34 197 94 / 0.75);
-}
-
-:deep(.cm-db-current-statement-line--last::after) {
-  border-bottom: 1px solid rgb(34 197 94 / 0.75);
+:deep(.cm-db-currentStatementFrame) {
+  box-sizing: border-box;
+  border: 1px solid rgb(34 197 94 / 0.75);
+  border-radius: 2px;
+  pointer-events: none;
 }
 
 :deep(.cm-run-statement-gutter) {
@@ -5382,5 +5741,56 @@ defineExpose({
   display: block;
   width: 16px;
   height: 16px;
+}
+</style>
+
+<style>
+.intention-popup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: transparent;
+}
+
+.intention-popup {
+  position: fixed;
+  z-index: 10000;
+  min-width: 220px;
+  max-width: 360px;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  padding: 4px 0;
+  overflow: hidden;
+}
+
+.intention-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  transition: background 0.1s;
+}
+
+.intention-popup-item:hover,
+.intention-popup-item--active {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.intention-popup-item__icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.intention-popup-item__label {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
 }
 </style>

@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isProxy } from "vue";
-import { EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceRightSidebarPanelExclusivity, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, type RightSidebarPanelState, transitionRightSidebarPanels } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceRightSidebarPanelExclusivity, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, type RightSidebarPanelState, transitionRightSidebarPanels } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
@@ -220,6 +220,20 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ cellDetailMetadataCollapsed: true }).cellDetailMetadataCollapsed).toBe(true);
   });
 
+  it("normalizes the global query timeout and inherited connection ids", () => {
+    expect(normalizeEditorSettings({}).globalConnectTimeoutSecs).toBe(10);
+    expect(normalizeEditorSettings({ globalConnectTimeoutSecs: 0 }).globalConnectTimeoutSecs).toBe(1);
+    expect(normalizeEditorSettings({}).globalQueryTimeoutSecs).toBe(30);
+    expect(normalizeEditorSettings({ queryTimeoutSecs: 45 } as any).globalQueryTimeoutSecs).toBe(45);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: -1 }).globalQueryTimeoutSecs).toBe(0);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 301 }).globalQueryTimeoutSecs).toBe(300);
+    expect(normalizeEditorSettings({ connectTimeoutInheritConnectionIds: ["one", "one", " ", "two"] }).connectTimeoutInheritConnectionIds).toEqual(["one", "two"]);
+    expect(normalizeEditorSettings({ queryTimeoutInheritConnectionIds: ["one", "one", " ", "two"] }).queryTimeoutInheritConnectionIds).toEqual(["one", "two"]);
+    expect(normalizeEditorSettings({}).timeoutInheritanceMigrationVersion).toBe(0);
+    expect(normalizeEditorSettings({ queryTimeoutInheritanceMigrationVersion: 1 } as any).timeoutInheritanceMigrationVersion).toBe(1);
+    expect(normalizeEditorSettings({ timeoutInheritanceMigrationVersion: 2 }).timeoutInheritanceMigrationVersion).toBe(2);
+  });
+
   it("normalizes toolbar item settings from older saved settings", () => {
     const settings = normalizeEditorSettings({
       toolbarItems: {
@@ -351,6 +365,26 @@ describe("normalizeEditorSettings - clickTableNavigationTarget", () => {
   });
 });
 
+describe("normalizeEditorSettings - completionTriggerMode", () => {
+  it("defaults completionTriggerMode to positional", () => {
+    expect(normalizeEditorSettings({}).completionTriggerMode).toBe("positional");
+  });
+
+  it("preserves the three valid modes", () => {
+    expect(normalizeEditorSettings({ completionTriggerMode: "manual" }).completionTriggerMode).toBe("manual");
+    expect(normalizeEditorSettings({ completionTriggerMode: "require-prefix" }).completionTriggerMode).toBe("require-prefix");
+    expect(normalizeEditorSettings({ completionTriggerMode: "positional" }).completionTriggerMode).toBe("positional");
+  });
+
+  it("normalizes invalid values to positional", () => {
+    expect(normalizeEditorSettings({ completionTriggerMode: "always" } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: "" } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: undefined } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: null } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: 123 } as any).completionTriggerMode).toBe("positional");
+  });
+});
+
 describe("normalizeEditorSettings - tabLayout", () => {
   it("defaults tabLayout to scroll", () => {
     expect(normalizeEditorSettings({}).tabLayout).toBe("scroll");
@@ -432,6 +466,22 @@ describe("settingsStore AI API key normalization", () => {
       opencodeCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
     });
   });
+
+  it("normalizes Cursor CLI path and environment settings", () => {
+    expect(
+      normalizeAiConfig({
+        provider: "cursor-cli",
+        cursorCliPath: "  ~/.local/bin/agent  ",
+        cursorCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: null as unknown as string },
+      }),
+    ).toMatchObject({
+      provider: "cursor-cli",
+      endpoint: "",
+      model: "default",
+      cursorCliPath: "~/.local/bin/agent",
+      cursorCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
+    });
+  });
 });
 
 describe("settingsStore MCP policy persistence", () => {
@@ -477,6 +527,108 @@ describe("settingsStore MCP policy persistence", () => {
   });
 });
 
+describe("settingsStore persisted settings initialization", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("does not treat an editor settings read failure as an empty record", async () => {
+    const loadEditorSettings = vi.fn().mockRejectedValue(new Error("storage temporarily unavailable"));
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await expect(store.initEditorSettings()).rejects.toThrow("storage temporarily unavailable");
+    expect(store.isEditorSettingsLoaded).toBe(false);
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+  });
+
+  it("can retry editor settings initialization without losing saved values", async () => {
+    const loadEditorSettings = vi.fn().mockRejectedValueOnce(new Error("storage temporarily unavailable")).mockResolvedValueOnce({
+      fontSize: 17,
+      theme: "xcode-dark",
+      executeMode: "all",
+      executeModeDefaultVersion: 1,
+      updateNotificationsEnabled: false,
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await expect(store.initEditorSettings()).rejects.toThrow("storage temporarily unavailable");
+    store.updateEditorSettings({ appLayout: "separated" });
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+    await store.initEditorSettings();
+
+    expect(store.isEditorSettingsLoaded).toBe(true);
+    expect(store.editorSettings).toMatchObject({
+      fontSize: 17,
+      theme: "xcode-dark",
+      executeMode: "all",
+      updateNotificationsEnabled: false,
+      appLayout: "separated",
+    });
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 17, theme: "xcode-dark", appLayout: "separated" }));
+  });
+
+  it("shares concurrent initialization and applies startup changes after saved settings load", async () => {
+    let resolveLoad!: (value: unknown) => void;
+    const loadEditorSettings = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveLoad = resolve;
+        }),
+    );
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    const firstInitialization = store.initEditorSettings();
+    const secondInitialization = store.initEditorSettings();
+
+    store.updateEditorSettings({
+      appLayout: "separated",
+      tabLayout: "wrap",
+      uiFontFamily: "pre-load default snapshot",
+    });
+    expect(saveEditorSettings).not.toHaveBeenCalled();
+    expect(loadEditorSettings).toHaveBeenCalledOnce();
+
+    resolveLoad({
+      appLayout: "classic",
+      tabLayout: "scroll",
+      uiFontFamily: "persisted font",
+      toolbarItems: { ...DEFAULT_EDITOR_SETTINGS.toolbarItems, history: false },
+      snippets: [{ id: "persisted", label: "Persisted", prefix: "persisted", body: "SELECT 42", enabled: true }],
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    });
+    await Promise.all([firstInitialization, secondInitialization]);
+
+    expect(store.editorSettings).toMatchObject({
+      appLayout: "separated",
+      tabLayout: "wrap",
+      uiFontFamily: "pre-load default snapshot",
+      toolbarItems: expect.objectContaining({ history: false }),
+      snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
+    });
+    expect(saveEditorSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appLayout: "separated",
+        tabLayout: "wrap",
+        uiFontFamily: "pre-load default snapshot",
+        toolbarItems: expect.objectContaining({ history: false }),
+        snippets: [expect.objectContaining({ id: "persisted", body: "SELECT 42" })],
+      }),
+    );
+  });
+});
+
 describe("settingsStore sidebar connection sort persistence", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -484,11 +636,13 @@ describe("settingsStore sidebar connection sort persistence", () => {
   });
 
   it("persists the selected alphabetical sort mode", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue(null);
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
+    await store.initEditorSettings();
     store.updateEditorSettings({ sidebarConnectionSortMode: "desc" });
 
     expect(store.editorSettings.sidebarConnectionSortMode).toBe("desc");
@@ -500,11 +654,13 @@ describe("settingsStore sidebar connection sort persistence", () => {
   });
 
   it("persists the retained result run display mode", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue(null);
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
+    await store.initEditorSettings();
     store.updateEditorSettings({ resultRunDisplayMode: "list" });
 
     expect(store.editorSettings.resultRunDisplayMode).toBe("list");
@@ -520,11 +676,13 @@ describe("settingsStore regular expression match limit persistence", () => {
   });
 
   it("normalizes and persists the configured match limit", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue(null);
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
+    await store.initEditorSettings();
     store.updateEditorSettings({ regexMaxMatchCount: 2500.4 });
 
     expect(store.editorSettings.regexMaxMatchCount).toBe(2500);
@@ -720,6 +878,7 @@ describe("settingsStore activeModel lifecycle", () => {
         version: 1,
         active: undefined,
         effortPreferences: [],
+        defaultMode: "ask",
       }),
     );
 
@@ -788,6 +947,7 @@ describe("settingsStore activeModel lifecycle", () => {
           selection: { kind: "enum", value: "high" },
         },
       ],
+      defaultMode: "ask",
     });
   });
 
@@ -810,5 +970,69 @@ describe("settingsStore activeModel lifecycle", () => {
 
     expect(store.aiConfigs).toEqual([]);
     expect(store.activeModel).toBeNull();
+  });
+});
+
+// --- defaultAiMode lifecycle tests ---
+
+describe("settingsStore defaultAiMode lifecycle", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("falls back to Ask when the saved chat selection has no defaultMode", async () => {
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await store.initAiConfigs();
+
+    expect(store.defaultAiMode).toBe("ask");
+  });
+
+  it("restores Agent from the saved chat selection", async () => {
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue({ version: 1, effortPreferences: [], defaultMode: "agent" }),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    await store.initAiConfigs();
+
+    expect(store.defaultAiMode).toBe("agent");
+  });
+
+  it("setDefaultAiMode updates state and persists the mode", async () => {
+    const saveAiChatSelection = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection,
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.isAiConfigLoaded = true;
+
+    store.setDefaultAiMode("agent");
+    expect(store.defaultAiMode).toBe("agent");
+
+    await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenCalled());
+    expect(saveAiChatSelection.mock.calls[0][0]).toMatchObject({ defaultMode: "agent" });
   });
 });

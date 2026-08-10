@@ -1681,6 +1681,10 @@ export async function saveDocsAnnotations(connectionId: string, annotations: Ann
   return invoke("docs_save_annotations", { connectionId, annotations });
 }
 
+export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot, annotations: AnnotationFile, lang: string): Promise<void> {
+  return invoke("docs_export_html", { filePath, snapshot, annotations, lang });
+}
+
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
   return invoke("save_connections", { configs });
 }
@@ -2884,6 +2888,11 @@ export interface MongoDropIndexesResult {
   failures?: MongoDropIndexFailure[];
 }
 
+export interface MongoCloneCollectionResult {
+  documents_copied: number;
+  indexes_copied: number;
+}
+
 export interface MongoGridFsFileInfo {
   id: string;
   filename?: string;
@@ -2948,6 +2957,15 @@ export async function mongoRenameCollection(connectionId: string, database: stri
     database,
     collection,
     newName,
+  });
+}
+
+export async function mongoCloneCollection(connectionId: string, database: string, sourceCollection: string, targetCollection: string): Promise<MongoCloneCollectionResult> {
+  return invoke("mongo_clone_collection", {
+    connectionId,
+    database,
+    sourceCollection,
+    targetCollection,
   });
 }
 
@@ -3129,6 +3147,15 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
     collection,
     keysJson,
     optionsJson,
+  });
+}
+
+export async function mongoCreateUser(connectionId: string, database: string, userJson: string, writeConcernJson?: string): Promise<{ affected_rows: number }> {
+  return invoke("mongo_create_user", {
+    connectionId,
+    database,
+    userJson,
+    writeConcernJson,
   });
 }
 
@@ -3721,6 +3748,7 @@ export interface QueryResultExportRequest {
   connectionId: string;
   database: string;
   schema?: string;
+  catalog?: string;
   sql: string;
   queryBaseSql: string;
   setupSql?: string[];

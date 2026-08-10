@@ -40,6 +40,7 @@ const connectionStore = {
   getSidebarVisibleFilterSummary: () => state.summary,
   clearConnectionError: vi.fn(),
   isDefaultDatabase: () => false,
+  isDefaultSchema: () => false,
   isPinnedTreeNodeReorderTarget: () => false,
   isTreeNodeChildrenLoaded: () => false,
   isTreeNodePinned: () => false,
@@ -163,6 +164,18 @@ describe("TreeItem visible filter connection detail", () => {
     expect(document.body.textContent).toContain("1/4");
     const action = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "1/4");
     expect(action?.getAttribute("aria-label")).toBe('Configure visible schemas for "Filtered connection"');
+  });
+
+  it("uses the namespace label for a Nacos connection", async () => {
+    state.config = { ...mysqlConnection(), db_type: "nacos" };
+    state.summary = { mode: "namespace", isActive: true, selected: 2, total: 3 };
+
+    await openConnectionTooltip();
+
+    expect(document.body.textContent).toContain("Visible namespaces");
+    expect(document.body.textContent).toContain("2/3");
+    const action = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "2/3");
+    expect(action?.getAttribute("aria-label")).toBe('Configure visible namespaces for "Filtered connection"');
   });
 
   it("shows a clickable detail row when the effective selection is full", async () => {

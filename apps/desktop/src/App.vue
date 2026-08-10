@@ -23,6 +23,7 @@ import { useFileDrop } from "@/composables/useFileDrop";
 import { usePanelResize } from "@/composables/usePanelResize";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSqlExecution } from "@/composables/useSqlExecution";
+import MultiDbExecuteDialog from "@/components/editor/MultiDbExecuteDialog.vue";
 import { useDialogSources } from "@/composables/useDialogSources";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
@@ -147,6 +148,9 @@ const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
 const queryEditorDdlTarget = ref<{ connectionId: string; database: string; schema?: string; tableName: string } | null>(null);
 const showSaveSqlDialog = ref(false);
+const showMultiDbExecuteDialog = ref(false);
+const multiExecuteSql = ref("");
+const multiExecuteSourceTabId = ref("");
 const saveSqlName = ref("");
 const saveSqlFolderId = ref("");
 const pendingSaveAndCloseTabId = ref<string | null>(null);
@@ -234,6 +238,8 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot) {
 const blockDangerousRedisCommands = ref(true);
 const databaseRequiredSignal = ref(0);
 const databaseRequiredTabId = ref<string | null>(null);
+const sqlExecutionDangerStore = useSqlExecutionDangerStore();
+const productionSafetyStore = useProductionSafetyStore();
 
 function promptActiveDatabaseSelection() {
   const tab = activeTab.value;
@@ -251,6 +257,7 @@ const { dangerSql, pendingDangerSql, showDangerDialog, suppressDangerConfirm, tr
   activeOutputView,
   blockDangerousRedisCommands,
   onMissingDatabase: promptActiveDatabaseSelection,
+  requestDangerConfirmation: (request) => sqlExecutionDangerStore.requestConfirmation(request),
 });
 
 function requestActiveEditorExecute() {
@@ -1843,6 +1850,7 @@ onUnmounted(() => {
                   @rollback="activeTab && queryStore.rollbackTransaction(activeTab.id)"
                   @dismiss-txn-rolled-back="activeTab && (activeTab.txnAutoRolledBack = false)"
                   @execute="requestActiveEditorExecute()"
+                  @multi-execute="requestMultiDbExecute()"
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"
                   @format-sql="formatActiveSql"
@@ -1992,6 +2000,18 @@ onUnmounted(() => {
           "
           @open-lineage-target="openLineageTarget"
           @open-database-search-target="openDatabaseSearchTarget"
+        />
+        <MultiDbExecuteDialog
+          v-model:open="showMultiDbExecuteDialog"
+          :sql="multiExecuteSql"
+          :source-tab-id="multiExecuteSourceTabId"
+          :database-type="multiExecuteDatabaseType"
+          :initial-targets="multiExecuteInitialTargets"
+          :launch-id="multiExecuteLaunchId"
+          :execute-target="executeMultiDbTarget"
+          :cancel-target="cancelMultiDbTarget"
+          :cancel-pending="cancelPendingMultiDbTarget"
+          :source-offset="multiExecuteSourceOffset"
         />
         <UpdateDialog
           v-if="showUpdateDialog"

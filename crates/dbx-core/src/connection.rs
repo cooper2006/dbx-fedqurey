@@ -2670,6 +2670,26 @@ impl AppState {
             return Ok(mqc);
         }
 
+        if mqc.system_kind == crate::mq::types::MqSystemKind::Kafka {
+            if let Some((bootstrap_host, bootstrap_port)) = kafka_single_loopback_bootstrap_endpoint(&mqc.extra) {
+                let transport_layers = self.resolved_transport_layers(config).await?;
+                if matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_))) {
+                    let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_local_port(
+                        connection_id,
+                        &transport_layers,
+                        &bootstrap_host,
+                        bootstrap_port,
+                        Some(bootstrap_port),
+                        &self.tunnels,
+                        &self.proxy_tunnels,
+                        &self.http_tunnels,
+                    )
+                    .await?;
+                    return Ok(mqc.with_connect_override("127.0.0.1", local_port));
+                }
+            }
+        }
+
         let (host, port) = self.connection_host_port(connection_id, config).await?;
         Ok(mqc.with_connect_override(&host, port))
     }
@@ -3921,8 +3941,11 @@ impl AppState {
             }
         }
 
+        let mut detached_pool_keys = Vec::new();
         for (key, client, replace_runtime) in failed_agent_checks {
-            self.detach_agent_pool_if_current(&key, &client, replace_runtime).await;
+            if self.detach_agent_pool_if_current(&key, &client, replace_runtime).await {
+                detached_pool_keys.push(key);
+            }
         }
 
         // Remove dead pools
@@ -3946,13 +3969,20 @@ impl AppState {
                 }
             }
             drop(conns);
+            detached_pool_keys.extend(removed.iter().map(|(key, _)| key.clone()));
             self.pool_routing_control().finish_detach(removed).await;
         }
 
-        // Re-establish SSH tunnels that have died
-        let tunnel_connection_ids: Vec<String> = {
+        // Only failed pools may require a fresh transport. Healthy tunnel listeners must keep
+        // their local ports stable across app resume and visibility-triggered health checks.
+        let tunnel_connection_ids: HashSet<String> = {
             let configs = self.configs.read().await;
-            configs.iter().filter(|(_, c)| c.has_effective_transport_layers()).map(|(id, _)| id.clone()).collect()
+            detached_pool_keys
+                .iter()
+                .filter_map(|pool_key| config_for_pool_key(pool_key, &configs))
+                .filter(|config| config.has_effective_transport_layers())
+                .map(|config| config.id.clone())
+                .collect()
         };
         for connection_id in tunnel_connection_ids {
             self.reset_connection_transport(&connection_id).await;
@@ -4339,6 +4369,30 @@ fn parse_mq_admin_host_port(config: &ConnectionConfig) -> Option<(String, u16)> 
     Some((host, port))
 }
 
+#[cfg(any(feature = "mq-admin", test))]
+fn kafka_single_loopback_bootstrap_endpoint(extra: &serde_json::Value) -> Option<(String, u16)> {
+    let value = extra.get("bootstrapServers").or_else(|| extra.get("bootstrap_servers"))?.as_str()?.trim();
+    let mut endpoints = value
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '，' | '；'))
+        .filter(|endpoint| !endpoint.is_empty());
+    let endpoint = endpoints.next()?;
+    if endpoints.next().is_some() {
+        return None;
+    }
+    let address = endpoint.rsplit_once("://").map_or(endpoint, |(_, address)| address);
+    let url = reqwest::Url::parse(&format!("kafka://{address}")).ok()?;
+    if url.host_str()? != "127.0.0.1"
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    Some(("127.0.0.1".to_string(), url.port()?))
+}
+
 fn parse_nacos_server_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
     let value = config
         .external_config
@@ -4647,10 +4701,10 @@ fn uses_agent_connection_pool(db_type: &DatabaseType) -> bool {
 }
 
 fn should_validate_existing_pool_before_reuse(db_type: DatabaseType) -> bool {
-    // PostgreSQL uses deadpool's Fast recycling and the query executor's
-    // ReconnectAndRetry path. An eager SELECT 1 here would add a network
-    // round-trip before every query without improving recovery behavior.
-    !matches!(db_type, DatabaseType::Postgres | DatabaseType::Etcd)
+    // PostgreSQL and Agent-backed databases validate connections when they are
+    // checked out for actual work. An eager probe here would add a database
+    // round-trip before every request and can compete with active Agent leases.
+    db_type != DatabaseType::Postgres && !matches!(db_type, agent_connection_pool_database_type!())
 }
 
 fn agent_pool_identity(pool: &PoolKind) -> Option<Arc<db::agent_driver::PooledAgentClient>> {
@@ -4878,6 +4932,7 @@ mod tests {
             username: "root".to_string(),
             password: "secret".to_string(),
             database: database.map(str::to_string),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -5202,6 +5257,8 @@ mod tests {
     fn drivers_with_internal_recovery_skip_eager_pool_validation() {
         assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Postgres));
         assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Etcd));
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Dameng));
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Oracle));
         assert!(super::should_validate_existing_pool_before_reuse(DatabaseType::Mysql));
     }
 
@@ -7034,6 +7091,21 @@ for line in sys.stdin:
         let (state, dir) = test_app_state().await;
         let (runtime, target_client, sibling_client) =
             replace_runtime_on_error_clients(&dir, "validate_connection").await;
+        let mut config = mysql_config(None);
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+        })];
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state.connection_host_port(&config.id, &config).await.unwrap();
         {
             let mut connections = state.connections.write().await;
             connections.insert("conn:analytics".to_string(), PoolKind::Agent(target_client));
@@ -7043,7 +7115,35 @@ for line in sys.stdin:
         state.refresh_connections().await;
 
         assert!(state.connections.read().await.is_empty());
+        assert!(state.proxy_tunnels.local_port("conn:transport:0").await.is_none());
         assert!(runtime.is_failed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn global_health_preserves_transport_for_connections_without_failed_pools() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "proxied-connection".to_string();
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+        })];
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let (_, local_port) = state.connection_host_port(&config.id, &config).await.unwrap();
+
+        state.refresh_connections().await;
+
+        assert_eq!(state.proxy_tunnels.local_port("proxied-connection:transport:0").await, Some(local_port));
+        state.reset_connection_transport(&config.id).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7492,6 +7592,34 @@ for line in sys.stdin:
         }));
 
         assert_eq!(connection_remote_endpoint(&config), ("broker.internal".to_string(), 8443));
+    }
+
+    #[test]
+    fn kafka_loopback_bootstrap_endpoint_requires_one_ipv4_loopback_server() {
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrapServers": "127.0.0.1:9093"
+            })),
+            Some(("127.0.0.1".to_string(), 9093))
+        );
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrap_servers": "PLAINTEXT://127.0.0.1:19093"
+            })),
+            Some(("127.0.0.1".to_string(), 19093))
+        );
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrapServers": "127.0.0.1:9093,127.0.0.1:9094"
+            })),
+            None
+        );
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrapServers": "broker.internal:9093"
+            })),
+            None
+        );
     }
 
     #[cfg(feature = "mq-admin")]

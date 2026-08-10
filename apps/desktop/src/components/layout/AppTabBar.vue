@@ -47,7 +47,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
-  queryStore.reorderTab(draggedId, targetId, position);
+  return queryStore.reorderTab(draggedId, targetId, position);
 });
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
@@ -538,7 +538,7 @@ function tabMenuIcon(tab: QueryTab) {
 }
 
 function handleTabClick(tab: QueryTab) {
-  if (tabDrag.state.wasDragged) return;
+  if (tabDrag.state.suppressClick) return;
   activateTab(tab.id);
 }
 
@@ -1011,9 +1011,9 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       </div>
       <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
-        <Button v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
+        <Button v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
-        <Button variant="secondary" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
+        <Button variant="secondary" class="border-border" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
         <Button @click="handleSaveAndClose">{{ t("savedSql.save") }}</Button>
       </DialogFooter>
     </DialogContent>

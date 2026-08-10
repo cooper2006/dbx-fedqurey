@@ -42,6 +42,23 @@ const taggedAiCliErrorKeys: Record<string, string> = {
   openCodeTimeout: "ai.cliErrors.openCodeTimeout",
   openCodeProtocolError: "ai.cliErrors.openCodeProtocolError",
   openCodeRunFailed: "ai.cliErrors.openCodeRunFailed",
+  cursorNotInstalled: "ai.cliErrors.cursorNotInstalled",
+  cursorCliPathInvalid: "ai.cliErrors.cursorCliPathInvalid",
+  grokCliNotInstalled: "ai.cliErrors.grokCliNotInstalled",
+  grokCliPathInvalid: "ai.cliErrors.grokCliPathInvalid",
+  grokCliEnvInvalid: "ai.cliErrors.grokCliEnvInvalid",
+  grokCliEnvReserved: "ai.cliErrors.grokCliEnvReserved",
+  grokCliNotAuthenticated: "ai.cliErrors.grokCliNotAuthenticated",
+  grokCliMcpStartupFailed: "ai.cliErrors.grokCliMcpStartupFailed",
+  grokCliCommandLineTooLong: "ai.cliErrors.grokCliCommandLineTooLong",
+  grokCliRunFailed: "ai.cliErrors.grokCliRunFailed",
+  cursorEnvInvalid: "ai.cliErrors.cursorEnvInvalid",
+  cursorEnvReserved: "ai.cliErrors.cursorEnvReserved",
+  cursorNotAuthenticated: "ai.cliErrors.cursorNotAuthenticated",
+  cursorMcpStartupFailed: "ai.cliErrors.cursorMcpStartupFailed",
+  cursorTimeout: "ai.cliErrors.cursorTimeout",
+  cursorProtocolError: "ai.cliErrors.cursorProtocolError",
+  cursorRunFailed: "ai.cliErrors.cursorRunFailed",
 };
 
 const exactMessageKeys: Record<string, string> = {

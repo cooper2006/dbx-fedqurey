@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
-    agent_tools::{self, AgentSqlPermissions},
+    agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
     connection::AppState,
     db::{redis_driver::RedisCommandResult, ColumnInfo, IndexInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
@@ -320,7 +320,13 @@ impl LocalBackend {
         let desktop_settings = storage.load_desktop_settings().await.unwrap_or_default();
         let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
         let plugin_dir = local_plugin_dir(&desktop_settings, &data_dir);
-        let state = Arc::new(AppState::new_with_plugin_dir(storage, plugin_dir));
+        let agent_dir = local_agent_dir(&desktop_settings, &data_dir);
+        let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            plugin_dir,
+            agent_dir,
+            env!("CARGO_PKG_VERSION"),
+        ));
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
         *state.configs.write().await = config_map;
@@ -363,6 +369,24 @@ fn local_plugin_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| legacy_driver_base.map(|base| base.join("plugins")))
         .unwrap_or_else(|| data_dir.join("plugins"))
+}
+
+fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
+    let legacy_driver_base =
+        settings.driver_store_dir.as_ref().filter(|value| !value.trim().is_empty()).map(PathBuf::from);
+    settings
+        .agent_store_dir
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| legacy_driver_base.map(|base| base.join("agents")))
+        .unwrap_or_else(|| {
+            if std::env::var_os("DBX_DATA_DIR").filter(|value| !value.is_empty()).is_some() {
+                data_dir.join("agents")
+            } else {
+                dbx_core::connection::default_agent_dir()
+            }
+        })
 }
 
 #[async_trait]
@@ -563,6 +587,7 @@ impl DbxBackend for WebBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
+        let explicit_cell_window = QueryCellWindow::explicit_from_arguments(&arguments);
         let result = async {
             if tool_name != "execute_query" {
                 return Err(format!("Unsupported DBX Web agent tool: {tool_name}"));
@@ -606,7 +631,10 @@ impl DbxBackend for WebBackend {
             let response = self.request(reqwest::Method::POST, "/api/query/execute", Some(body)).await?;
             let query_result: dbx_core::db::QueryResult =
                 response.json().await.map_err(|error| format!("Invalid query response: {error}"))?;
-            Ok(format_query_result(&query_result, max_rows))
+            match explicit_cell_window {
+                Some(window) => format_query_result_as_text(&query_result, max_rows, window),
+                None => Ok(format_query_result(&query_result, max_rows)),
+            }
         }
         .await;
         ToolResult {
@@ -881,6 +909,30 @@ impl DbxBackend for WebBackend {
                     .map_err(|error| format!("Invalid MongoDB find response: {error}"))?;
                 Ok(mongo_documents_query_result(result.documents))
             }
+            MongoCommand::FindExplain { collection, filter, projection, sort, collation, skip, limit, verbosity } => {
+                let result = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/explain-find",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "skip": skip,
+                            "limit": limit,
+                            "filter": filter,
+                            "projection": projection,
+                            "sort": sort,
+                            "collation": collation,
+                            "verbosity": verbosity,
+                        })),
+                    )
+                    .await?
+                    .json::<Value>()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB explain response: {error}"))?;
+                Ok(mongo_documents_query_result(vec![result]))
+            }
             MongoCommand::FindOne { collection, filter, projection, options } => {
                 let result = self
                     .request(
@@ -1085,6 +1137,24 @@ impl DbxBackend for WebBackend {
                     "name",
                     Value::String(value.get("name").and_then(Value::as_str).unwrap_or("").to_string()),
                 ))
+            }
+            MongoCommand::CreateUser { user_json, write_concern_json } => {
+                let value: Value = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/create-user",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "userJson": user_json,
+                            "writeConcernJson": write_concern_json,
+                        })),
+                    )
+                    .await?
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB create user response: {error}"))?;
+                Ok(affected_query_result(affected_rows_from_value(&value)))
             }
             MongoCommand::DropIndexes { collection, indexes, single } => {
                 let value: Value = self
@@ -1591,6 +1661,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_mongo_find_explain_uses_explain_endpoint_and_preserves_options() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                })
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let body = request[header_end..header_end + content_length].to_string();
+            request_sender.send((request.lines().next().unwrap().to_string(), body)).unwrap();
+
+            let response_body = r#"{"queryPlanner":{"winningPlan":{"stage":"COLLSCAN"}}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        });
+
+        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        backend.auth.lock().await.checked = true;
+        let connection = new_connection_config(
+            "legacy".to_string(),
+            "Legacy MongoDB".to_string(),
+            DatabaseType::MongoDb,
+            "localhost".to_string(),
+            27017,
+            String::new(),
+            String::new(),
+            Some("app".to_string()),
+            false,
+            Some("mongodb-legacy".to_string()),
+        )
+        .unwrap();
+        backend.connected.lock().await.insert(connection.id.clone(), connection.clone());
+
+        let command = MongoCommand::FindExplain {
+            collection: "im_msg".to_string(),
+            filter: r#"{"active":true}"#.to_string(),
+            projection: Some(r#"{"email":1}"#.to_string()),
+            sort: Some(r#"{"email":1}"#.to_string()),
+            collation: Some(r#"{"locale":"en","strength":1}"#.to_string()),
+            skip: 2,
+            limit: 5,
+            verbosity: "executionStats".to_string(),
+        };
+        let result = backend.execute_mongo_command(&connection, "app", &command).await.unwrap();
+
+        server.join().unwrap();
+        let (request_line, body) = request_receiver.recv().unwrap();
+        assert_eq!(request_line, "POST /api/mongo/explain-find HTTP/1.1");
+        let request: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(request["connectionId"], "legacy");
+        assert_eq!(request["database"], "app");
+        assert_eq!(request["collection"], "im_msg");
+        assert_eq!(request["skip"], 2);
+        assert_eq!(request["limit"], 5);
+        assert_eq!(request["filter"], r#"{"active":true}"#);
+        assert_eq!(request["projection"], r#"{"email":1}"#);
+        assert_eq!(request["sort"], r#"{"email":1}"#);
+        assert_eq!(request["collation"], r#"{"locale":"en","strength":1}"#);
+        assert_eq!(request["verbosity"], "executionStats");
+        assert_eq!(result.columns, ["queryPlanner"]);
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[tokio::test]
     async fn local_backend_uses_desktop_plugin_directory() {
         let data_dir = tempfile::tempdir().unwrap();
         let database_path = data_dir.path().join("dbx.db");
@@ -1619,6 +1781,26 @@ mod tests {
         assert!(backend.state().plugins.find_driver("jdbc").unwrap().is_some());
     }
 
+    #[tokio::test]
+    async fn local_backend_uses_desktop_agent_directory() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let agent_dir = data_dir.path().join("agents-custom");
+        let storage = Storage::open(&database_path).await.unwrap();
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                agent_store_dir: Some(agent_dir.to_string_lossy().to_string()),
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        let backend = LocalBackend::open(&database_path).await.unwrap();
+
+        assert_eq!(backend.state().agent_manager.base_dir(), &agent_dir);
+    }
+
     #[test]
     fn local_plugin_directory_honors_desktop_storage_settings() {
         let data_dir = Path::new("C:/Users/user/AppData/Roaming/com.dbx.app");
@@ -1631,6 +1813,17 @@ mod tests {
 
         assert_eq!(local_plugin_dir(&explicit, data_dir), PathBuf::from("D:/DBX/plugins-custom"));
         assert_eq!(local_plugin_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/plugins"));
+    }
+
+    #[test]
+    fn local_agent_directory_honors_desktop_storage_settings() {
+        let data_dir = Path::new("C:/Users/user/AppData/Roaming/com.dbx.app");
+        let explicit =
+            DesktopSettings { agent_store_dir: Some("D:/DBX/agents-custom".to_string()), ..DesktopSettings::default() };
+        let legacy = DesktopSettings { driver_store_dir: Some("D:/DBX/drivers".to_string()), ..Default::default() };
+
+        assert_eq!(local_agent_dir(&explicit, data_dir), PathBuf::from("D:/DBX/agents-custom"));
+        assert_eq!(local_agent_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/agents"));
     }
 
     struct StubBackend;

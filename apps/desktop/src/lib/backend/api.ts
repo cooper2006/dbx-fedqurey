@@ -187,6 +187,7 @@ export const collectDocsSnapshot = forward("collectDocsSnapshot");
 export const loadDocsAnnotations = forward("loadDocsAnnotations");
 export const applyDocsAnnotations = forward("applyDocsAnnotations");
 export const saveDocsAnnotations = forward("saveDocsAnnotations");
+export const exportDocsHtml = forward("exportDocsHtml");
 
 // Query
 export const executeQuery = forward("executeQuery");
@@ -572,6 +573,7 @@ export const mongoCreateDatabase = forward("mongoCreateDatabase");
 export const mongoDropDatabase = forward("mongoDropDatabase");
 export const mongoDropCollection = forward("mongoDropCollection");
 export const mongoRenameCollection = forward("mongoRenameCollection");
+export const mongoCloneCollection = forward("mongoCloneCollection");
 export const documentFindDocuments = forward("documentFindDocuments");
 export const elasticsearchCountDocuments = forward("elasticsearchCountDocuments");
 export const mongoFindDocuments = forward("mongoFindDocuments");
@@ -583,6 +585,7 @@ export const mongoAggregateDocuments = forward("mongoAggregateDocuments");
 export const mongoDistinct = forward("mongoDistinct");
 export const mongoCollectionStats = forward("mongoCollectionStats");
 export const mongoCreateIndex = forward("mongoCreateIndex");
+export const mongoCreateUser = forward("mongoCreateUser");
 export const mongoDropIndexes = forward("mongoDropIndexes");
 export const documentInsertDocument = forward("documentInsertDocument");
 export const mongoInsertDocument = forward("mongoInsertDocument");
@@ -773,9 +776,12 @@ export type {
 // MQTT
 export const mqttGetBrokerInfo = forward("mqttGetBrokerInfo");
 export const mqttSubscribe = forward("mqttSubscribe");
+export const mqttSaveTopicConfig = forward("mqttSaveTopicConfig");
+export const mqttDeleteTopicConfig = forward("mqttDeleteTopicConfig");
 export const mqttUnsubscribe = forward("mqttUnsubscribe");
 export const mqttPublish = forward("mqttPublish");
 export const mqttListTopics = forward("mqttListTopics");
+export const mqttListSavedTopicConfigs = forward("mqttListSavedTopicConfigs");
 export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");

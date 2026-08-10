@@ -86,7 +86,9 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli
-        | AiProvider::OpenCodeCli => None,
+        | AiProvider::OpenCodeCli
+        | AiProvider::CursorCli
+        | AiProvider::GrokCli => None,
     }
 }
 
@@ -192,6 +194,8 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli
         | AiProvider::OpenCodeCli
+        | AiProvider::CursorCli
+        | AiProvider::GrokCli
         | AiProvider::Custom => None,
     }
 }
@@ -211,6 +215,8 @@ pub fn validate_runtime_effort(config: &AiConfig) -> Result<(), String> {
             | AiProvider::ClaudeCodeCli
             | AiProvider::PiAgentCli
             | AiProvider::OpenCodeCli
+            | AiProvider::CursorCli
+            | AiProvider::GrokCli
     ) {
         return match selection {
             AiEffortSelection::Enum(value) if !value.trim().is_empty() => Ok(()),
@@ -263,7 +269,12 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
                 apply_openai_effort(object, &config.api_style, selection);
             }
         }
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli | AiProvider::OpenCodeCli => {}
+        AiProvider::CodexCli
+        | AiProvider::ClaudeCodeCli
+        | AiProvider::PiAgentCli
+        | AiProvider::OpenCodeCli
+        | AiProvider::CursorCli
+        | AiProvider::GrokCli => {}
     }
 }
 
@@ -419,6 +430,10 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
         }
     }
 
