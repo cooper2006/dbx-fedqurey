@@ -13,11 +13,11 @@
 
 新增字段：
 ```rust
-#[serde(default = "default_federation_enabled")]
+#[serde(default)]
 pub federation_enabled: bool,
 ```
 
-默认值为 `false`，可通过 API 启用。
+默认值为 `false`（等价于 `bool` 的 `Default`），可通过 API 启用。
 
 #### 1.2 FederatedResolver 核心模块
 **位置**: `crates/dbx-core/src/federated.rs`
@@ -316,6 +316,6 @@ Web 服务重启后所有登录 session 丢失，用户需重新登录。
 
 ---
 *实现日期: 2026-08-03*
-*最近更新: 2026-08-07*
-*版本: 1.5*
-*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成，新增 VictoriaMetrics/Mqtt 支持，修复连接名误判 catalog 及含特殊字符连接名解析问题，修复 session cookie 传递和 Calcite Agent 启动超时，Calcite Agent 使用配置 Java 运行时，连接缓存与存储同步，Agent 启动诊断增强，适配上游 QueryResult.messages 字段*
+*最近更新: 2026-08-10*
+*版本: 1.6*
+*状态: Phase 1-4 全部完成，P0-P2 审查修复已完成，新增 VictoriaMetrics/Mqtt 支持，修复连接名误判 catalog 及含特殊字符连接名解析问题，修复 session cookie 传递和 Calcite Agent 启动超时，Calcite Agent 使用配置 Java 运行时，连接缓存与存储同步，Agent 启动诊断增强，适配上游 QueryResult.messages 字段，JDBC 连接超时，以本地为主合并上游 91 提交*

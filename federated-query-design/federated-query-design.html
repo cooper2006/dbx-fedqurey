@@ -1646,7 +1646,7 @@ flowchart TB
     </ol>
 
     <div class="callout info" style="margin-top: 2rem;">
-      <div class="callout-title">稳定性修复更新 (2026-08-07)</div>
+      <div class="callout-title">稳定性修复更新 (2026-08-07 ~ 2026-08-10)</div>
       <p><strong>连接名误判 catalog</strong>：联邦查询的连接名前缀（如 <code>doris.freequery.DIM_BM_AD_PS</code>）被可编辑性分析误作为 catalog 传递给后端元数据接口，导致 Doris 等引擎报 "Backend request failed"。修复方案：前端 <code>queryStore.ts</code> 的 <code>resolveEditableSourceMetadataTarget()</code> 检测并剥离匹配连接名的 catalog，同时将元数据请求重定向到联邦目标连接；后端 <code>schema.rs</code> 的 <code>resolve_external_doris_catalog()</code> 在 catalog 与连接名匹配时返回 None。对 Doris/MySQL 等非 schema 感知数据库，3-part 名称第二部分正确识别为数据库名。</p>
       <p><strong>含特殊字符连接名解析</strong>：连接名含连字符（如 <code>doris-Local</code>）时 SQL 解析器将其误认为算术表达式。新增 <code>preprocess_federated_sql()</code> 在解析前自动为含特殊字符的连接名加引号；新增 <code>validate_connection_name()</code> 提前校验名称合法性；SQL 方言从 PostgreSqlDialect 切换为 GenericDialect 以兼容更广泛语法。新增 3 个单元测试。</p>
       <p><strong>Web session 持久化</strong>：<code>dbx-web/src/auth.rs</code> 新增 <code>persist_sessions()</code> / <code>restore_sessions()</code>，将 session token 持久化到 SQLite，服务器重启后自动恢复登录状态。</p>
@@ -1655,6 +1655,9 @@ flowchart TB
       <p><strong>Calcite Agent 使用配置的 Java 运行时</strong>：修复 macOS 下 Agent 启动失败（"Agent process closed stdout during startup"）。<code>query.rs</code> 创建 CalciteAgentConfig 时改用 <code>agent_manager.resolve_java_runtime()</code> 解析的 Java 运行时（Managed/System/Custom），不再硬编码 <code>java</code>。桌面 GUI 应用不继承终端 PATH，需在 Driver Store → Java 运行时选 Custom 并填 JDK 21 绝对路径（如 ServBay）。</p>
       <p><strong>连接缓存与存储同步</strong>：<code>query.rs</code> 联邦分析前从存储补齐连接缓存；<code>connection.rs</code> 连接池查找缓存 miss 时回落存储。避免连接存在却因缓存与存储不同步而误报 "Connection config not found"。</p>
       <p><strong>Agent 启动诊断增强</strong>：<code>calcite_agent.rs</code> 启动失败时把 Agent stderr 并入错误信息，便于定位 Java 未安装/版本不符等问题；stdout 关闭时通知所有等待中的请求，避免永久阻塞。</p>
+      <p><strong>适配上游 QueryResult.messages 字段</strong>：合并上游新增的 <code>messages: Vec&lt;QueryMessage&gt;</code> 字段，联邦结果构造处补上 <code>messages: vec![]</code>，修复合并后的编译错误。</p>
+      <p><strong>JDBC 连接超时</strong>：<code>calcite_agent.rs</code> 新增 <code>with_connect_timeout()</code>，按数据库类型为 JDBC URL 追加 <code>connectTimeout</code>（MySQL 系，毫秒）或 <code>connectTimeout/loginTimeout</code>（PostgreSQL 系，秒），避免 Agent 侧 JDBC 连接无限阻塞导致 RPC 超时；<code>registerSource</code> 调用超时放宽到 60 秒。</p>
+      <p><strong>以本地为主合并上游 91 提交</strong>：合并 <code>upstream/main</code>（t8y2/dbx）的 91 个提交，冲突（<code>agents/drivers/iotdb/*</code>）以本地版本为准；同时保留前端外部 SQL 文件保存流程增强（<code>App.vue</code> saveExternalSqlPath）。</p>
     </div>
   </div>
 </section>
@@ -2253,7 +2256,7 @@ flowchart TB
 
 <footer>
   <div class="container">
-    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.5 · 2026-08-07</p>
+    <p>dbx 联邦查询与 SQL 格式化设计文档 · 版本 2.6 · 2026-08-10</p>
     <p>基于 dbx 真实代码库架构分析生成 · Rust + Tauri 2.x + Vue 3 + CodeMirror 6 + Java Agent</p>
   </div>
 </footer>

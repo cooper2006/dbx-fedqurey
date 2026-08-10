@@ -22,11 +22,11 @@ Phase 4 (P3) - 集成测试:      ███████████████�
 
 新增字段：
 ```rust
-#[serde(default = "default_federation_enabled")]
+#[serde(default)]
 pub federation_enabled: bool,
 ```
 
-默认值 `false`，可通过 API 启用联邦查询。
+默认值 `false`（等价于 `bool` 的 `Default`），可通过 API 启用联邦查询。
 
 **TypeScript 类型同步**: `apps/desktop/src/types/database.ts`
 ```typescript
@@ -107,7 +107,7 @@ pub calcite_agent: Arc<Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>
 
 ---
 
-## Phase 2: Calcite Agent ⚠️ 部分完成
+## Phase 2: Calcite Agent ✅ 全部完成
 
 ### 2.3 Rust 侧 Calcite Agent 生命周期管理
 **文件**: `crates/dbx-core/src/calcite_agent.rs` (167 行)
@@ -386,6 +386,18 @@ macOS 下联邦查询报 "Agent process closed stdout during startup"。根因�
 |------|------|
 | `crates/dbx-core/src/query.rs` | 合并上游后新增的 `messages: Vec<QueryMessage>` 字段，联邦结果构造处补上 `messages: vec![]`，修复编译错误 |
 
+### 修复 10: Calcite Agent 追加 JDBC 连接超时（2026-08-10）
+
+| 文件 | 修复 |
+|------|------|
+| `crates/dbx-core/src/calcite_agent.rs` | 新增 `with_connect_timeout()`，按数据库类型为 JDBC URL 追加 `connectTimeout`（MySQL 系，毫秒）或 `connectTimeout/loginTimeout`（PostgreSQL 系，秒），避免 Agent 侧 JDBC 连接无限阻塞导致 30s RPC 超时；`registerSource` 调用超时放宽到 60 秒 |
+
+### 合并上游更新（2026-08-10）
+
+- 以本地为主合并 `upstream/main` 的 91 个提交（含 Mongo collection clone、IoTDB 驱动、agent 依赖升级 jackson-databind 2.22.1、模块版本 bump 等）
+- 冲突（`agents/drivers/iotdb/*`）以本地版本为准
+- 前端外部 SQL 文件保存流程增强（`App.vue` saveExternalSqlPath）
+
 ### 本次新增/修改文件
 
 - `crates/dbx-core/src/federated.rs` - 含特殊字符连接名预处理、名称校验、GenericDialect
@@ -403,6 +415,6 @@ macOS 下联邦查询报 "Agent process closed stdout during startup"。根因�
 ---
 
 *生成日期: 2026-08-03*
-*最近更新: 2026-08-07*
-*版本: 1.5*
-*状态: 全部完成，含 P0-P2 审查修复、VictoriaMetrics/Mqtt 支持、连接名 catalog 误判修复、含特殊字符连接名解析修复、Web session 持久化、session cookie 传递修复、Calcite Agent 启动超时修复、Calcite Agent 使用配置 Java 运行时、连接缓存与存储同步、Agent 启动诊断增强、适配上游 QueryResult.messages 字段*
+*最近更新: 2026-08-10*
+*版本: 1.6*
+*状态: 全部完成，含 P0-P2 审查修复、VictoriaMetrics/Mqtt 支持、连接名 catalog 误判修复、含特殊字符连接名解析修复、Web session 持久化、session cookie 传递修复、Calcite Agent 启动超时修复、Calcite Agent 使用配置 Java 运行时、连接缓存与存储同步、Agent 启动诊断增强、适配上游 QueryResult.messages 字段、JDBC 连接超时、以本地为主合并上游 91 提交*
