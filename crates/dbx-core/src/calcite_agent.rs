@@ -411,6 +411,8 @@ impl CalciteAgentManager {
         let runtime = runtime_guard.as_ref().ok_or("Calcite Agent is not running")?;
 
         let jdbc_url = build_jdbc_url(config)?;
+        // 追加连接超时，避免 Agent 侧 JDBC 连接无限阻塞导致 30s RPC 超时
+        let jdbc_url = with_connect_timeout(&jdbc_url, config.db_type);
         let driver_class = build_driver_class(config);
 
         // Hash the password before sending to Java Agent to avoid plaintext transmission.
@@ -429,7 +431,7 @@ impl CalciteAgentManager {
         });
         log::debug!("register_connection params: {}", serde_json::to_string(&params).unwrap_or_default().replace(&config.password, "***"));
 
-        let result = runtime.call("registerSource", params, Some(Duration::from_secs(30))).await?;
+        let result = runtime.call("registerSource", params, Some(Duration::from_secs(60))).await?;
 
         let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -581,6 +583,38 @@ fn append_ssl_params(url: &str, ssl: bool) -> String {
     }
     let sep = if url.contains('?') { "&" } else { "?" };
     format!("{url}{sep}ssl=true")
+}
+
+/// Append a connect timeout to the JDBC URL used by the Calcite Agent so its
+/// connections cannot hang indefinitely (which would otherwise trip the Rust-side
+/// RPC timeout with "Calcite Agent request timed out").
+fn with_connect_timeout(url: &str, db_type: DatabaseType) -> String {
+    let sep = if url.contains('?') { "&" } else { "?" };
+    match db_type {
+        // MySQL 系（connectTimeout 单位为毫秒）
+        DatabaseType::Mysql
+        | DatabaseType::Doris
+        | DatabaseType::StarRocks
+        | DatabaseType::Goldendb
+        | DatabaseType::Gbase
+        | DatabaseType::ManticoreSearch => {
+            format!("{url}{sep}connectTimeout=10000")
+        }
+        // PostgreSQL 系（connectTimeout / loginTimeout 单位为秒）
+        DatabaseType::Postgres
+        | DatabaseType::Redshift
+        | DatabaseType::Kingbase
+        | DatabaseType::Highgo
+        | DatabaseType::Uxdb
+        | DatabaseType::Vastbase
+        | DatabaseType::Gaussdb
+        | DatabaseType::OpenGauss
+        | DatabaseType::Kwdb
+        | DatabaseType::Oscar => {
+            format!("{url}{sep}connectTimeout=10&loginTimeout=10")
+        }
+        _ => url.to_string(),
+    }
 }
 
 /// 根据 ConnectionConfig 构建 JDBC URL

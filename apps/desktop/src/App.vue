@@ -639,6 +639,27 @@ async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: bo
   }
 }
 
+async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: boolean } = {}): Promise<boolean> {
+  if (!tab.externalSqlPath || !isTauriRuntime()) return false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const preparation = await externalSqlFileChanges.prepareSave(tab);
+    if (!preparation.proceed) {
+      if (options.closeAfterSave && queryStore.tabs.some((candidate) => candidate.id === tab.id) && !queryStore.isTabDirty(tab)) {
+        queryStore.closeTab(tab.id, { force: true });
+      }
+      return true;
+    }
+    const result = await writeExternalSqlTab(tab, {
+      closeAfterSave: options.closeAfterSave,
+      expectedContentHash: preparation.expectedContentHash,
+      expectedMissing: preparation.expectedMissing,
+    });
+    if (result !== "retry") return true;
+  }
+  toast(t("externalSqlFile.checkFailed", { message: t("externalSqlFile.changedAgain") }), 5000);
+  return true;
+}
+
 async function saveTabForCloseAll(tabId: string): Promise<boolean> {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab || !canSaveSqlTab(tab)) return true;
