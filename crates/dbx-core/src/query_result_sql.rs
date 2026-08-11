@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +8,7 @@ use crate::sql::find_statement_at_cursor;
 use crate::sql_dialect::{
     firebird_rows_clause, pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy,
 };
-use sqlparser::ast::{Expr, GroupByExpr, Select, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{visit_expressions, Expr, GroupByExpr, OrderByKind, Select, SelectItem, SetExpr, Statement};
 use sqlparser::dialect::{ClickHouseDialect, GenericDialect, MsSqlDialect};
 use sqlparser::parser::Parser;
 
@@ -475,7 +476,7 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
     }
 
     let statement_without_order = order_by_index.map(|index| statement[..index].trim_end()).unwrap_or(statement);
-    if !sql_server_derived_table_projection_safe(statement_without_order) {
+    if !sql_server_row_number_pagination_safe(statement) {
         return Some(add_sql_server_rowcount_pagination(statement, limit, offset));
     }
 
@@ -486,6 +487,51 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
     Some(format!(
         "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({statement_without_order}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
     ))
+}
+
+fn sql_server_row_number_pagination_safe(statement: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&MsSqlDialect {}, statement) else {
+        return false;
+    };
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return false;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return false;
+    };
+    if !sql_server_derived_table_select_projection_safe(select) {
+        return false;
+    }
+
+    let Some(order_by) = &query.order_by else {
+        return true;
+    };
+    let OrderByKind::Expressions(order_exprs) = &order_by.kind else {
+        return false;
+    };
+    let wildcard_projection = matches!(select.projection.as_slice(), [SelectItem::Wildcard(_)]);
+    let output_names = select
+        .projection
+        .iter()
+        .filter_map(sql_server_derived_projection_name)
+        .map(str::to_lowercase)
+        .collect::<HashSet<_>>();
+
+    order_exprs.iter().all(|order_expr| {
+        if matches!(order_expr.expr, Expr::Value(_)) {
+            return false;
+        }
+        !visit_expressions(&order_expr.expr, |expr| match expr {
+            Expr::CompoundIdentifier(_) => ControlFlow::Break(()),
+            Expr::Identifier(identifier)
+                if !wildcard_projection && !output_names.contains(&identifier.value.to_lowercase()) =>
+            {
+                ControlFlow::Break(())
+            }
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break()
+    })
 }
 
 const SQLSERVER_RESULT_OFFSET_PREFIX: &str = "/*__dbx_result_offset=";
@@ -1680,6 +1726,52 @@ mod tests {
 
         assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT TOP (100) id FROM users ORDER BY id DESC");
+    }
+
+    #[test]
+    fn sqlserver_qualified_order_by_uses_bounded_rowcount_for_later_pages() {
+        let sql = "SELECT LEFT(d.lbbh, 2) AS dlbh, big.lbmc AS dlmc, LEFT(d.lbbh, 4) AS zlbh, middle.lbmc AS zlmc, LEFT(d.lbbh, 6) AS xlbh, small.lbmc AS xlmc, d.lbbh AS cxlbh, d.lbmc AS cxlmc, CASE WHEN d.tybz = '1' THEN '启用' ELSE '停用' END AS zt FROM T_BASE_WZLB AS d LEFT JOIN T_BASE_WZLB AS big ON big.lbbh = LEFT(d.lbbh, 2) AND big.TreeInfo_Layer = 1 LEFT JOIN T_BASE_WZLB AS middle ON middle.lbbh = LEFT(d.lbbh, 4) AND middle.TreeInfo_Layer = 2 LEFT JOIN T_BASE_WZLB AS small ON small.lbbh = LEFT(d.lbbh, 6) AND small.TreeInfo_Layer = 3 WHERE d.TreeInfo_IsDetail = 1 ORDER BY d.lbbh";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 500,
+            offset: 500,
+        });
+
+        let page_sql = result.sql.expect("build qualified order page");
+        assert!(page_sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 1000; SELECT LEFT(d.lbbh"));
+        assert!(page_sql.contains("ORDER BY d.lbbh'"));
+        assert!(!page_sql.contains("ROW_NUMBER()"));
+        assert_eq!(sqlserver_result_offset(&page_sql), 500);
+    }
+
+    #[test]
+    fn sqlserver_output_alias_order_keeps_row_number_pagination() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT d.lbbh AS cxlbh FROM T_BASE_WZLB AS d ORDER BY cxlbh".to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 500,
+            offset: 500,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY cxlbh) AS [__dbx_row_num] FROM (SELECT d.lbbh AS cxlbh FROM T_BASE_WZLB AS d) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 500 AND [__dbx_row_num] <= 1000 ORDER BY [__dbx_row_num];"
+        );
+    }
+
+    #[test]
+    fn sqlserver_unprojected_order_column_uses_bounded_rowcount() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT d.lbmc AS cxlmc FROM T_BASE_WZLB AS d ORDER BY lbbh".to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 500,
+            offset: 500,
+        });
+
+        let page_sql = result.sql.expect("build hidden order column page");
+        assert!(page_sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 1000;"));
+        assert_eq!(sqlserver_result_offset(&page_sql), 500);
     }
 
     #[test]

@@ -3122,6 +3122,8 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
             parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
             signature: row.try_get::<_, Option<String>>(7).ok().flatten(),
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -4579,6 +4581,13 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
             name: pg_row_try_string(row, 0),
             event: pg_row_try_string(row, 1),
             timing: pg_row_try_string(row, 2),
+            level: None,
+            condition: None,
+            language: None,
+            enabled: None,
+            valid: None,
+            comment: None,
+            created_at: None,
             statement: None,
         })
         .collect())

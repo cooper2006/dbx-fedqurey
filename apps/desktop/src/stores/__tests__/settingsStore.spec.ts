@@ -52,6 +52,12 @@ describe("normalizeEditorSettings", () => {
     ).toBe("all");
   });
 
+  it("keeps blank-line execute-all disabled by default and preserves an explicit opt-in", () => {
+    expect(normalizeEditorSettings({}).executeAllOnBlankLine).toBe(false);
+    expect(normalizeEditorSettings({ executeAllOnBlankLine: false }).executeAllOnBlankLine).toBe(false);
+    expect(normalizeEditorSettings({ executeAllOnBlankLine: true }).executeAllOnBlankLine).toBe(true);
+  });
+
   it("enables automatic table aliases by default", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
   });
@@ -480,6 +486,22 @@ describe("settingsStore AI API key normalization", () => {
       model: "default",
       cursorCliPath: "~/.local/bin/agent",
       cursorCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
+    });
+  });
+
+  it("normalizes CodeBuddy CLI path and environment settings", () => {
+    expect(
+      normalizeAiConfig({
+        provider: "codebuddy-cli",
+        codebuddyCliPath: "  ~/.local/bin/codebuddy  ",
+        codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: null as unknown as string },
+      }),
+    ).toMatchObject({
+      provider: "codebuddy-cli",
+      endpoint: "",
+      model: "default",
+      codebuddyCliPath: "~/.local/bin/codebuddy",
+      codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
     });
   });
 });

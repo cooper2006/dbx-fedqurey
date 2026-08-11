@@ -17,8 +17,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::agent_manager::DEFAULT_JRE_KEY;
+use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::calcite_agent::{CalciteAgentConfig, CalciteAgentManager};
 use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
@@ -1672,6 +1672,7 @@ async fn do_execute_typed(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
+        PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
         .map(normalize_query_result_for_js)
@@ -1737,9 +1738,8 @@ async fn execute_multi_connection_federated_query(
             // 让 Calcite Agent 使用与其它驱动 Agent 一致的 Java 运行时（受 Driver Manager 的
             // Managed/System/Custom 配置控制）。否则会固定用 PATH 上的 `java`，在 macOS 下
             // 通常落到 /usr/bin/java 占位符而无法启动，报 "Agent process closed stdout during startup"。
-            if let Ok(java) = state
-                .agent_manager
-                .resolve_java_runtime(&state.agent_manager.load_state(), DEFAULT_JRE_KEY)
+            if let Ok(java) =
+                state.agent_manager.resolve_java_runtime(&state.agent_manager.load_state(), DEFAULT_JRE_KEY)
             {
                 config.java_path = java.to_string_lossy().to_string();
             }
@@ -3019,6 +3019,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Agent(_) => true,
         PoolKind::MessageQueue
         | PoolKind::Nacos
+        | PoolKind::Consul(_)
         | PoolKind::HBase(_)
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
@@ -3262,7 +3263,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
                 TxPath::Explicit
             }
             PoolKind::Agent(client) => TxPath::Agent(client.clone()),
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
+            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => TxPath::None,
             #[cfg(feature = "mq-admin")]
             PoolKind::Mqtt(_) => TxPath::None,
             PoolKind::DuckDbWorker(_)

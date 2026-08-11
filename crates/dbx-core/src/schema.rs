@@ -2400,6 +2400,8 @@ async fn external_driver_presto_like_objects(
             updated_at: None,
             parent_schema: table.parent_schema,
             parent_name: table.parent_name,
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -3254,6 +3256,8 @@ for line in sys.stdin:
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         }
     }
 
@@ -4152,6 +4156,8 @@ for line in sys.stdin:
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
             super::db::ObjectInfo {
                 name: "ORDERS_VIEW".to_string(),
@@ -4164,6 +4170,8 @@ for line in sys.stdin:
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
             super::db::ObjectInfo {
                 name: "REFRESH_ORDERS".to_string(),
@@ -4176,6 +4184,8 @@ for line in sys.stdin:
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             },
         ];
 
@@ -4857,6 +4867,8 @@ async fn list_objects_once(
                         updated_at: None,
                         parent_schema: table.parent_schema,
                         parent_name: table.parent_name,
+                        trigger: None,
+                        xugu_type_members_expandable: None,
                     })
                     .collect(),
             ))
@@ -7115,6 +7127,8 @@ async fn oracle_agent_list_objects(
                 updated_at: None,
                 parent_schema: None,
                 parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
             })
         })
         .collect();

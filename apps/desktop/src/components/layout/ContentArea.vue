@@ -53,6 +53,8 @@ const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/Etcd
 const EtcdDashboard = defineAsyncComponent(() => import("@/components/etcd/EtcdDashboard.vue"));
 const EtcdAccessControl = defineAsyncComponent(() => import("@/components/etcd/EtcdAccessControl.vue"));
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
+const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/ConsulOverview.vue"));
+const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
@@ -242,6 +244,8 @@ function openDataGridExtractorConfiguration() {
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const etcdDashboardRef = ref<{ refresh?: () => boolean }>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
+const consulOverviewRef = ref<{ refresh?: () => boolean }>();
+const consulWorkspaceRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
@@ -415,6 +419,7 @@ const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
 const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
 const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
+const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
 watch(
   () => `${resultRunDisplayMode.value}:${resultRuns.value.map((run) => run.id).join(",")}:${props.activeTab.activeResultRunId ?? ""}`,
   () => {
@@ -778,6 +783,7 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
@@ -795,6 +801,8 @@ function refreshData(): boolean {
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "etcd-dashboard") return etcdDashboardRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "consul-overview") return consulOverviewRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
     emit("reload");
@@ -844,6 +852,11 @@ async function removeResultRun(runId: string) {
   const activeRunTab = resultTabsScrollerRef.value?.querySelector<HTMLElement>('[data-active-result-run="true"]');
   activeRunTab?.focus({ preventScroll: true });
   activeRunTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+async function closeCurrentQueryResult() {
+  if (!(await queryStore.closeQueryResult(props.activeTab.id))) return;
+  emit("update:activeOutputView", "result");
 }
 
 async function selectResultRun(runId: string) {
@@ -1048,6 +1061,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 @click="toggleResultAutoSave"
               >
                 <Pin class="h-3.5 w-3.5" :class="{ 'fill-current': resultAutoSave }" />
+              </Button>
+              <Button v-if="canCloseQueryResult" variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('tabs.closeResult')" :aria-label="t('tabs.closeResult')" @click="closeCurrentQueryResult">
+                <X class="h-3.5 w-3.5" />
               </Button>
               <template v-if="resultRuns.length > 0 || visibleResultItems.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
@@ -1938,6 +1954,19 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'zookeeper'">
       <div class="flex-1 min-h-0">
         <ZooKeeperKeyBrowser ref="zookeeperKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'consul-overview'">
+      <div class="flex-1 min-h-0">
+        <ConsulOverview ref="consulOverviewRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- Consul management workspace -->
+    <template v-else-if="activeTab.mode === 'consul'">
+      <div class="flex-1 min-h-0">
+        <ConsulWorkspace ref="consulWorkspaceRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 
