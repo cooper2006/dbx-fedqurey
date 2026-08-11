@@ -1655,11 +1655,9 @@ impl AppState {
                 // process's in-memory cache. Reconcile from storage before failing so a
                 // query on a connection that exists in storage is not reported as
                 // "Connection config not found".
-                let loaded = self
-                    .storage
-                    .load_connections()
-                    .await
-                    .map_err(|e| format!("Connection config not found: failed to load connections from storage: {e}"))?;
+                let loaded = self.storage.load_connections().await.map_err(|e| {
+                    format!("Connection config not found: failed to load connections from storage: {e}")
+                })?;
                 let config = loaded
                     .iter()
                     .find(|c| c.id == connection_id)

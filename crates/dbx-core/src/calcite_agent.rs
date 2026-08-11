@@ -429,7 +429,10 @@ impl CalciteAgentManager {
             "passwordHash": password_hash,
             "driverClass": driver_class,
         });
-        log::debug!("register_connection params: {}", serde_json::to_string(&params).unwrap_or_default().replace(&config.password, "***"));
+        log::debug!(
+            "register_connection params: {}",
+            serde_json::to_string(&params).unwrap_or_default().replace(&config.password, "***")
+        );
 
         let result = runtime.call("registerSource", params, Some(Duration::from_secs(60))).await?;
 
