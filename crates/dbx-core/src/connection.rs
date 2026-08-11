@@ -120,6 +120,7 @@ pub enum PoolKind {
     MessageQueue,
     /// Nacos admin connection marker.
     Nacos,
+    Consul(crate::consul::ConsulClient),
 }
 
 impl PoolKind {
@@ -1988,6 +1989,17 @@ impl AppState {
                 let client = crate::mqtt::client::MqttClient::connect(mqtt_config).await?;
                 PoolKind::Mqtt(client)
             }
+            DatabaseType::Consul => {
+                let mut consul_config = crate::consul::ConsulConfig::from_connection(&db_config)?;
+                let original_host = consul_config.base_url.host_str().unwrap_or_default();
+                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
+                if host != original_host || port != original_port {
+                    consul_config = consul_config.with_connect_override(&host, port);
+                }
+                let client = crate::consul::ConsulClient::new(consul_config).await?;
+                client.probe().await?;
+                PoolKind::Consul(client)
+            }
             DatabaseType::Nacos => {
                 let admin_config = self.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = self.nacos_registry.build_transient_config(admin_config).await?;
@@ -3026,6 +3038,7 @@ impl AppState {
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos => false,
+                PoolKind::Consul(_) => false,
             }
         };
 
@@ -3916,6 +3929,7 @@ impl AppState {
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos => true,
+                PoolKind::Consul(_) => true,
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy && !matches!(pool, PoolKind::Agent(_)) {
@@ -4540,6 +4554,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         }
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
+        PoolKind::Consul(client) => PoolKind::Consul(client.clone()),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
     }
 }
@@ -4603,6 +4618,7 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
+        PoolKind::Consul(_) => {}
     }
     Ok(())
 }

@@ -562,6 +562,9 @@ pub enum DatabaseType {
     /// are stored in `external_config`.
     #[serde(rename = "mqtt")]
     Mqtt,
+    /// Consul service discovery and KV store
+    #[serde(rename = "consul")]
+    Consul,
     /// Apache Calcite federation engine for multi-connection queries
     #[serde(rename = "calcite")]
     Calcite,
@@ -1119,6 +1122,7 @@ impl ConnectionConfig {
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
+            DatabaseType::Consul => self.consul_api_url(),
             DatabaseType::Calcite => "calcite://federation".to_string(),
             DatabaseType::VictoriaMetrics => {
                 let db = self.database.as_deref().unwrap_or("default");
@@ -1357,6 +1361,7 @@ impl ConnectionConfig {
             }
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
+            DatabaseType::Consul => self.consul_api_url(),
             DatabaseType::Calcite => "calcite://federation".to_string(),
             DatabaseType::VictoriaMetrics => {
                 let db = self.database.as_deref().unwrap_or("default");
@@ -1399,6 +1404,20 @@ impl ConnectionConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or("nacos://")
             .to_string()
+    }
+
+    fn consul_api_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("serverAddr").or_else(|| value.get("server_addr")))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{}:{}", self.host, self.port)
+            })
     }
 
     fn normalized_url_params(&self) -> String {
