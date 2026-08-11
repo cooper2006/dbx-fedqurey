@@ -18,6 +18,14 @@
       html.dark #root {
         background-color: rgb(19 20 22);
       }
+
+      @media (prefers-color-scheme: dark) {
+        html.dark,
+        html.dark body,
+        html.dark #root {
+          color-scheme: dark;
+        }
+      }
     </style>
     <script data-dbx-startup-theme>
       (() => {
