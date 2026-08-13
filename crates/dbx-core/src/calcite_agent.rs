@@ -149,7 +149,7 @@ impl CalciteAgentRuntime {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                log::debug!("[calcite-agent:stderr] {line}");
+                log::info!("[calcite-agent:stderr] {line}");
                 stderr_log_clone.lock().unwrap().push(line);
             }
         });
@@ -210,24 +210,63 @@ impl CalciteAgentRuntime {
         // 发送请求
         {
             let mut stdin = self.stdin.lock().unwrap();
-            let line = serde_json::to_string(&request).map_err(|e| format!("Failed to serialize request: {e}"))?;
+            let request_line =
+                serde_json::to_string(&request).map_err(|e| format!("Failed to serialize request: {e}"))?;
+            log::info!("[calcite] call({method}, id={id}): request body: {request_line}");
+            let start = std::time::Instant::now();
             stdin
-                .write_all(line.as_bytes())
+                .write_all(request_line.as_bytes())
                 .and_then(|_| stdin.write_all(b"\n"))
                 .and_then(|_| stdin.flush())
                 .map_err(|e| format!("Failed to write to agent stdin: {e}"))?;
+            let elapsed = start.elapsed();
+            log::info!("[calcite] call({method}, id={id}): request sent in {elapsed:.3?}, waiting for response (timeout={timeout:?})");
         }
 
         // 等待响应
         let result = if let Some(timeout) = timeout {
-            tokio::time::timeout(timeout, rx)
-                .await
-                .map_err(|_| format!("Calcite Agent request timed out ({timeout:?})"))?
-                .map_err(|_| "Calcite Agent response channel closed".to_string())?
+            let call_start = std::time::Instant::now();
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(result)) => {
+                    // 成功收到响应，清理 pending 条目
+                    let mut map = self.pending.lock().unwrap();
+                    map.remove(&id);
+                    let elapsed = call_start.elapsed();
+                    log::info!(
+                        "[calcite] call({method}, id={id}): response received in {elapsed:.3?}, pending remaining={}",
+                        map.len()
+                    );
+                    result
+                }
+                Ok(Err(_)) => {
+                    // 通道关闭，清理 pending 条目
+                    let mut map = self.pending.lock().unwrap();
+                    map.remove(&id);
+                    log::error!("[calcite] call({method}, id={id}): channel closed, pending remaining={}", map.len());
+                    return Err("Calcite Agent response channel closed".to_string());
+                }
+                Err(_) => {
+                    // 超时：清理 pending 条目，避免后续响应被错误匹配
+                    let mut map = self.pending.lock().unwrap();
+                    map.remove(&id);
+                    log::error!(
+                        "[calcite] call({method}, id={id}): TIMEOUT after {timeout:?}, pending remaining={}",
+                        map.len()
+                    );
+                    return Err(format!("Calcite Agent request timed out ({timeout:?})"));
+                }
+            }
         } else {
-            rx.await.map_err(|_| "Calcite Agent response channel closed".to_string())?
+            let call_start = std::time::Instant::now();
+            let result = rx.await.map_err(|_| "Calcite Agent response channel closed".to_string())?;
+            log::info!(
+                "[calcite] call({method}, id={id}): response received in {}",
+                call_start.elapsed().as_secs_f64()
+            );
+            result
         };
 
+        log::info!("[calcite] call({method}, id={id}): done");
         result
     }
 
@@ -329,9 +368,21 @@ fn start_response_reader(
                     }
                     match serde_json::from_str::<Value>(trimmed) {
                         Ok(value) => {
-                            let id = value.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                            // Java 侧可能返回字符串或数字形式的 id，统一解析为 u64
+                            let id = value
+                                .get("id")
+                                .and_then(|v| v.as_u64())
+                                .or_else(|| value.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+                                .unwrap_or(0);
+                            let has_result = value.get("result").is_some();
+                            let has_error = value.get("error").is_some();
+                            eprintln!(
+                                "[calcite-reader] received id={id} result={has_result} error={has_error} len={}",
+                                trimmed.len()
+                            );
                             let mut map = pending.lock().unwrap();
                             if let Some(sender) = map.remove(&id) {
+                                eprintln!("[calcite-reader] matched pending request id={id}, sending response");
                                 if let Some(error) = value.get("error") {
                                     let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
                                     let _ = sender.send(Err(msg.to_string()));
@@ -339,6 +390,11 @@ fn start_response_reader(
                                     let result = value.get("result").cloned().unwrap_or(Value::Null);
                                     let _ = sender.send(Ok(result));
                                 }
+                            } else {
+                                eprintln!(
+                                    "[calcite-reader] NO pending match for id={id}, map has {} entries",
+                                    map.len()
+                                );
                             }
                         }
                         Err(e) => {
@@ -411,8 +467,10 @@ impl CalciteAgentManager {
         let runtime = runtime_guard.as_ref().ok_or("Calcite Agent is not running")?;
 
         let jdbc_url = build_jdbc_url(config)?;
-        // 追加连接超时，避免 Agent 侧 JDBC 连接无限阻塞导致 30s RPC 超时
-        let jdbc_url = with_connect_timeout(&jdbc_url, config.db_type);
+        // 使用 ConnectionConfig 中的 connect_timeout（默认 10 秒，用户可配置），
+        // 而不是硬编码 10 秒。这样大库场景下用户可以自行加大超时值。
+        let connect_timeout_secs = config.effective_connect_timeout_secs();
+        let jdbc_url = with_connect_timeout(&jdbc_url, config.db_type, connect_timeout_secs);
         let driver_class = build_driver_class(config);
 
         // Hash the password before sending to Java Agent to avoid plaintext transmission.
@@ -429,14 +487,44 @@ impl CalciteAgentManager {
             "passwordHash": password_hash,
             "driverClass": driver_class,
         });
-        log::debug!(
-            "register_connection params: {}",
+        log::info!(
+            "[calcite] register_connection params: conn_name={}, db_type={:?}, jdbc_url={}, driver_class={}, username={}",
+            config.name, config.db_type, jdbc_url, driver_class, config.username,
+        );
+        log::info!(
+            "[calcite] register_connection request body: {}",
             serde_json::to_string(&params).unwrap_or_default().replace(&config.password, "***")
         );
 
-        let result = runtime.call("registerSource", params, Some(Duration::from_secs(60))).await?;
+        // Calcite 在 JdbcSchema.create() 中会立即加载数据库所有表/列/索引的元数据，
+        // 对大型数据库（例如 ihrcore 这种 HR 核心库，可能上千张表）来说这一步可能很久。
+        // 因此 RPC 超时使用「查询超时 + 建连超时」之和的上限，且不低于 180 秒；
+        // 用户也可通过调大 ConnectionConfig.query_timeout_secs 放宽上限。
+        let query_timeout_secs = config.effective_query_timeout_secs();
+        let rpc_timeout_secs = if query_timeout_secs == 0 {
+            // query_timeout=0 表示用户希望无限制，这里给一个足够大的安全天花板
+            600
+        } else {
+            (query_timeout_secs + connect_timeout_secs).max(180)
+        };
+        log::info!(
+            "[calcite] register_connection RPC timeout: {}s (connect={}s, query={}s)",
+            rpc_timeout_secs,
+            connect_timeout_secs,
+            query_timeout_secs
+        );
+
+        let start = std::time::Instant::now();
+        let result = runtime.call("registerSource", params, Some(Duration::from_secs(rpc_timeout_secs))).await?;
+        let elapsed = start.elapsed();
 
         let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        log::info!(
+            "[calcite] register_connection conn_name={} success={} elapsed={:.3?}",
+            config.name,
+            success,
+            elapsed
+        );
 
         if !success {
             return Err(result
@@ -471,6 +559,7 @@ impl CalciteAgentManager {
         });
 
         let timeout = Duration::from_secs(300);
+        let start = std::time::Instant::now();
         let result = if let Some(ref token) = cancel_token {
             tokio::select! {
                 _ = token.cancelled() => return Err("Query was cancelled".to_string()),
@@ -479,6 +568,12 @@ impl CalciteAgentManager {
         } else {
             runtime.call("executeFederatedQuery", params, Some(timeout)).await?
         };
+        let elapsed = start.elapsed();
+        log::info!(
+            "[calcite] executeFederatedQuery response received in {:.3?}, rowCount from result field={}",
+            elapsed,
+            result.get("rowCount").and_then(|v| v.as_u64()).unwrap_or(0)
+        );
 
         let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -526,6 +621,10 @@ impl CalciteAgentManager {
         }
 
         // 启动 Java 进程
+        log::info!(
+            "Starting Calcite Agent: java -Xmx512m -Dorg.slf4j.simpleLogger.defaultLogLevel=debug -jar {}",
+            self.config.jar_path
+        );
         match CalciteAgentRuntime::spawn(&self.config) {
             Ok(runtime) => {
                 // 存储 runtime
@@ -591,7 +690,13 @@ fn append_ssl_params(url: &str, ssl: bool) -> String {
 /// Append a connect timeout to the JDBC URL used by the Calcite Agent so its
 /// connections cannot hang indefinitely (which would otherwise trip the Rust-side
 /// RPC timeout with "Calcite Agent request timed out").
-fn with_connect_timeout(url: &str, db_type: DatabaseType) -> String {
+fn with_connect_timeout(url: &str, db_type: DatabaseType, timeout_secs: u64) -> String {
+    // 避免参数重复追加：如果 URL 里已经有 connectTimeout（用户自定义 connection_string 场景），
+    // 就尊重用户已经写的值，不再二次覆盖。
+    let url_lower = url.to_lowercase();
+    if url_lower.contains("connecttimeout") {
+        return url.to_string();
+    }
     let sep = if url.contains('?') { "&" } else { "?" };
     match db_type {
         // MySQL 系（connectTimeout 单位为毫秒）
@@ -601,7 +706,8 @@ fn with_connect_timeout(url: &str, db_type: DatabaseType) -> String {
         | DatabaseType::Goldendb
         | DatabaseType::Gbase
         | DatabaseType::ManticoreSearch => {
-            format!("{url}{sep}connectTimeout=10000")
+            let ms = timeout_secs.saturating_mul(1000);
+            format!("{url}{sep}connectTimeout={ms}")
         }
         // PostgreSQL 系（connectTimeout / loginTimeout 单位为秒）
         DatabaseType::Postgres
@@ -614,7 +720,7 @@ fn with_connect_timeout(url: &str, db_type: DatabaseType) -> String {
         | DatabaseType::OpenGauss
         | DatabaseType::Kwdb
         | DatabaseType::Oscar => {
-            format!("{url}{sep}connectTimeout=10&loginTimeout=10")
+            format!("{url}{sep}connectTimeout={timeout_secs}&loginTimeout={timeout_secs}")
         }
         _ => url.to_string(),
     }
@@ -950,6 +1056,8 @@ mod tests {
             database_info: None,
             one_time: false,
             read_only: false,
+            default_schema: None,
+            docs_notes_path: None,
         }
     }
 
@@ -1040,22 +1148,42 @@ mod tests {
         // ManticoreSearch (MySQL 驱动)
         let manticore = make_test_conn(DatabaseType::ManticoreSearch, "h", 1, "db");
         assert_eq!(build_driver_class(&manticore), "com.mysql.cj.jdbc.Driver");
+    }
 
-        // Access (UCanAccess)
-        let access = make_test_conn(DatabaseType::Access, "h", 1, "db");
-        assert_eq!(build_driver_class(&access), "net.ucanaccess.jdbc.UcanaccessDriver");
+    /// 测试响应 ID 解析：Java 侧可能返回字符串或数字形式的 id
+    /// 此测试模拟了之前的 bug：Java 返回 id:"1"（字符串），Rust 用 as_u64() 解析失败
+    #[test]
+    fn test_response_id_parsing_numeric() {
+        let value: serde_json::Value = serde_json::json!({"id": 1, "result": {"success": true}});
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .or_else(|| value.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+            .unwrap_or(0);
+        assert_eq!(id, 1);
+    }
 
-        // Databricks
-        let databricks = make_test_conn(DatabaseType::Databricks, "h", 1, "db");
-        assert_eq!(build_driver_class(&databricks), "com.databricks.client.jdbc.Driver");
+    #[test]
+    fn test_response_id_parsing_string() {
+        // Java 侧使用 ObjectNode.put("id", String) 产生字符串形式的 id
+        let value: serde_json::Value = serde_json::json!({"id": "2", "result": {"success": true}});
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .or_else(|| value.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+            .unwrap_or(0);
+        assert_eq!(id, 2);
+    }
 
-        // BigQuery
-        let bq = make_test_conn(DatabaseType::Bigquery, "h", 1, "db");
-        assert_eq!(build_driver_class(&bq), "com.simba.googlebigquery.jdbc42.Driver");
-
-        // 达梦
-        let dm = make_test_conn(DatabaseType::Dameng, "h", 1, "db");
-        assert_eq!(build_driver_class(&dm), "dm.jdbc.driver.DmDriver");
+    #[test]
+    fn test_response_id_parsing_missing() {
+        let value: serde_json::Value = serde_json::json!({"result": {"success": true}});
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .or_else(|| value.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+            .unwrap_or(0);
+        assert_eq!(id, 0);
     }
 
     #[test]

@@ -1771,6 +1771,11 @@ async fn execute_multi_connection_federated_query(
         let conn_config = match conn_map.get(conn_name.as_str()) {
             Some(c) => *c,
             None => {
+                log::debug!(
+                    "[federated] Connection '{}' not found, available: {:?}",
+                    conn_name,
+                    conn_map.keys().collect::<Vec<_>>()
+                );
                 return Err(QueryExecutionError::Sql(format!(
                     "Connection '{conn_name}' not found in configured connections"
                 )));
@@ -1782,6 +1787,7 @@ async fn execute_multi_connection_federated_query(
             let registered = manager.registered_connections_list().await;
             registered.contains(conn_name)
         };
+        log::debug!("[federated] Connection '{}' already_registered={}", conn_name, already_registered);
 
         if !already_registered {
             log::info!("Registering connection '{}' with Calcite Agent", conn_name);
@@ -1959,11 +1965,33 @@ pub async fn execute_sql_statement_with_options_typed(
         let all_connections: Vec<ConnectionConfig> = configs.values().cloned().collect();
         drop(configs);
 
+        log::info!(
+            "[federated] About to analyze federation: sql_len={}, connection_count={}, database={:?}",
+            effective_sql.len(),
+            all_connections.len(),
+            database
+        );
+        for conn in &all_connections {
+            log::info!(
+                "[federated]   connection: id={}, name={}, db_type={:?}, driver_profile={:?}, federation_enabled={}, database={:?}",
+                conn.id, conn.name, conn.db_type, conn.driver_profile, conn.federation_enabled, conn.database
+            );
+        }
+
         let federation_analysis = analyze_federation(&effective_sql, &all_connections);
+
+        log::info!(
+            "[federated] Analysis result: uses_federation={}, is_single_connection={}, single_connection={:?}, connections={:?}",
+            federation_analysis.uses_federation_syntax,
+            federation_analysis.is_single_connection,
+            federation_analysis.single_connection,
+            federation_analysis.connections
+        );
 
         // Validate federation access (check federation_enabled and schema visibility)
         if federation_analysis.uses_federation_syntax {
             if let Err(e) = validate_federation(&federation_analysis, &all_connections) {
+                log::info!("[federated] Federation validation failed: {e}");
                 return Err(e.to_string().into());
             }
         }
@@ -1971,11 +1999,18 @@ pub async fn execute_sql_statement_with_options_typed(
         // If single connection with federation syntax, rewrite SQL and continue normally
         if federation_analysis.is_single_connection && federation_analysis.uses_federation_syntax {
             if let Some(rewritten_sql) = rewrite_federated_sql(&effective_sql, &federation_analysis) {
-                log::debug!("Rewrote federated SQL for single connection");
+                log::info!(
+                    "[federated] Rewrote federated SQL for single connection: original={}, rewritten={}",
+                    effective_sql,
+                    rewritten_sql
+                );
                 effective_sql = rewritten_sql;
+            } else {
+                log::info!("[federated] rewrite_federated_sql returned None, using original SQL");
             }
         } else if federation_analysis.uses_federation_syntax && !federation_analysis.is_single_connection {
             // Multi-connection federated query - delegate to Calcite Agent
+            log::info!("[federated] Multi-connection federated query detected, delegating to Calcite");
             return execute_multi_connection_federated_query(
                 state,
                 &effective_sql,
@@ -1984,6 +2019,8 @@ pub async fn execute_sql_statement_with_options_typed(
                 &all_connections,
             )
             .await;
+        } else {
+            log::info!("[federated] No federation syntax detected, executing directly against pool");
         }
     }
 
@@ -1999,10 +2036,25 @@ pub async fn execute_sql_statement_with_options_typed(
     // on that tab-scoped pool so connection-level state (for example MySQL @vars)
     // survives across runs.
     let pool_database = query_pool_database(database, options.catalog.as_deref());
+    log::info!(
+        "[query] do_execute_typed: connection_id={}, db_type={:?}, database={:?}, pool_database={:?}, catalog={:?}",
+        connection_id,
+        db_type,
+        database,
+        pool_database,
+        options.catalog
+    );
+    log::info!(
+        "[query] Creating pool for session: connection_id={}, pool_database={:?}, client_session_id={:?}",
+        connection_id,
+        pool_database,
+        options.client_session_id
+    );
     let pool_key = state
         .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
         .await
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
+    log::info!("[query] Pool created/selected: pool_key={}", pool_key);
 
     if is_canceled(&cancel_token) {
         return Err(pre_dispatch_canceled_query_execution_error());

@@ -4644,6 +4644,25 @@ function validateConnectionName(name: string): string | null {
 
 const connectionNameError = computed(() => validateConnectionName(form.value.name));
 
+async function persistGlobalTimeoutDrafts() {
+  const nextConnect = normalizeGlobalConnectTimeoutSecs(editGlobalConnectTimeoutSecs.value);
+  const nextQuery = normalizeGlobalQueryTimeoutSecs(editGlobalQueryTimeoutSecs.value);
+  editGlobalConnectTimeoutSecs.value = nextConnect;
+  editGlobalQueryTimeoutSecs.value = nextQuery;
+  const connectChanged = nextConnect !== settingsStore.editorSettings.globalConnectTimeoutSecs;
+  const queryChanged = nextQuery !== settingsStore.editorSettings.globalQueryTimeoutSecs;
+  if (!connectChanged && !queryChanged) return;
+  settingsStore.updateEditorSettings({
+    globalConnectTimeoutSecs: nextConnect,
+    globalQueryTimeoutSecs: nextQuery,
+  });
+  await settingsStore.persistEditorSettings();
+  await store.applyGlobalTimeouts({
+    connectTimeoutSecs: connectChanged ? nextConnect : undefined,
+    queryTimeoutSecs: queryChanged ? nextQuery : undefined,
+  });
+}
+
 async function save() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (isSaving.value) return;

@@ -133,11 +133,20 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
     let connection_names: Vec<&str> = connections.iter().map(|c| c.name.as_str()).collect();
     let preprocessed_sql = preprocess_federated_sql(sql, &connection_names);
 
+    log::debug!(
+        "[federated] analyze_federation: sql_len={}, connection_count={}, connections=[{}], sql={}",
+        sql.len(),
+        connections.len(),
+        connection_names.join(", "),
+        sql
+    );
+
     // Parse the SQL
     let dialect = GenericDialect {};
     let statements = match Parser::parse_sql(&dialect, &preprocessed_sql) {
         Ok(stmts) => stmts,
-        Err(_) => {
+        Err(e) => {
+            log::debug!("[federated] SQL parse failed: {e}, sql={}", sql);
             // If parsing fails, return empty analysis
             return FederatedAnalysis {
                 table_refs,
@@ -148,6 +157,8 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
             };
         }
     };
+
+    log::debug!("[federated] Parsed {} statements", statements.len());
 
     // Build maps for connection lookup. Exact names take priority; a
     // case-insensitive map is the fallback so `postgresql` matches a connection
@@ -162,6 +173,13 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
         extract_table_refs(stmt, &exact_map, &insensitive_map, &mut table_refs, &mut uses_federation_syntax);
     }
 
+    log::debug!(
+        "[federated] Extracted {} table refs, federation_syntax={}, refs=[{:?}]",
+        table_refs.len(),
+        uses_federation_syntax,
+        table_refs
+    );
+
     // Deduplicate and order connections (exclude empty connection names from non-federated refs)
     let mut seen_conns = HashSet::new();
     for ref_ in &table_refs {
@@ -173,6 +191,13 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
     let is_single_connection = connections_seen.len() <= 1;
     let single_connection =
         if is_single_connection && !connections_seen.is_empty() { Some(connections_seen[0].clone()) } else { None };
+
+    log::debug!(
+        "[federated] Result: is_single_connection={}, single_connection={:?}, connections_seen={:?}",
+        is_single_connection,
+        single_connection,
+        connections_seen
+    );
 
     FederatedAnalysis {
         table_refs,
@@ -493,6 +518,8 @@ mod tests {
             production_databases: Vec::new(),
             database_info: None,
             federation_enabled: true,
+            default_schema: None,
+            docs_notes_path: None,
         }
     }
 

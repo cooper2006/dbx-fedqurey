@@ -148,6 +148,24 @@ public class CalciteAgent {
     }
 
     /**
+     * 从 JDBC URL 中解析 connectTimeout（秒），用于设置网络超时和查询超时的回退值。
+     * 如果找不到则返回默认值 defaultSeconds。
+     */
+    private static int parseIntParamFromUrl(String jdbcUrl, String paramName, int defaultSeconds) {
+        // 兼容 ?param=value& 或 &param=value& 两种位置
+        String pattern = "(?:[?&])" + paramName + "=([0-9]+)";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(jdbcUrl);
+        if (m.find()) {
+            try {
+                return Integer.parseInt(m.group(1));
+            } catch (NumberFormatException ignored) {
+                // fall through to default
+            }
+        }
+        return defaultSeconds;
+    }
+
+    /**
      * 处理注册数据源请求
      * 将 JDBC 连接注册为 Calcite 的一个 Schema
      */
@@ -162,6 +180,13 @@ public class CalciteAgent {
         }
         String driverClass = params.path("driverClass").asText("");
 
+        // 从 JDBC URL 中读取 connectTimeout（PG 系单位为秒），用于后续的网络/查询超时
+        // connectTimeout / loginTimeout 控制的是建连/登录阶段；
+        // 建连成功后还需要 setNetworkTimeout / setQueryTimeout 保护元数据查询
+        int connectTimeoutSecs = parseIntParamFromUrl(jdbcUrl, "connectTimeout", 10);
+        int networkTimeoutMs = Math.max(connectTimeoutSecs, 30) * 1000;  // 网络 I/O 超时（毫秒），至少 30 秒
+        int queryTimeoutSecs = Math.max(connectTimeoutSecs, 60);         // 单个查询超时（秒），至少 60 秒
+
         // 加载 JDBC 驱动
         if (!driverClass.isEmpty()) {
             try {
@@ -175,22 +200,40 @@ public class CalciteAgent {
         // 测试连接并获取元数据
         String databaseProduct;
         String databaseVersion;
+        logger.info("Connecting to {} with JDBC URL: {} (networkTimeoutMs={}, queryTimeoutSecs={})",
+            connectionId, jdbcUrl, networkTimeoutMs, queryTimeoutSecs);
+        long t0 = System.currentTimeMillis();
         try (Connection testConn = DriverManager.getConnection(jdbcUrl, username, password)) {
+            // 建连成功后立刻设置网络超时，保护元数据查询阶段的 socket 读写
+            try {
+                testConn.setNetworkTimeout(java.util.concurrent.Executors.newSingleThreadExecutor(), networkTimeoutMs);
+            } catch (Exception e) {
+                // 某些驱动（老版本）不支持 setNetworkTimeout，降级为仅依赖查询超时
+                logger.warn("[{}] setNetworkTimeout not supported by driver ({}), continuing without it",
+                    connectionId, e.getMessage());
+            }
+            logger.info("[{}] Got connection in {}ms, fetching metadata...",
+                connectionId, System.currentTimeMillis() - t0);
+
             DatabaseMetaData meta = testConn.getMetaData();
             databaseProduct = meta.getDatabaseProductName();
             databaseVersion = meta.getDatabaseProductVersion();
-            logger.info("Successfully connected to: {} (Product: {}, Version: {})",
-                connectionId, databaseProduct, databaseVersion);
+            logger.info("[{}] Metadata fetched in {}ms (Product: {}, Version: {})",
+                connectionId, System.currentTimeMillis() - t0, databaseProduct, databaseVersion);
         }
 
         // 存储数据源配置（使用传入的密码或哈希值）
-        DataSourceConfig config = new DataSourceConfig(connectionId, jdbcUrl, username, password, driverClass);
+        DataSourceConfig config = new DataSourceConfig(connectionId, jdbcUrl, username, password, driverClass,
+            networkTimeoutMs, queryTimeoutSecs);
 
         // Use synchronized block to ensure thread-safe registration
         synchronized (calciteLock) {
             registeredSources.put(connectionId, config);
             // 在 Calcite 中注册此数据源为一个 Schema
+            long t1 = System.currentTimeMillis();
             registerSchemaInCalcite(config);
+            logger.info("[{}] registerSchemaInCalcite finished in {}ms",
+                connectionId, System.currentTimeMillis() - t1);
         }
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -252,7 +295,6 @@ public class CalciteAgent {
                 stmt = calciteConnection.prepareStatement(rewrittenSql);
                 stmt.setMaxRows(maxRows);
                 stmt.setQueryTimeout((int) Math.min(timeoutMs / 1000, Integer.MAX_VALUE));
-
                 rs = stmt.executeQuery();
                 ResultSetMetaData rsMeta = rs.getMetaData();
                 int columnCount = rsMeta.getColumnCount();
@@ -412,17 +454,23 @@ public class CalciteAgent {
             SchemaPlus rootSchema = calciteConnection.getRootSchema();
 
             // 创建 DataSource 包装器（Calcite 的 JdbcSchema 需要 DataSource 而非 Connection）
-            javax.sql.DataSource dataSource = new SimpleDataSource(config.jdbcUrl, config.username, config.password);
+            SimpleDataSource dataSource = new SimpleDataSource(
+                config.jdbcUrl, config.username, config.password,
+                config.networkTimeoutMs, config.queryTimeoutSecs);
 
             // 查询数据库默认 Schema（H2 为 "PUBLIC"，PostgreSQL 为 "public" 等）
             String defaultSchema;
+            long t0 = System.currentTimeMillis();
             try (Connection metaConn = dataSource.getConnection()) {
                 defaultSchema = metaConn.getSchema();
+                logger.info("[{}] Resolved default schema '{}' in {}ms",
+                    config.connectionId, defaultSchema, System.currentTimeMillis() - t0);
             }
 
             // 使用 connectionId 作为 JdbcSchema 的唯一名称
             // 这样每个连接的 JdbcConvention 名称不同，避免 Calcite 优化器规则冲突
             // （多个名为 "PUBLIC" 的子 Schema 会导致 JdbcToEnumerableConverterRule 重复注册）
+            long t1 = System.currentTimeMillis();
             JdbcSchema jdbcSchema = JdbcSchema.create(
                 rootSchema,
                 config.connectionId,  // 唯一名称 → 唯一 Convention
@@ -430,6 +478,8 @@ public class CalciteAgent {
                 null,           // catalog - 使用默认
                 defaultSchema   // 数据库默认 Schema
             );
+            logger.info("[{}] JdbcSchema.create() finished in {}ms",
+                config.connectionId, System.currentTimeMillis() - t1);
 
             rootSchema.add(config.connectionId, jdbcSchema);
 
@@ -572,40 +622,72 @@ public class CalciteAgent {
         final String username;
         final String password;
         final String driverClass;
+        /** 网络 I/O 超时（毫秒），用于 setNetworkTimeout */
+        final int networkTimeoutMs;
+        /** 查询级超时（秒），用于 Statement.setQueryTimeout */
+        final int queryTimeoutSecs;
 
         DataSourceConfig(String connectionId, String jdbcUrl, String username,
-                        String password, String driverClass) {
+                        String password, String driverClass,
+                        int networkTimeoutMs, int queryTimeoutSecs) {
             this.connectionId = connectionId;
             this.jdbcUrl = jdbcUrl;
             this.username = username;
             this.password = password;
             this.driverClass = driverClass;
+            this.networkTimeoutMs = networkTimeoutMs;
+            this.queryTimeoutSecs = queryTimeoutSecs;
         }
     }
 
     /**
      * 简单的 DataSource 实现，用于将 DriverManager 连接包装为 DataSource
-     * Calcite 的 JdbcSchema 需要 DataSource 接口
+     * Calcite 的 JdbcSchema 需要 DataSource 接口。
+     *
+     * 每次创建的 Connection 都会自动应用 networkTimeout 和 statement 查询超时，
+     * 确保 JdbcSchema 在加载元数据时不会因大库慢查询无限阻塞。
      */
     public static class SimpleDataSource implements javax.sql.DataSource {
         private final String jdbcUrl;
         private final String username;
         private final String password;
+        private final int networkTimeoutMs;
+        private final int queryTimeoutSecs;
+        /** 共享的网络超时执行器（线程池按需创建，由 JVM 退出回收） */
+        private static final java.util.concurrent.ExecutorService NETWORK_TIMEOUT_EXECUTOR =
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "calcite-net-timeout");
+                t.setDaemon(true);
+                return t;
+            });
 
-        SimpleDataSource(String jdbcUrl, String username, String password) {
+        SimpleDataSource(String jdbcUrl, String username, String password,
+                         int networkTimeoutMs, int queryTimeoutSecs) {
             this.jdbcUrl = jdbcUrl;
             this.username = username;
             this.password = password;
+            this.networkTimeoutMs = networkTimeoutMs;
+            this.queryTimeoutSecs = queryTimeoutSecs;
+        }
+
+        private Connection configure(Connection conn) throws SQLException {
+            // 1) 网络层面 socket 读超时（保护 JDBC 元数据调用期间的 I/O）
+            try {
+                conn.setNetworkTimeout(NETWORK_TIMEOUT_EXECUTOR, networkTimeoutMs);
+            } catch (SQLFeatureNotSupportedException | AbstractMethodError ignored) {
+                // 老驱动不支持，静默降级
+            }
+            return conn;
         }
 
         @Override
         public Connection getConnection() throws SQLException {
-            return DriverManager.getConnection(jdbcUrl, username, password);
+            return configure(DriverManager.getConnection(jdbcUrl, username, password));
         }
 
         @Override
         public Connection getConnection(String username, String password) throws SQLException {
-            return DriverManager.getConnection(jdbcUrl, username, password);
+            return configure(DriverManager.getConnection(jdbcUrl, username, password));
         }
 
         @Override

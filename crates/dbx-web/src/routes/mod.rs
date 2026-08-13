@@ -6,6 +6,7 @@ pub mod connection;
 pub mod consul;
 pub mod data_compare;
 pub mod database_export;
+pub mod debug_log;
 pub mod dialect;
 pub mod docs;
 pub mod document_store;
