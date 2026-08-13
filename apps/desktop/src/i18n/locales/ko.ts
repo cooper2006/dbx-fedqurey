@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ko";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2416,6 +2417,7 @@ export default withEnglishFallback({
     userAdmin: "사용자 및 권한",
     openUserAdmin: "사용자 및 권한 열기",
     processList: "프로세스 목록",
+    sqlServerTrace: "활동 추적",
     serverDashboard: "서버 대시보드",
     damengJobAdmin: "Dameng 에이전트 작업",
     openDamengJobAdmin: "Dameng 에이전트 작업 열기",
@@ -3584,6 +3586,7 @@ export default withEnglishFallback({
     },
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "경로 접두사, 예: /app/",
     newKey: "새 Znode",
@@ -3693,6 +3696,9 @@ export default withEnglishFallback({
     columnTTL: "TTL",
     binaryStringReadonlyHint: "바이너리 문자열 값은 읽기 전용 모드에서 이스케이프된 텍스트로 표시되며, 원시 바이트 편집은 지원되지 않습니다.",
     selectedKeys: "선택한 키",
+    selectAllLoaded: "전체 선택",
+    selectAllLoadedTitle: "모든 키 선택 (Ctrl/Cmd+A)",
+    deselectAll: "지우기",
     selectLoadedGroupKeys: "로드된 {count}개 일치 키 선택",
     loadedMatchingKeys: "로드된 일치 키 {count}개",
     fuzzyTreeLimit: "{count}개의 퍼지 일치가 브라우저 응답성을 유지하기 위해 평면 목록으로 표시됩니다. 계층 구조를 보려면 검색을 좁히세요.",
@@ -4660,6 +4666,9 @@ export default withEnglishFallback({
     deployToServer: "서버에 배포",
     deployConfirmTitle: "최종 확인",
     deployConfirmMessage: "다음 변경 사항을 대상 데이터베이스에 배포하려고 합니다",
+    destructiveSqlDetected: "파괴적인 작업 {count}개가 감지되었습니다. 명시적인 확인이 필요합니다",
+    compatibilityWarnings: "호환성 경고",
+    compatibilityWarningsDetected: "호환성 경고: {count}개",
     targetServer: "대상 서버",
     dbVersion: "데이터베이스 버전",
     targetDatabase: "대상 데이터베이스",
@@ -4688,6 +4697,7 @@ export default withEnglishFallback({
       sequence: "시퀀스",
       rule: "룰",
       owner: "소유자",
+      column: "열",
       index: "인덱스",
       foreignKey: "외래 키",
       trigger: "트리거",
@@ -5120,6 +5130,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "전체 행 수 자동 집계",
     autoCalculateTotalRowsDescription: "각 쿼리 후 자동으로 COUNT(*)를 실행하여 일치하는 전체 행 수를 표시합니다. 대규모 쿼리를 빠르게 유지하기 위해 기본적으로 꺼져 있으며, 결과 푸터에서 요청 시 집계할 수 있습니다.",
     infiniteScrollDescription: "목록 하단으로 스크롤할 때 다음 데이터 묶음을 자동으로 불러옵니다.",
+    flatteningMultiLineText: "멀티라인 텍스트 단순화",
+    flatteningMultiLineTextDescription: "다중 행 텍스트를 단일 행으로 병합하여 표시하고, 개행 문자는 ¶로 표시합니다.",
     tableColumnTemplateFields: "새 테이블 미리 정의된 필드",
     tableColumnTemplateFieldsDescription: "데이터베이스 유형을 선택한 다음 새 테이블을 만들 때 사용할 미리 정의된 필드 타입을 구성하세요.",
     tableColumnTemplateAdd: "필드 추가",

@@ -76,6 +76,7 @@ import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguPublicSynonymTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
+import { qualifiedTableName } from "@/lib/table/tableSelectSql";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
 import {
   canCreateConnectionNamespace,
@@ -1293,6 +1294,18 @@ async function openProcessList() {
   }
 }
 
+async function openSqlServerActivityTrace() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openSqlServerActivityTrace(node.connectionId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
 async function openServerDashboard() {
   const node = activeNode.value;
   if (!node.connectionId) return;
@@ -1528,6 +1541,7 @@ async function generateDdlTemplate() {
         const result = await api.getObjectSource(target.connectionId, target.database, schema, target.label, "VIEW");
         return buildViewDdl({
           databaseType: databaseTypeForNode(target),
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
           schema,
           name: target.label,
           source: result.source,
@@ -3474,7 +3488,17 @@ function createView() {
   connectionStore.activeConnectionId = node.connectionId;
   const viewName = "new_view";
   const effectiveDbType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId));
-  const viewSqlName = effectiveDbType === "informix" || !node.schema ? viewName : `${node.schema}.${viewName}`;
+  // Quote the schema/name with the driver-reported identifier quote so
+  // hyphenated schemas (Kingbase MySQL compat) render as valid identifiers.
+  const viewSqlName =
+    effectiveDbType === "informix" || !node.schema
+      ? viewName
+      : qualifiedTableName({
+          databaseType: effectiveDbType,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
+          schema: node.schema,
+          tableName: viewName,
+        });
   const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema, undefined, node.catalog);
   queryStore.updateSql(tabId, `CREATE VIEW ${viewSqlName} AS\nSELECT\n  *\nFROM table_name;\n`);
   queryStore.setObjectSource(tabId, {
@@ -4183,6 +4207,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
+    }
+    if (currentDatabaseType() === "sqlserver") {
+      items.push({ label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
     }
     if (node.connectionId && (currentDatabaseType() === "nacos" || connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
       items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });

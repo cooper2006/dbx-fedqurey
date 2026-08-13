@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ja";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2806,6 +2807,7 @@ export default withEnglishFallback({
     manageExtension: "拡張機能を管理...",
     dropExtension: "拡張機能を削除",
     processList: "プロセス一覧",
+    sqlServerTrace: "アクティビティ追跡",
     serverDashboard: "サーバーダッシュボード",
     createProcedure: "新規ストアドプロシージャ",
     createFunction: "新規関数",
@@ -2882,6 +2884,7 @@ export default withEnglishFallback({
     buckets: "バケット",
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "パスプレフィックス（例: /app/）",
     newKey: "新しいZnode",
@@ -4068,6 +4071,9 @@ export default withEnglishFallback({
     columnTTL: "TTL",
     binaryStringReadonlyHint: "バイナリ文字列値は読み取り専用モードでエスケープテキストとして表示されます。生バイトの編集はサポートされていません。",
     selectedKeys: "選択中のキー",
+    selectAllLoaded: "すべて選択",
+    selectAllLoadedTitle: "すべてのキーを選択（Ctrl/Cmd+A）",
+    deselectAll: "クリア",
     selectLoadedGroupKeys: "読み込み済みの一致キー {count} 件を選択",
     loadedMatchingKeys: "読み込み済みの一致キー {count} 件",
     fuzzyTreeLimit: "ブラウザーの応答性を保つため、あいまい一致 {count} 件をフラットな一覧で表示しています。階層を表示するには検索条件を絞り込んでください。",
@@ -4937,6 +4943,9 @@ export default withEnglishFallback({
     deployToServer: "サーバーにデプロイ",
     deployConfirmTitle: "最終確認",
     deployConfirmMessage: "以下の変更をターゲットデータベースにデプロイしようとしています",
+    destructiveSqlDetected: "{count} 件の破壊的操作を検出しました。実行には明示的な確認が必要です",
+    compatibilityWarnings: "互換性に関する警告",
+    compatibilityWarningsDetected: "互換性に関する警告: {count} 件",
     targetServer: "ターゲットサーバー",
     dbVersion: "データベースバージョン",
     targetDatabase: "ターゲットデータベース",
@@ -4961,6 +4970,7 @@ export default withEnglishFallback({
       sequence: "シーケンス",
       rule: "ルール",
       owner: "所有者",
+      column: "カラム",
       index: "インデックス",
       foreignKey: "外部キー",
       trigger: "トリガー",
@@ -5802,6 +5812,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "総行数を自動計算",
     autoCalculateTotalRowsDescription: "クエリごとに COUNT(*) を自動実行し、一致する総行数を表示します。大きなクエリを高速に保つため既定はオフです。結果フッターから必要に応じて計算できます。",
     infiniteScrollDescription: "末尾までスクロールしたときに、次のデータを自動的に読み込みます。",
+    flatteningMultiLineText: "多行テキストを展開",
+    flatteningMultiLineTextDescription: "複数行のテキストを1行に結合して表示し、改行文字は¶として表示する。",
     regexMaxMatchCount: "すべての一致を選択する最大数",
     regexMaxMatchCountDescription: "「すべての一致を選択」で一度に作成する選択範囲の数を制限します。検索の一致数は完全に集計されます（100〜10000）。",
     exportRowLimitEnabled: "エクスポート行数を制限",

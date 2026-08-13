@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/it";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 const consul = {
   ...consulUiMessages,
   prefixPlaceholder: "Key prefix, e.g. app/ or services/",
@@ -2778,6 +2779,7 @@ export default withEnglishFallback({
     manageExtension: "Gestisci estensione...",
     dropExtension: "Elimina estensione",
     processList: "Elenco processi",
+    sqlServerTrace: "Tracciamento attività",
     serverDashboard: "Dashboard del server",
     createProcedure: "Nuovo stored procedure",
     createFunction: "Nuova funzione",
@@ -3912,6 +3914,7 @@ export default withEnglishFallback({
     },
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "Prefisso percorso, es. /app/",
     newKey: "Nuovo Znode",
@@ -4037,6 +4040,9 @@ export default withEnglishFallback({
     columnTTL: "TTL",
     binaryStringReadonlyHint: "I valori delle stringhe binarie sono mostrati come testo con escape in modalità sola lettura; la modifica dei byte grezzi non è supportata.",
     selectedKeys: "Chiavi selezionate",
+    selectAllLoaded: "Seleziona tutto",
+    selectAllLoadedTitle: "Seleziona tutte le chiavi (Ctrl/Cmd+A)",
+    deselectAll: "Cancella",
     selectLoadedGroupKeys: "Seleziona {count} chiavi corrispondenti caricate",
     loadedMatchingKeys: "{count} chiavi corrispondenti caricate",
     fuzzyTreeLimit: "{count} corrispondenze fuzzy sono mostrate come elenco piatto per mantenere il browser reattivo. Restringi la ricerca per vedere la gerarchia.",
@@ -4916,6 +4922,9 @@ export default withEnglishFallback({
     deployToServer: "Distribuisci sul Server",
     deployConfirmTitle: "Conferma Finale",
     deployConfirmMessage: "Stai per distribuire le seguenti modifiche al database di destinazione",
+    destructiveSqlDetected: "Rilevate {count} operazioni distruttive; è richiesta una conferma esplicita",
+    compatibilityWarnings: "Avvisi di compatibilità",
+    compatibilityWarningsDetected: "Avvisi di compatibilità: {count}",
     targetServer: "Server Destinazione",
     dbVersion: "Versione Database",
     targetDatabase: "Database Destinazione",
@@ -4944,6 +4953,7 @@ export default withEnglishFallback({
       sequence: "Sequenza",
       rule: "Regola",
       owner: "Proprietario",
+      column: "Colonna",
       index: "Indice",
       foreignKey: "Chiave Esterna",
       trigger: "Trigger",
@@ -5376,6 +5386,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "Calcola automaticamente il totale delle righe",
     autoCalculateTotalRowsDescription: "Esegue COUNT(*) automaticamente dopo ogni query per mostrare il totale delle righe corrispondenti. Disattivato per impostazione predefinita per mantenere veloci le query grandi; puoi calcolarlo all'occorrenza dal piè di pagina dei risultati.",
     infiniteScrollDescription: "Carica automaticamente il blocco successivo quando scorri fino in fondo.",
+    flatteningMultiLineText: "Pianifica automaticamente i testi multi-riga",
+    flatteningMultiLineTextDescription: "Se attivo, i testi multi-riga nei risultati vengono automaticamente pianificati in una singola colonna.",
     regexMaxMatchCount: "Numero massimo di corrispondenze per Seleziona tutte",
     regexMaxMatchCountDescription: "Limita il numero di selezioni create da Seleziona tutte le corrispondenze; il conteggio della ricerca rimane completo (100–10000).",
     tableColumnTemplateFields: "Campi predefiniti per nuove tabelle",

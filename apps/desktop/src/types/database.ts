@@ -91,9 +91,9 @@ export interface SqlSnippet {
   enabled?: boolean;
 }
 
-export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column";
+export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
 
-export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "object";
+export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "sequence" | "object";
 
 export type CompletionAssistantMatchMode = "prefix" | "contains";
 
@@ -1183,6 +1183,7 @@ export interface QueryTab {
     | "dameng-roles"
     | "dameng-jobs"
     | "processlist"
+    | "sqlserver-trace"
     | "mysql-dashboard"
     | "postgres-dashboard";
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
@@ -1302,6 +1303,7 @@ export interface SavedSqlFile {
   folderId?: string;
   name: string;
   database: string;
+  catalog?: string;
   schema?: string;
   sql: string;
   sqlLoaded?: boolean;

@@ -929,6 +929,7 @@ export async function executeMulti(
     pageSize?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -971,6 +972,7 @@ export async function executeMultiWithProgress(
     pageSize?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1038,12 +1040,13 @@ export async function executeScript(connectionId: string, database: string, sql:
   });
 }
 
-export async function executeScriptWith2pc(connectionId: string, database: string, statements: string[], schema?: string): Promise<any> {
+export async function executeScriptWith2pc(connectionId: string, database: string, statements: string[], schema?: string, destructiveConfirmed = false): Promise<any> {
   return post("/api/query/execute-script-2pc", {
     connectionId,
     database,
     statements,
     schema,
+    destructiveConfirmed,
   });
 }
 

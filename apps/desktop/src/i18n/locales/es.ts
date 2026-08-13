@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/es";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2780,6 +2781,7 @@ export default withEnglishFallback({
     manageExtension: "Administrar extensión...",
     dropExtension: "Eliminar extensión",
     processList: "Lista de procesos",
+    sqlServerTrace: "Seguimiento de actividad",
     serverDashboard: "Panel de control del servidor",
     createProcedure: "Nuevo procedimiento almacenado",
     createFunction: "Nueva función",
@@ -3914,6 +3916,7 @@ export default withEnglishFallback({
     },
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "Prefijo de ruta, ej. /app/",
     newKey: "Nuevo Znode",
@@ -4039,6 +4042,9 @@ export default withEnglishFallback({
     columnTTL: "TTL",
     binaryStringReadonlyHint: "Los valores de cadena binaria se muestran como texto escapado en modo de solo lectura; la edición de bytes sin procesar no está disponible.",
     selectedKeys: "Claves seleccionadas",
+    selectAllLoaded: "Seleccionar todo",
+    selectAllLoadedTitle: "Seleccionar todas las claves (Ctrl/Cmd+A)",
+    deselectAll: "Borrar",
     selectLoadedGroupKeys: "Seleccionar {count} claves coincidentes cargadas",
     loadedMatchingKeys: "{count} claves coincidentes cargadas",
     fuzzyTreeLimit: "Se muestran {count} coincidencias difusas como lista plana para mantener el navegador responsivo. Refina la búsqueda para ver la jerarquía.",
@@ -4916,6 +4922,9 @@ export default withEnglishFallback({
     deployToServer: "Desplegar en servidor",
     deployConfirmTitle: "Confirmación final",
     deployConfirmMessage: "Estás a punto de desplegar los siguientes cambios en la base de datos de destino",
+    destructiveSqlDetected: "Se detectaron {count} operaciones destructivas; se requiere confirmación explícita",
+    compatibilityWarnings: "Advertencias de compatibilidad",
+    compatibilityWarningsDetected: "Advertencias de compatibilidad: {count}",
     targetServer: "Servidor de destino",
     dbVersion: "Versión de base de datos",
     targetDatabase: "Base de datos de destino",
@@ -4944,6 +4953,7 @@ export default withEnglishFallback({
       sequence: "Secuencia",
       rule: "Regla",
       owner: "Propietario",
+      column: "Columna",
       index: "Índice",
       foreignKey: "Clave foránea",
       trigger: "Disparador",
@@ -5376,6 +5386,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "Calcular automáticamente el total de filas",
     autoCalculateTotalRowsDescription: "Ejecuta COUNT(*) automáticamente tras cada consulta para mostrar el total de filas coincidentes. Desactivado por defecto para mantener rápidas las consultas grandes; puedes calcularlo cuando quieras desde el pie de resultados.",
     infiniteScrollDescription: "Carga automáticamente el siguiente lote al desplazarse hasta el final.",
+    flatteningMultiLineText: "Aplastar texto multilínea",
+    flatteningMultiLineTextDescription: "El texto multilínea se fusiona en una sola línea de visualización, con los saltos de línea mostrados como ¶ .",
     regexMaxMatchCount: "Máximo de coincidencias al seleccionar todas",
     regexMaxMatchCountDescription: "Limita el número de selecciones creadas por Seleccionar todas las coincidencias; el conteo de búsqueda permanece completo (100–10000).",
     tableColumnTemplateFields: "Campos predefinidos para tablas nuevas",

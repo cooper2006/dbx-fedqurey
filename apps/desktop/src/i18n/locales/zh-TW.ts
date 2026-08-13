@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-TW";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2779,6 +2780,7 @@ export default withEnglishFallback({
     manageExtension: "管理擴展...",
     dropExtension: "刪除擴展",
     processList: "處理程序清單",
+    sqlServerTrace: "活動追蹤",
     serverDashboard: "伺服器儀表板",
     createProcedure: "新增儲存程序",
     createFunction: "新增函數",
@@ -3384,6 +3386,9 @@ export default withEnglishFallback({
     columnTTL: "TTL",
     binaryStringReadonlyHint: "二進位字串值會以逸出文字唯讀顯示；不支援編輯原始位元組。",
     selectedKeys: "已選擇的 key",
+    selectAllLoaded: "全選",
+    selectAllLoadedTitle: "全選 key（Ctrl/Cmd+A）",
+    deselectAll: "清除",
     selectLoadedGroupKeys: "選取已載入的 {count} 個相符 key",
     loadedMatchingKeys: "已載入的 {count} 個相符 key",
     fuzzyTreeLimit: "已載入 {count} 個模糊相符 key。為保持瀏覽器回應，目前以扁平清單顯示；請縮小搜尋範圍以查看層級。",
@@ -4235,6 +4240,7 @@ export default withEnglishFallback({
       sequence: "序列",
       rule: "規則",
       owner: "擁有者",
+      column: "欄位",
       index: "索引",
       foreignKey: "外鍵",
       trigger: "觸發器",
@@ -4269,6 +4275,9 @@ export default withEnglishFallback({
     deployToServer: "部署到伺服器",
     deployConfirmTitle: "最終確認",
     deployConfirmMessage: "您即將對目標資料庫部署以下變更",
+    destructiveSqlDetected: "偵測到 {count} 個破壞性操作，確認後才允許執行",
+    compatibilityWarnings: "相容性警告",
+    compatibilityWarningsDetected: "相容性警告：{count}",
     targetServer: "目標伺服器",
     dbVersion: "資料庫版本",
     confirmDeploy: "確認部署",
@@ -4716,6 +4725,8 @@ export default withEnglishFallback({
     autoCalculateTotalRows: "自動統計總筆數",
     autoCalculateTotalRowsDescription: "每次查詢後自動執行 COUNT(*) 顯示符合的總筆數。預設關閉以確保大型查詢速度 —— 可在結果列按需手動統計。",
     infiniteScrollDescription: "滾動到底部時自動載入下一批資料，無需手動翻頁或載入。",
+    flatteningMultiLineText: "扁平多行文本",
+    flatteningMultiLineTextDescription: "多行文本合併為單行顯示，換行符顯示為 ¶ 。",
     regexMaxMatchCount: "全部選取最大數量",
     regexMaxMatchCountDescription: "限制「全部選取」一次建立的選取範圍數量；搜尋符合結果仍會完整統計（100–10000）。",
     tableColumnTemplateFields: "新建表預設欄位",
@@ -6384,6 +6395,7 @@ export default withEnglishFallback({
     },
   },
   consul,
+  sqlServerTrace,
   zookeeper: {
     prefixPlaceholder: "路徑前綴，例如 /app/",
     newKey: "新增 Znode",

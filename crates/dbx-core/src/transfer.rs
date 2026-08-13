@@ -5332,10 +5332,51 @@ where
     }
     Ok(outcome)
 }
+fn postgres_transfer_routine_catalog_capability_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_attribute \
+       WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
+         AND attname = 'prokind' \
+         AND NOT attisdropped \
+     )"
+}
+
+async fn postgres_transfer_has_prokind(state: &AppState, pool_key: &str) -> Result<bool, String> {
+    let result = execute_read_on_pool(state, pool_key, postgres_transfer_routine_catalog_capability_sql()).await?;
+    result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|value| value.as_bool().or_else(|| value.as_str().and_then(|value| value.parse().ok())))
+        .ok_or_else(|| "Failed to inspect PostgreSQL routine catalog capabilities".to_string())
+}
+
+fn postgres_transfer_routine_catalog_sql(has_prokind: bool) -> (&'static str, &'static str) {
+    if has_prokind {
+        ("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END", "p.prokind IN ('p','f')")
+    } else {
+        ("'FUNCTION'", "NOT p.proisagg AND NOT p.proiswindow")
+    }
+}
+
+fn postgres_transfer_routines_sql(schema: &str, has_prokind: bool) -> String {
+    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    format!(
+        "SELECT p.proname, {routine_kind}, pg_get_functiondef(p.oid) \
+         FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = {schema} AND {routine_filter} \
+         ORDER BY CASE WHEN {routine_kind} = 'PROCEDURE' THEN 0 ELSE 1 END, p.proname, p.oid",
+        schema = quote_string_literal(schema),
+    )
+}
+
 async fn get_postgres_schema_object_sources_for_transfer(
     state: &AppState,
     pool_key: &str,
     schema: &str,
+    has_prokind: bool,
 ) -> Result<Vec<db::ObjectSource>, String> {
     let views_sql = format!(
         "SELECT c.relname, pg_get_viewdef(c.oid, true) \
@@ -5345,14 +5386,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
          ORDER BY c.relname",
         quote_string_literal(schema)
     );
-    let routines_sql = format!(
-        "SELECT p.proname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, pg_get_functiondef(p.oid) \
-         FROM pg_catalog.pg_proc p \
-         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.prokind IN ('p', 'f') \
-         ORDER BY CASE p.prokind WHEN 'p' THEN 0 ELSE 1 END, p.proname, p.oid",
-        quote_string_literal(schema)
-    );
+    let routines_sql = postgres_transfer_routines_sql(schema, has_prokind);
 
     let mut sources = Vec::new();
     for row in execute_on_pool(state, pool_key, &views_sql).await?.rows {
@@ -5589,16 +5623,16 @@ async fn get_postgres_policy_statements_for_transfer(
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
-async fn get_postgres_ownership_statements_for_transfer(
-    state: &AppState,
-    pool_key: &str,
+fn postgres_transfer_ownership_statements_sql(
     source_schema: &str,
     target_schema: &str,
     tables: &[String],
-) -> Result<Vec<PostgresOwnershipStatement>, String> {
+    has_prokind: bool,
+) -> String {
     let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
     let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let sql = format!(
+    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    format!(
         "WITH relation_owners AS ( \
              SELECT CASE c.relkind \
                       WHEN 'm' THEN format('ALTER MATERIALIZED VIEW %I.%I OWNER TO ', {target_schema}, c.relname) \
@@ -5614,12 +5648,11 @@ async fn get_postgres_ownership_statements_for_transfer(
          ), \
          routine_owners AS ( \
              SELECT format('ALTER %s %I.%I(%s) OWNER TO ', \
-                           CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
-                           {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid)) AS stmt_prefix, \
+                           {routine_kind}, {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid)) AS stmt_prefix, \
                     pg_get_userbyid(p.proowner) AS owner_name \
              FROM pg_catalog.pg_proc p \
              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-             WHERE n.nspname = {source_schema} AND p.prokind IN ('p','f') \
+             WHERE n.nspname = {source_schema} AND {routine_filter} \
          ), \
          type_owners AS ( \
              SELECT format('ALTER %s %I.%I OWNER TO ', \
@@ -5642,7 +5675,18 @@ async fn get_postgres_ownership_statements_for_transfer(
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
         table_filter = table_filter,
-    );
+    )
+}
+
+async fn get_postgres_ownership_statements_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    source_schema: &str,
+    target_schema: &str,
+    tables: &[String],
+    has_prokind: bool,
+) -> Result<Vec<PostgresOwnershipStatement>, String> {
+    let sql = postgres_transfer_ownership_statements_sql(source_schema, target_schema, tables, has_prokind);
     Ok(result_rows_to_postgres_ownership_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -5691,6 +5735,7 @@ pub async fn preview_transfer_ownership(
         return Ok(TransferOwnershipPreview { missing_owners: Vec::new(), target_owner: String::new() });
     }
 
+    let has_prokind = postgres_transfer_has_prokind(state, source_pool_key).await?;
     let relation_names = postgres_transfer_relation_names(request);
     let statements = get_postgres_ownership_statements_for_transfer(
         state,
@@ -5698,6 +5743,7 @@ pub async fn preview_transfer_ownership(
         &request.source_schema,
         &request.target_schema,
         &relation_names,
+        has_prokind,
     )
     .await?;
     let roles = distinct_postgres_ownership_roles(&statements);
@@ -5712,16 +5758,16 @@ pub async fn preview_transfer_ownership(
     Ok(TransferOwnershipPreview { missing_owners, target_owner })
 }
 
-async fn get_postgres_grant_statements_for_transfer(
-    state: &AppState,
-    pool_key: &str,
+fn postgres_transfer_grant_statements_sql(
     source_schema: &str,
     target_schema: &str,
     tables: &[String],
-) -> Result<Vec<String>, String> {
+    has_prokind: bool,
+) -> String {
     let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
     let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let sql = format!(
+    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    format!(
         "WITH schema_grants AS ( \
              SELECT format( \
                  'GRANT %s ON SCHEMA %I TO %s%s', \
@@ -5759,20 +5805,22 @@ async fn get_postgres_grant_statements_for_transfer(
              SELECT format( \
                  'GRANT %s ON %s %I.%I(%s) TO %s%s', \
                  string_agg(privilege_type, ', ' ORDER BY privilege_type), \
-                 CASE WHEN prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
+                 routine_kind, \
                  {target_schema}, proname, identity_args, \
                  CASE WHEN grantee = 0 THEN 'PUBLIC' ELSE quote_ident(rolname) END, \
                  CASE WHEN bool_or(is_grantable) THEN ' WITH GRANT OPTION' ELSE '' END \
              ) AS stmt \
              FROM ( \
-                 SELECT p.proname, p.prokind, pg_get_function_identity_arguments(p.oid) AS identity_args, a.grantee, a.privilege_type, a.is_grantable, grantee.rolname \
+                 SELECT p.proname, {routine_kind} AS routine_kind, \
+                        pg_get_function_identity_arguments(p.oid) AS identity_args, a.grantee, a.privilege_type, \
+                        a.is_grantable, grantee.rolname \
                  FROM pg_catalog.pg_proc p \
                  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
                  JOIN LATERAL aclexplode(p.proacl) a ON true \
                  LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee \
-                 WHERE n.nspname = {source_schema} AND p.prokind IN ('p','f') \
+                 WHERE n.nspname = {source_schema} AND {routine_filter} \
              ) routines \
-             GROUP BY proname, prokind, identity_args, grantee, rolname \
+             GROUP BY proname, routine_kind, identity_args, grantee, rolname \
          ) \
          SELECT stmt FROM ( \
              SELECT stmt FROM schema_grants \
@@ -5783,7 +5831,18 @@ async fn get_postgres_grant_statements_for_transfer(
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
         table_filter = table_filter,
-    );
+    )
+}
+
+async fn get_postgres_grant_statements_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    source_schema: &str,
+    target_schema: &str,
+    tables: &[String],
+    has_prokind: bool,
+) -> Result<Vec<String>, String> {
+    let sql = postgres_transfer_grant_statements_sql(source_schema, target_schema, tables, has_prokind);
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -6892,9 +6951,11 @@ where
         return Ok(TransferObjectOutcome::default());
     }
 
+    let has_prokind = postgres_transfer_has_prokind(state, source_pool_key).await?;
     let mut outcome = TransferObjectOutcome::default();
     let object_sources = filter_object_sources_by_selection(
-        get_postgres_schema_object_sources_for_transfer(state, source_pool_key, &request.source_schema).await?,
+        get_postgres_schema_object_sources_for_transfer(state, source_pool_key, &request.source_schema, has_prokind)
+            .await?,
         &request.objects,
     );
     let materialized_views =
@@ -6935,6 +6996,7 @@ where
             &request.source_schema,
             &request.target_schema,
             &relation_names,
+            has_prokind,
         )
         .await?
     };
@@ -6957,6 +7019,7 @@ where
         &request.source_schema,
         &request.target_schema,
         &relation_names,
+        has_prokind,
     )
     .await?;
     let materialized_view_step_count = materialized_views
@@ -8070,6 +8133,55 @@ mod tests {
 
     mod transfer_postgres_executor_tests {
         use super::*;
+
+        #[test]
+        fn postgres_transfer_routine_catalog_probe_checks_prokind() {
+            let sql = postgres_transfer_routine_catalog_capability_sql();
+
+            assert!(sql.contains("attrelid = 'pg_catalog.pg_proc'::regclass"));
+            assert!(sql.contains("attname = 'prokind'"));
+            assert!(sql.contains("NOT attisdropped"));
+        }
+
+        #[test]
+        fn postgres_transfer_routine_sources_support_legacy_catalogs() {
+            let modern = postgres_transfer_routines_sql("public", true);
+            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
+            assert!(modern.contains("p.prokind IN ('p','f')"));
+            assert!(!modern.contains("p.proisagg"));
+
+            let legacy = postgres_transfer_routines_sql("public", false);
+            assert!(!legacy.contains("prokind"));
+            assert!(legacy.contains("'FUNCTION'"));
+            assert!(legacy.contains("NOT p.proisagg"));
+            assert!(legacy.contains("NOT p.proiswindow"));
+        }
+
+        #[test]
+        fn postgres_transfer_ownership_supports_legacy_catalogs() {
+            let modern = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], true);
+            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
+            assert!(modern.contains("p.prokind IN ('p','f')"));
+
+            let legacy = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], false);
+            assert!(!legacy.contains("prokind"));
+            assert!(legacy.contains("'FUNCTION'"));
+            assert!(legacy.contains("NOT p.proisagg"));
+            assert!(legacy.contains("NOT p.proiswindow"));
+        }
+
+        #[test]
+        fn postgres_transfer_grants_support_legacy_catalogs() {
+            let modern = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], true);
+            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
+            assert!(modern.contains("p.prokind IN ('p','f')"));
+
+            let legacy = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], false);
+            assert!(!legacy.contains("prokind"));
+            assert!(legacy.contains("'FUNCTION' AS routine_kind"));
+            assert!(legacy.contains("NOT p.proisagg"));
+            assert!(legacy.contains("NOT p.proiswindow"));
+        }
 
         #[test]
         fn filters_postgres_object_sources_by_selection() {
