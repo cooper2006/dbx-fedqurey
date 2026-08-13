@@ -3,7 +3,7 @@
  *
  * This module provides SQL formatting capabilities aware of federated queries.
  * It handles:
- * 1. Preserving federation syntax (connection.schema.table)
+ * 1. Preserving federation syntax (connection.database.table)
  * 2. Formatting with proper quoting based on database dialect
  * 3. Reformatting federated references correctly
  */
@@ -11,7 +11,7 @@
 import type { SqlFormatDialect } from "./sqlFormatter";
 
 /**
- * Pattern to match federated table references: connection.schema.table or connection.database.schema.table
+ * Pattern to match federated table references: connection.database.table or connection.database.schema.table
  * Handles both plain identifiers (user, public) and double-quoted identifiers ("public", "database_connection").
  * A segment is either: [A-Za-z_]\w* (plain) or "[^"]*" (quoted).
  */

@@ -7655,7 +7655,7 @@ export default withEnglishFallback({
     disabled: "未启用联邦查询",
     hint: "此连接支持跨多个数据库的联邦查询",
     requiresCalcite: "跨多连接的联邦查询需要启动 Apache Calcite Agent",
-    syntaxHint: "使用语法：connection.schema.table 进行联邦查询",
+    syntaxHint: "使用语法：connection.database.table 进行联邦查询",
     connections: "个连接",
     singleConnection: "单连接联邦查询",
     multiConnection: "多连接联邦查询",

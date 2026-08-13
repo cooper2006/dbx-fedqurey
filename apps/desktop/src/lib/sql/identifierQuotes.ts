@@ -6,14 +6,14 @@
  * This makes SQL look cleaner without affecting semantics for simple names.
  *
  * IMPORTANT: This function intentionally does NOT strip quotes from federated
- * query references (connection.schema.table) because the backend relies on the
+ * query references (connection.database.table) because the backend relies on the
  * original quoted form to detect federation patterns.
  *
  * Preserves:
  * - Single-quoted string literals (with content intact)
  * - Dollar-quoted strings (PostgreSQL)
  * - Bracket identifiers (SQL Server [...])
- * - Qualified federated references (connection.schema.table)
+ * - Qualified federated references (connection.database.table)
  * - Double-quoted identifiers with spaces or special characters
  */
 
@@ -25,7 +25,7 @@
  * For MySQL, removes backticks from simple identifiers.
  *
  * IMPORTANT: This function preserves quotes around federated query references
- * (connection.schema.table) because the backend uses the quoted form to detect
+ * (connection.database.table) because the backend uses the quoted form to detect
  * federation patterns. Use `protectFederatedRefs` in sqlFormatter.ts for that logic.
  *
  * @param sql - The SQL statement to clean

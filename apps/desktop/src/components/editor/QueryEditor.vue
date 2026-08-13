@@ -3719,9 +3719,9 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     columnsByTable,
     foreignKeysByTable: cachedForeignKeysByTable,
     schemas: schemaNames,
-    // Federated 4-part naming (connection.schema.table): offer every configured
+    // Federated 4-part naming (connection.database.schema.table): offer every configured
     // connection as a qualifier, and the current connection's tables under its
-    // own name so `connection.schema.table` resolves to a fully qualified item.
+    // own name so `connection.database.table` resolves to a fully qualified item.
     federatedConnections: connectionStore.connections.value.map((c) => c.name),
     federatedTablesByConnection: (() => {
       const self = connectionStore.connections.value.find((c) => c.id === props.connectionId);

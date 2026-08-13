@@ -7736,7 +7736,7 @@ export default {
     disabled: "Federated Query Disabled",
     hint: "This connection supports federated queries across multiple databases",
     requiresCalcite: "Federated query across multiple connections requires Apache Calcite Agent",
-    syntaxHint: "Use syntax: connection.schema.table for federated queries",
+    syntaxHint: "Use syntax: connection.database.table for federated queries",
     connections: "connections",
     singleConnection: "Single-connection federated query",
     multiConnection: "Multi-connection federated query",

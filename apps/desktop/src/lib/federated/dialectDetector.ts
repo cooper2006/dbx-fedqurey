@@ -101,7 +101,7 @@ export function formatTableReference(connection: string, schema: string, table: 
  * Detect if SQL uses federation syntax
  */
 export function isFederatedSql(sql: string): boolean {
-  // Check for connection.schema.table pattern
+  // Check for connection.database.table pattern
   const parts = sql.matchAll(/(\w+)\.(\w+)\.(\w+)/g);
   let hasFederation = false;
 
