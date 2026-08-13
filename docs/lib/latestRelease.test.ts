@@ -8,7 +8,7 @@ afterEach(() => {
 });
 
 test("latest release metadata uses only the static R2 endpoint", async () => {
-  const requestedUrls = [];
+  const requestedUrls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input) => {
@@ -22,15 +22,15 @@ test("latest release metadata uses only the static R2 endpoint", async () => {
 });
 
 test("latest release metadata fails closed without a GitHub API fallback", async () => {
-  const requestedUrls = [];
+  const requestedUrls2: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input) => {
-      requestedUrls.push(String(input));
+      requestedUrls2.push(String(input));
       return new Response("unavailable", { status: 503 });
     }),
   );
 
   assert.equal(await fetchLatestReleaseInfo(), null);
-  assert.deepEqual(requestedUrls, ["https://dl.dbxio.com/releases/latest/latest.json"]);
+  assert.deepEqual(requestedUrls2, ["https://dl.dbxio.com/releases/latest/latest.json"]);
 });

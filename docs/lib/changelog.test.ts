@@ -17,7 +17,7 @@ test("recognizes only DBX app release tags", () => {
 });
 
 test("changelog build fails without falling back to GitHub API", async () => {
-  const requestedUrls = [];
+  const requestedUrls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input) => {
