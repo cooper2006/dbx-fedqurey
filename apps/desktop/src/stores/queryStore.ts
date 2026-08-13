@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
-import { computed, markRaw, onScopeDispose, reactive, ref, watch } from "vue";
+import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
@@ -43,17 +43,19 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableIndexes, loadTableMetadata, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
-import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
+import { appendLargeValueCells, remapLargeValueCells, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
-import { MAX_RESULT_PAGE_SIZE, normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
 import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
-import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
+import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
-import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
+import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
 import * as api from "@/lib/backend/api";
@@ -106,6 +108,16 @@ interface OpenSavedSqlOptions {
   targetMode?: SavedSqlOpenTargetMode;
 }
 
+interface OpenObjectSourceTabOptions {
+  connectionId: string;
+  database: string;
+  title: string;
+  schema?: string;
+  catalog?: string;
+  sql: string;
+  objectSource: NonNullable<QueryTab["objectSource"]>;
+}
+
 interface UpdateExecutionTargetOptions {
   persistSavedSqlTarget?: boolean;
 }
@@ -149,6 +161,7 @@ function droppedTableObjectSchemaCandidates(target: DroppedTableObjectTarget): S
 
 function markQueryResultRowsRaw(result: QueryResult): QueryResult {
   markRaw(result.rows);
+  if (result.large_value_cells) markRaw(result.large_value_cells);
   if (result.mongo_documents) markRaw(result.mongo_documents);
   if (result.mongo_copy_documents) markRaw(result.mongo_copy_documents);
   return result;
@@ -200,6 +213,7 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
     rows: [...previous.rows, ...segment.rows.slice(0, appendedRowCount)],
     spatial_columns: spatial_columns.length > 0 ? spatial_columns : undefined,
     spatial_values: appendParallelValues(previous.spatial_values, segment.spatial_values),
+    large_value_cells: appendLargeValueCells(previous.large_value_cells, segment.large_value_cells, previous.rows.length, appendedRowCount),
     mongo_documents: appendParallelValues(previous.mongo_documents, segment.mongo_documents),
     mongo_copy_documents: appendParallelValues(previous.mongo_copy_documents, segment.mongo_copy_documents),
     execution_time_ms: (previous.execution_time_ms ?? 0) + (segment.execution_time_ms ?? 0),
@@ -212,6 +226,7 @@ function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns
     if (run.result) markQueryResultRowsRaw(run.result);
     if (run.results) markQueryResultsRowsRaw(run.results);
     if (run.resultLocalSortOriginalRows) markRaw(run.resultLocalSortOriginalRows);
+    if (run.resultLocalSortOriginalLargeValueCells) markRaw(run.resultLocalSortOriginalLargeValueCells);
     if (run.resultLocalSortOriginalMongoDocuments) markRaw(run.resultLocalSortOriginalMongoDocuments);
     if (run.resultLocalSortOriginalMongoCopyDocuments) markRaw(run.resultLocalSortOriginalMongoCopyDocuments);
   }
@@ -295,8 +310,17 @@ function applyBatchSqlProgress(
 ) {
   const batch = batchSqlExecutionFor(tab, progress.executionId);
   if (!batch) return;
+  const previousCompleted = batch.completed;
   const item = batch.items[progress.statementIndex];
   if (!item) return;
+  if (progress.success && progress.completed > previousCompleted + 1) {
+    for (let index = previousCompleted; index < progress.completed - 1; index += 1) {
+      const completedItem = batch.items[index];
+      if (completedItem && (completedItem.status === "pending" || completedItem.status === "running")) {
+        completedItem.status = "success";
+      }
+    }
+  }
   item.status = progress.success ? "success" : "error";
   item.executionTimeMs = progress.executionTimeMs;
   item.affectedRows = progress.affectedRows;
@@ -304,7 +328,7 @@ function applyBatchSqlProgress(
   item.error = progress.error ? translateBackendError(i18n.global.t, progress.error) : undefined;
   batch.completed = Math.max(batch.completed, progress.completed);
   if ((progress.success || continueOnError) && progress.completed < batch.total) {
-    const next = batch.items[progress.statementIndex + 1];
+    const next = batch.items[progress.completed];
     if (next?.status === "pending") next.status = "running";
   }
 }
@@ -430,14 +454,15 @@ function displayedQueryMetadataSql(tab: QueryTab, fallbackSql: string): string {
 }
 
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {
-  if (timeoutSecs === 0) return promise;
+  const timeoutMs = frontendQueryTimeoutDelayMs(timeoutSecs);
+  if (timeoutMs === undefined) return promise;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutSecs * 1000);
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
       }),
     ]);
   } finally {
@@ -916,6 +941,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.batchSqlExecution = undefined;
     tab.resultEditorFingerprint = undefined;
     tab.resultLocalSortOriginalRows = undefined;
+    tab.resultLocalSortOriginalLargeValueCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.resultSortMode = undefined;
@@ -943,6 +969,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortDirection = undefined;
     tab.resultSortMode = undefined;
     tab.resultLocalSortOriginalRows = undefined;
+    tab.resultLocalSortOriginalLargeValueCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.orderByInput = undefined;
@@ -967,6 +994,7 @@ export const useQueryStore = defineStore("query", () => {
     run.result = undefined;
     run.results = undefined;
     run.resultLocalSortOriginalRows = undefined;
+    run.resultLocalSortOriginalLargeValueCells = undefined;
     run.resultLocalSortOriginalMongoDocuments = undefined;
     run.resultLocalSortOriginalMongoCopyDocuments = undefined;
     run.resultSessionId = undefined;
@@ -987,6 +1015,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = run.result ?? run.results?.[activeIndex];
     tab.results = run.results;
     tab.activeResultIndex = run.activeResultIndex;
+    tab.resultGridRevision = run.resultGridRevision;
     tab.batchSqlExecution = cloneBatchSqlExecution(run.batchSqlExecution);
     tab.resultBaseSql = run.resultBaseSql;
     tab.resultEditorFingerprint = run.resultEditorFingerprint;
@@ -996,6 +1025,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortDirection = run.resultSortDirection;
     tab.resultSortMode = run.resultSortMode;
     tab.resultLocalSortOriginalRows = run.resultLocalSortOriginalRows;
+    tab.resultLocalSortOriginalLargeValueCells = run.resultLocalSortOriginalLargeValueCells;
     tab.resultLocalSortOriginalMongoDocuments = run.resultLocalSortOriginalMongoDocuments;
     tab.resultLocalSortOriginalMongoCopyDocuments = run.resultLocalSortOriginalMongoCopyDocuments;
     tab.orderByInput = run.orderByInput;
@@ -1223,6 +1253,7 @@ export const useQueryStore = defineStore("query", () => {
       result: tab.result,
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
+      resultGridRevision: tab.resultGridRevision,
       batchSqlExecution: cloneBatchSqlExecution(tab.batchSqlExecution),
       resultBaseSql: tab.resultBaseSql,
       resultEditorFingerprint: tab.resultEditorFingerprint,
@@ -1232,6 +1263,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortDirection: tab.resultSortDirection,
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
+      resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells,
       resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments,
       resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments,
       orderByInput: tab.orderByInput,
@@ -1319,6 +1351,7 @@ export const useQueryStore = defineStore("query", () => {
       result: tab.result,
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
+      resultGridRevision: tab.resultGridRevision,
       batchSqlExecution: cloneBatchSqlExecution(tab.batchSqlExecution),
       resultBaseSql: tab.resultBaseSql,
       resultEditorFingerprint: tab.resultEditorFingerprint,
@@ -1328,6 +1361,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortDirection: tab.resultSortDirection,
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
+      resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells,
       resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments,
       resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments,
       orderByInput: tab.orderByInput,
@@ -1381,6 +1415,7 @@ export const useQueryStore = defineStore("query", () => {
 
     if (!tab.resultLocalSortOriginalRows) {
       tab.resultLocalSortOriginalRows = tab.result.rows.slice();
+      tab.resultLocalSortOriginalLargeValueCells = tab.result.large_value_cells?.map((cell) => ({ ...cell }));
       tab.resultLocalSortOriginalMongoDocuments = tab.result.mongo_documents?.slice();
       tab.resultLocalSortOriginalMongoCopyDocuments = tab.result.mongo_copy_documents?.slice();
     }
@@ -1393,7 +1428,8 @@ export const useQueryStore = defineStore("query", () => {
     const mongo_documents = originalMongoDocuments ? rowIndexes.map((index) => originalMongoDocuments[index]) : undefined;
     const originalMongoCopyDocuments = tab.resultLocalSortOriginalMongoCopyDocuments;
     const mongo_copy_documents = originalMongoCopyDocuments ? rowIndexes.map((index) => originalMongoCopyDocuments[index]) : undefined;
-    assignDisplayedResult(tab, { ...tab.result, rows, mongo_documents, mongo_copy_documents });
+    const large_value_cells = remapLargeValueCells(tab.resultLocalSortOriginalLargeValueCells, rowIndexes);
+    assignDisplayedResult(tab, { ...tab.result, rows, large_value_cells, mongo_documents, mongo_copy_documents });
 
     tab.resultSortColumn = direction ? column : undefined;
     tab.resultSortColumnIndex = direction ? columnIndex : undefined;
@@ -1402,6 +1438,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     if (!direction) {
       tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalLargeValueCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     }
@@ -1598,6 +1635,33 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openObjectSourceTab(options: OpenObjectSourceTabOptions) {
+    const existing = tabs.value.find(
+      (tab) =>
+        tab.mode === "query" &&
+        tab.connectionId === options.connectionId &&
+        tab.database === options.database &&
+        (tab.schema || "") === (options.schema || "") &&
+        (tab.catalog || "") === (options.catalog || "") &&
+        tab.objectSource?.name === options.objectSource.name &&
+        tab.objectSource.objectType === options.objectSource.objectType &&
+        (tab.objectSource.schema || "") === (options.objectSource.schema || "") &&
+        (tab.objectSource.signature || "") === (options.objectSource.signature || ""),
+    );
+    if (existing) {
+      switchTab(existing.id);
+      if (!isTabDirty(existing)) {
+        updateSql(existing.id, options.sql);
+        markTabClean(existing);
+      }
+      return existing.id;
+    }
+
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true });
+    setObjectSource(id, options.objectSource);
+    return id;
+  }
+
   function showExecutedQueryResults(connectionId: string, database: string, sql: string, queryResults: QueryResult[]) {
     const id = createTab(connectionId, database, undefined, "query", undefined, sql);
     const tab = tabs.value.find((item) => item.id === id);
@@ -1691,6 +1755,29 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openDatabaseBrowser(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "databases" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    tabs.value.push({
+      id,
+      title: "Databases",
+      connectionId,
+      database: "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "databases",
+    });
+    activeTabId.value = id;
+    return id;
+  }
+
   function switchTab(tabId: string) {
     activeTabId.value = tabId;
     settingsStore.settingsPageActive = false;
@@ -1759,7 +1846,7 @@ export const useQueryStore = defineStore("query", () => {
       id,
       title: conn?.name ? `${conn.name} - ${t("serverDashboard.title")}` : t("serverDashboard.title"),
       connectionId,
-      database: conn?.database || "",
+      database: "",
       sql: "",
       isExecuting: false,
       isCancelling: false,
@@ -1840,6 +1927,56 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "dameng-jobs",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openDamengUsers(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "dameng-users" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: t("damengUserAdmin.title"),
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "dameng-users",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openDamengRoles(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "dameng-roles" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: t("damengRoleAdmin.title"),
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "dameng-roles",
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -1980,7 +2117,7 @@ export const useQueryStore = defineStore("query", () => {
     const id = uuid();
     const tab: QueryTab = {
       id,
-      title: `${conn?.name || "MQTT"} Console`,
+      title: "connection.mqttConsoleTitle",
       connectionId,
       database: conn?.database || "",
       sql: "",
@@ -2460,6 +2597,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortDirection: undefined,
       resultSortMode: undefined,
       resultLocalSortOriginalRows: undefined,
+      resultLocalSortOriginalLargeValueCells: undefined,
       resultLocalSortOriginalMongoDocuments: undefined,
       resultLocalSortOriginalMongoCopyDocuments: undefined,
       orderByInput: undefined,
@@ -3040,6 +3178,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.resultSortMode = undefined;
       tab.resultSortedSql = undefined;
       tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalLargeValueCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     }
@@ -3167,8 +3306,10 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean }) {
-    if (!activeTabId.value) return;
-    const tab = tabs.value.find((item) => item.id === activeTabId.value);
+    const executionTabId = activeTabId.value;
+    if (!executionTabId) return;
+    const tab = tabs.value.find((item) => item.id === executionTabId);
+    const previousGridKey = tab ? resultGridInstanceKey(tab) : undefined;
     if (tab?.mode === "query") {
       tab.resultSortColumn = undefined;
       tab.resultSortColumnIndex = undefined;
@@ -3176,7 +3317,17 @@ export const useQueryStore = defineStore("query", () => {
       tab.resultSortMode = undefined;
       tab.resultSortedSql = undefined;
     }
-    return await executeTabSql(activeTabId.value, sql, { resultBaseSql: sql, resultSortedSql: undefined, ...options });
+    const producedResult = await executeTabSql(executionTabId, sql, { resultBaseSql: sql, resultSortedSql: undefined, ...options });
+    if (producedResult !== false) {
+      const current = tabs.value.find((item) => item.id === executionTabId);
+      if (current?.result) {
+        current.resultGridRevision = uuid();
+        if (current.activeResultRunId) syncActiveResultRunFromDisplayed(current);
+        await nextTick();
+        if (previousGridKey && options?.openInNewResultTab !== true) clearDataGridPendingSnapshot(previousGridKey);
+      }
+    }
+    return producedResult;
   }
 
   type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryEditabilityReason" | "tableMeta">;
@@ -3333,12 +3484,20 @@ export const useQueryStore = defineStore("query", () => {
     return primaryKeys.filter((primaryKey) => !selectedColumns.has(primaryKey));
   }
 
-  async function oracleRowIdIsSafeForQuery(tab: QueryTab, loaded: LoadedEditableSource): Promise<boolean> {
+  function oracleRowIdIsSafeForQuery(tab: QueryTab, loaded: LoadedEditableSource): boolean {
     const knownType = loaded.tableMeta.tableType?.trim().toUpperCase();
     if (knownType) return knownType === "TABLE";
-    const objects = await api.listObjects(tab.connectionId!, loaded.tableMeta.database ?? tab.database, loaded.tableMeta.schema ?? "", ["TABLE", "VIEW", "MATERIALIZED_VIEW"], loaded.tableMeta.tableName, 20, 0, loaded.tableMeta.catalog);
-    const matching = objects.find((object) => object.name.toLowerCase() === loaded.tableMeta.tableName.toLowerCase());
-    return matching?.object_type.trim().toUpperCase() === "TABLE";
+    const connectionStore = useConnectionStore();
+    const normalizeIdentifier = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
+    const targetName = normalizeIdentifier(loaded.tableMeta.tableName);
+    const resolvedSchema = loaded.tableMeta.schema?.trim() || tab.schema?.trim() || connectionStore.getConfig(tab.connectionId!)?.default_schema?.trim();
+    if (!resolvedSchema) return false;
+    const targetSchema = normalizeIdentifier(resolvedSchema);
+    const targetCatalog = loaded.tableMeta.catalog?.trim() ? normalizeIdentifier(loaded.tableMeta.catalog) : undefined;
+    const matches = connectionStore
+      .lookupLocalCompletionTables(tab.connectionId!, loaded.tableMeta.database ?? tab.database, loaded.tableMeta.tableName, 20, resolvedSchema, loaded.tableMeta.catalog)
+      .filter((table) => normalizeIdentifier(table.name) === targetName && normalizeIdentifier(table.schema) === targetSchema && (!targetCatalog || normalizeIdentifier(table.catalog) === targetCatalog));
+    return matches.length === 1 && matches[0]?.type === "table";
   }
 
   function primaryKeyIndex(indexes: IndexInfo[]): IndexInfo | undefined {
@@ -3411,7 +3570,7 @@ export const useQueryStore = defineStore("query", () => {
       // Oracle base tables without declared keys use the same ROWID identity as
       // table-data tabs. Confirm the object is a base table because selecting
       // ROWID from a view can fail with ORA-01445.
-      if (databaseType === "oracle" && declaredPrimaryKeys.length === 0 && !(await oracleRowIdIsSafeForQuery(tab, loaded))) return unchanged;
+      if (databaseType === "oracle" && declaredPrimaryKeys.length === 0 && !oracleRowIdIsSafeForQuery(tab, loaded)) return unchanged;
       const primaryKeys = editablePrimaryKeys(databaseType, loaded.tableMeta.columns, loaded.tableMeta.tableType);
       return buildHiddenPrimaryKeyPreparation(sql, databaseType, loaded, primaryKeys, declaredPrimaryKeys, traceId, elapsed);
     } catch (error) {
@@ -3627,6 +3786,7 @@ export const useQueryStore = defineStore("query", () => {
     traceId: string;
     elapsed: () => string;
     timeoutSecs: number;
+    maxRows?: number;
   }) {
     const resultRowCount = options.result.rows.length;
     if (resultRowCount <= 0) {
@@ -3669,10 +3829,11 @@ export const useQueryStore = defineStore("query", () => {
           setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
           return;
         }
-        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, total);
+        const cappedTotal = capQueryResultTotal(total, options.maxRows);
+        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, cappedTotal);
         queryExecutionLog("info", "count:done", {
           traceId: options.traceId,
-          total,
+          total: cappedTotal,
           elapsed: options.elapsed(),
         });
       } catch (error) {
@@ -3741,6 +3902,7 @@ export const useQueryStore = defineStore("query", () => {
     const previousDisplayedSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
     tab.lastExecutedSql = sql;
     tab.resultLocalSortOriginalRows = undefined;
+    tab.resultLocalSortOriginalLargeValueCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     if (captureResultRun && tab.result && !tab.activeResultRunId) {
@@ -3780,6 +3942,7 @@ export const useQueryStore = defineStore("query", () => {
     let pageLimit: number | undefined;
     let pageOffset: number | undefined;
     let countSql: string | undefined;
+    let exactQueryRowBound: number | undefined;
     let useAgentResultSession = false;
     let executionDispatched = false;
     let producedResult = false;
@@ -4106,6 +4269,26 @@ export const useQueryStore = defineStore("query", () => {
                 });
                 break;
               }
+              case "runCommand": {
+                if (options?.mongoSafety) {
+                  const safety = evaluateMongoWriteSafety(mongoCommand, options.mongoSafety);
+                  if (!safety.allowed) throw new Error(safety.reason);
+                }
+                queryExecutionLog("info", "mongo-run-command:start", {
+                  traceId,
+                  database: currentDatabase,
+                });
+                const result = await api.mongoRunCommand(executionConnectionId, currentDatabase, mongoCommand.commandJson, executionId);
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false))));
+                mongoEditTarget = undefined;
+                queryExecutionLog("info", "mongo-run-command:done", {
+                  traceId,
+                  database: currentDatabase,
+                  rowCount: result.documents.length,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
               case "insert":
               case "update":
               case "delete":
@@ -4301,6 +4484,8 @@ export const useQueryStore = defineStore("query", () => {
         return producedResult;
       }
 
+      const queryResultMaxRows = effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows);
+
       if (tab.mode === "query") {
         const prepared = await prepareEditableQueryExecution(tab, sqlToExecute, conn, effectiveDbType, executionDatabase, traceId, elapsed);
         sqlToExecute = prepared.sql;
@@ -4322,7 +4507,7 @@ export const useQueryStore = defineStore("query", () => {
           sqlToExecute = sorted.sql;
           resultSortedSql = sorted.sql;
         }
-        const pagination = options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 };
+        const pagination = limitQueryPagination(options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 }, queryResultMaxRows);
         const plan = await api.prepareQueryPaginationExecutionPlan({
           sql: sqlToExecute,
           queryBaseSql,
@@ -4336,6 +4521,7 @@ export const useQueryStore = defineStore("query", () => {
         pageLimit = plan.pageLimit;
         pageOffset = plan.pageOffset;
         countSql = plan.countSql;
+        exactQueryRowBound = plan.exactQueryRowBound;
         useAgentResultSession = plan.useAgentResultSession;
         const hasBoundedPagination = typeof pageLimit === "number" && typeof pageOffset === "number";
         if (options?.appendResult && !hasBoundedPagination && !useAgentResultSession) {
@@ -4353,8 +4539,15 @@ export const useQueryStore = defineStore("query", () => {
           return false;
         }
       } else if (tab.mode === "data") {
-        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
-        pageOffset = options?.pagination?.offset ?? 0;
+        const pagination = limitQueryPagination(
+          {
+            limit: options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize),
+            offset: options?.pagination?.offset ?? 0,
+          },
+          queryResultMaxRows,
+        );
+        pageLimit = pagination.limit;
+        pageOffset = pagination.offset;
       }
 
       const executionSchema = targetContext?.scope === "connection" ? undefined : connectionQueryExecutionSchema(conn, databaseTargetContext?.database ?? executionTarget?.database ?? tab.database, databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema, tab.mode === "data");
@@ -4371,7 +4564,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
         executionDispatched = true;
-        executionPromise = api.executeInManualTransaction(tab.txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit);
+        executionPromise = api.executeInManualTransaction(tab.txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows));
       } else {
         queryExecutionLog("info", "execute-multi:start", { traceId, elapsed: elapsed() });
         // Query and data tabs use a tab-scoped pool so repeated executions keep
@@ -4381,15 +4574,20 @@ export const useQueryStore = defineStore("query", () => {
             ? useAgentResultSession
               ? {
                   // Agent cursors apply maxRows cumulatively across fetched pages.
-                  // Keep multi-page navigation available without allowing unbounded reads.
-                  maxRows: MAX_RESULT_PAGE_SIZE,
+                  maxRows: agentProtocolQueryResultMaxRows(queryResultMaxRows),
                   fetchSize: pageLimit,
                   pageSize: pageLimit,
                   resultSessionId: options?.pagination?.sessionId,
                 }
               : { maxRows: pageLimit, fetchSize: pageLimit }
-            : {}),
+            : { maxRows: agentProtocolQueryResultMaxRows(queryResultMaxRows) }),
           ...(executionClientSessionId ? { clientSessionId: executionClientSessionId } : {}),
+          ...(tab.mode === "data" && effectiveDbType === "mysql"
+            ? {
+                maxResultBytes: TABLE_DATA_RESULT_MAX_BYTES,
+                resultKeyColumns: tableMetaForDataTab(tab)?.primaryKeys ?? [],
+              }
+            : {}),
           timeoutSecs: queryTimeoutSecs,
           catalog: executionCatalog,
           continueOnError: settingsStore.editorSettings.continueOnErrorOnBatch,
@@ -4514,7 +4712,22 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCount = undefined;
         }
         const resultRowCount = current.result?.rows.length ?? 0;
-        const totalKnownFromIncompletePage = !!current.result && typeof exactTotalFromIncompletePage(current.result, pageLimit, pageOffset, useAgentResultSession) === "number";
+        const resultLimitReached = !!current.result && queryResultLimitReached(pageOffset, resultRowCount, queryResultMaxRows);
+        if (resultLimitReached && current.result) {
+          current.result.has_more = false;
+          current.result.truncated = true;
+          current.resultTotalRowCount = queryResultMaxRows;
+        }
+        const paginationPageResult = shouldAppendResult ? results[0] : current.result;
+        const exactIncompletePageTotal = paginationPageResult ? exactTotalFromIncompletePage(paginationPageResult, pageLimit, pageOffset, useAgentResultSession) : undefined;
+        const totalKnownFromIncompletePage = typeof exactIncompletePageTotal === "number";
+        let totalRowCountResolved = false;
+        if (current.mode === "query" && current.result && !isQueryExecutionErrorResult(current.result) && typeof exactQueryRowBound === "number") {
+          const boundedTotal = capQueryResultTotal(exactQueryRowBound, queryResultMaxRows);
+          current.resultTotalRowCount = Math.min(boundedTotal, exactIncompletePageTotal ?? boundedTotal);
+          current.resultTotalRowCountLoading = false;
+          totalRowCountResolved = true;
+        }
         const dataCountTarget =
           current.mode === "data"
             ? (() => {
@@ -4531,21 +4744,28 @@ export const useQueryStore = defineStore("query", () => {
                 };
               })()
             : undefined;
-        const canAutoCalculateTotalRows = !options?.appendResult && !!current.result && resultRowCount > 0 && !totalKnownFromIncompletePage && settingsStore.editorSettings.autoCalculateTotalRows && ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
+        const canAutoCalculateTotalRows =
+          !options?.appendResult &&
+          !!current.result &&
+          resultRowCount > 0 &&
+          !resultLimitReached &&
+          !totalKnownFromIncompletePage &&
+          !totalRowCountResolved &&
+          settingsStore.editorSettings.autoCalculateTotalRows &&
+          ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
         current.resultTotalRowCountLoading = canAutoCalculateTotalRows;
         // Server-side pagination without a countSql: the backend (currently
         // the Elasticsearch driver) already reports the true match total via
         // affected_rows. Use it directly so the result-grid can compute the
         // page count without issuing a separate COUNT query.
-        let totalRowCountResolved = false;
-        if (current.result && current.result.total_is_exact !== false && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
+        if (!totalRowCountResolved && current.result && current.result.total_is_exact !== false && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
           current.resultTotalRowCount = current.result.affected_rows;
           current.resultTotalRowCountLoading = false;
           totalRowCountResolved = true;
         }
         touchResult(current);
         syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
-        if (!options?.appendResult && !totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
+        if (!options?.appendResult && !resultLimitReached && !totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
           countQueryTotalRowsInBackground({
             tabId: id,
             connectionId: executionConnectionId,
@@ -4567,6 +4787,7 @@ export const useQueryStore = defineStore("query", () => {
             traceId,
             elapsed,
             timeoutSecs: queryTimeoutSecs,
+            maxRows: queryResultMaxRows,
           });
         }
         queryExecutionLog("info", "result:assigned", {
@@ -5094,6 +5315,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.activeResultIndex = index;
     tab.result = tab.results[index];
     tab.resultLocalSortOriginalRows = undefined;
+    tab.resultLocalSortOriginalLargeValueCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.resultSortColumn = undefined;
@@ -5217,6 +5439,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEditorFingerprint = snapshot.resultEditorFingerprint;
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
     tab.resultLocalSortOriginalRows = snapshot.resultLocalSortOriginalRows ? markRaw(snapshot.resultLocalSortOriginalRows) : undefined;
+    tab.resultLocalSortOriginalLargeValueCells = snapshot.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell }));
     tab.resultLocalSortOriginalMongoDocuments = snapshot.resultLocalSortOriginalMongoDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoDocuments) : undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = snapshot.resultLocalSortOriginalMongoCopyDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoCopyDocuments) : undefined;
     // 快照编解码会重建负载，落盘前的各 run 估算值不再对应恢复后的对象，
@@ -5677,6 +5900,7 @@ export const useQueryStore = defineStore("query", () => {
     hasDirtyTabs,
     isConfirmingAppClose,
     createTab,
+    openObjectSourceTab,
     showExecutedQueryResults,
     switchTab,
     closeTab,
@@ -5726,6 +5950,7 @@ export const useQueryStore = defineStore("query", () => {
     commitTransaction,
     rollbackTransaction,
     renameTab,
+    openDatabaseBrowser,
     openObjectBrowser,
     openMongoGridFs,
     openMongoBucket,
@@ -5734,6 +5959,8 @@ export const useQueryStore = defineStore("query", () => {
     openMysqlDashboard,
     openPostgresDashboard,
     openNacosDashboard,
+    openDamengUsers,
+    openDamengRoles,
     openDamengJobAdmin,
     openMqAdmin,
     openMqttAdmin,

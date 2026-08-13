@@ -27,6 +27,7 @@ import type {
   CompletionAssistantRequest,
   CompletionAssistantResponse,
   ObjectStatistics,
+  CustomTypeDetails,
   ObjectSource,
   ObjectSourceKind,
   ColumnInfo,
@@ -307,6 +308,7 @@ export interface QueryPaginationExecutionPlan {
   pageLimit?: number;
   pageOffset?: number;
   countSql?: string;
+  exactQueryRowBound?: number;
   useAgentResultSession: boolean;
 }
 
@@ -440,6 +442,10 @@ export type AgentEvent =
     }
   | { type: "error"; message: string };
 
+type TauriAgentEvent = AgentEvent & {
+  session_id?: string;
+};
+
 export async function aiAgentStream(
   sessionId: string,
   request: AiCompletionRequest,
@@ -456,9 +462,11 @@ export async function aiAgentStream(
   confirmedSchema?: string,
   _signal?: AbortSignal,
 ): Promise<string> {
-  const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
-    onEvent(event.payload);
-    if (event.payload.type === "agent_end" || event.payload.type === "error") {
+  const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
+    const payload = event.payload;
+    if (payload.session_id && payload.session_id !== sessionId) return;
+    onEvent(payload);
+    if (payload.type === "agent_end" || payload.type === "error") {
       unlisten();
     }
   });
@@ -927,6 +935,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
   return invoke("list_databases", { connectionId });
 }
 
+export async function listDatabaseMetadata(connectionId: string): Promise<DatabaseInfo[]> {
+  return invoke("list_database_metadata", { connectionId });
+}
+
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return invoke("list_database_storage", { connectionId, databases });
 }
@@ -1055,6 +1067,9 @@ export async function listSchemaInfos(connectionId: string, database: string): P
   return invoke("list_schema_infos", { connectionId, database });
 }
 
+export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
+  return invoke("get_custom_type_details", { connectionId, database, schema, name });
+}
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,
@@ -1131,6 +1146,8 @@ export async function executeMulti(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1175,6 +1192,8 @@ export async function executeMultiWithProgress(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1458,8 +1477,8 @@ export interface DataGridSavePreparation {
   executionSchema?: string;
 }
 
-export async function prepareDataGridSave(options: DataGridSaveStatementOptions): Promise<DataGridSavePreparation> {
-  return invoke("prepare_data_grid_save", { options });
+export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
+  return invoke("prepare_data_grid_save", { options, driverProfile });
 }
 
 export async function extractDataGridSelection(request: DataGridExtractRequest): Promise<DataGridExtractResult> {
@@ -3509,6 +3528,15 @@ export async function mongoCreateUser(connectionId: string, database: string, us
   });
 }
 
+export async function mongoRunCommand(connectionId: string, database: string, commandJson: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_run_command", {
+    connectionId,
+    database,
+    commandJson,
+    executionId,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return invoke("mongo_drop_indexes", {
     connectionId,
@@ -3584,6 +3612,16 @@ export async function documentDeleteDocument(connectionId: string, database: str
     id,
     routing,
     documentType,
+  });
+}
+
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return invoke("document_save_meilisearch_batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
   });
 }
 

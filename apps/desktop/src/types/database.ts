@@ -16,6 +16,7 @@ export type DatabaseType =
   | "oracle"
   | "elasticsearch"
   | "easysearch"
+  | "meilisearch"
   | "hbase"
   | "qdrant"
   | "milvus"
@@ -76,6 +77,10 @@ export type DatabaseType =
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
+}
+
+export function isMeilisearchDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "meilisearch";
 }
 
 export interface SqlSnippet {
@@ -185,6 +190,12 @@ export interface ConnectionConfig {
   informix_server?: string;
   external_config?: unknown;
   one_time?: boolean;
+  /**
+   * Whether the database password may be persisted locally. When false, the
+   * password is never written to local storage and the user is prompted on
+   * every connect. Absent/true keeps current behavior (password saved).
+   */
+  save_password?: boolean;
   read_only?: boolean;
   /** Explicit production marker for every database reachable through this connection. */
   is_production?: boolean;
@@ -250,9 +261,7 @@ export interface SshTunnelConfig {
    * `"key+password"` tries private key auth first and falls back to
    * password auth if the key is rejected.
    *
-   * `"agent"` is a legacy value: it's no longer offered as a dropdown
-   * choice for new connections, but is preserved and displayed read-only
-   * for connections that already have `use_ssh_agent` configured.
+   * `"agent"` uses identities from the configured SSH agent socket.
    */
   auth_method?: "password" | "key" | "key+password" | "agent" | "none";
   /** Allow `nc` through an SSH exec channel when direct-tcpip is prohibited. */
@@ -383,6 +392,12 @@ export interface JdbcPluginStatus {
 
 export interface DatabaseInfo {
   name: string;
+  size_bytes?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  comment?: string | null;
+  default_charset?: string | null;
+  default_collation?: string | null;
 }
 
 export interface DatabaseStorageInfo {
@@ -431,6 +446,8 @@ export interface ObjectInfo {
   schema?: string | null;
   valid?: boolean | null;
   signature?: string | null;
+  custom_type_kind?: CustomTypeKind | null;
+  has_members?: boolean | null;
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -438,6 +455,9 @@ export interface ObjectInfo {
   parent_name?: string | null;
   trigger?: TriggerInfo | null;
   xugu_type_members_expandable?: boolean | null;
+  /** Xugu package metadata merged from the PACKAGE_BODY catalog row. */
+  xugu_package_body_available?: boolean | null;
+  xugu_package_body_valid?: boolean | null;
 }
 
 export interface ObjectStatistics {
@@ -455,6 +475,61 @@ export interface ObjectSource {
   schema?: string | null;
   source: string;
   editable?: boolean;
+}
+
+export type CustomTypeKind = "base" | "composite" | "domain" | "enum" | "range" | "multirange";
+
+export interface CustomTypeMember {
+  name: string;
+  dataType: string;
+  ordinal: number;
+  nullable?: boolean | null;
+  default?: string | null;
+  comment?: string | null;
+  enumValue?: string | null;
+}
+
+export interface CustomTypeDomainConstraint {
+  name: string;
+  definition: string;
+}
+
+export interface CustomTypeProperties {
+  baseType?: string | null;
+  notNull?: boolean | null;
+  default?: string | null;
+  collation?: string | null;
+  domainConstraints: CustomTypeDomainConstraint[];
+  rangeSubtype?: string | null;
+  rangeMultirangeName?: string | null;
+  rangeCanonicalFunction?: string | null;
+  rangeSubtypeDiffFunction?: string | null;
+  rangeSubtypeOpclass?: string | null;
+  inputFunction?: string | null;
+  outputFunction?: string | null;
+  receiveFunction?: string | null;
+  sendFunction?: string | null;
+  analyzeFunction?: string | null;
+  internallength?: number | null;
+  passedByValue?: boolean | null;
+  alignment?: string | null;
+  storage?: string | null;
+}
+
+export interface CustomTypeDdl {
+  sql: string;
+  complete: boolean;
+  warnings?: string[];
+}
+
+export interface CustomTypeDetails {
+  name: string;
+  schema: string;
+  kind: CustomTypeKind;
+  comment?: string | null;
+  members: CustomTypeMember[];
+  properties: CustomTypeProperties;
+  ddl?: CustomTypeDdl | null;
 }
 
 export interface ColumnInfo {
@@ -649,6 +724,8 @@ export interface QueryResult {
   /** Whether a backend-reported result total is exact. */
   total_is_exact?: boolean;
   truncated?: boolean;
+  /** Variable-length cells represented by bounded previews in `rows`. */
+  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number }>;
   session_id?: string | null;
   has_more?: boolean;
   /** For Elasticsearch REST search results parsed into a _source table,
@@ -701,6 +778,8 @@ export interface QueryResultRun {
   sequence: number;
   sql: string;
   createdAt: number;
+  /** Distinguishes successive result payloads that reuse the same run slot. */
+  resultGridRevision?: string;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
@@ -714,6 +793,7 @@ export interface QueryResultRun {
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
+  resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
@@ -809,6 +889,7 @@ export type TreeNodeType =
   | "function"
   | "type"
   | "type-body"
+  | "type-member"
   | "sequence"
   | "synonym"
   | "package"
@@ -834,6 +915,8 @@ export type TreeNodeType =
   | "extension"
   | "object-browser"
   | "user-admin"
+  | "dameng-users"
+  | "dameng-roles"
   | "dameng-job-admin"
   | "saved-sql-root"
   | "saved-sql-folder"
@@ -843,6 +926,8 @@ export type TreeNodeType =
   | "column"
   | "type-attribute"
   | "type-method"
+  | "type-attributes"
+  | "type-methods"
   | "index"
   | "fkey"
   | "trigger"
@@ -904,12 +989,18 @@ export interface TreeNode {
   tableName?: string;
   objectName?: string;
   signature?: string;
+  customTypeKind?: CustomTypeKind;
+  hasMembers?: boolean;
   /** Owning programmable object for a nested metadata member. */
   parentName?: string;
   parentSchema?: string;
   parentType?: TreeNodeType;
   /** Set only for XuguDB object types whose members can be loaded lazily. */
   xuguTypeMembersExpandable?: boolean;
+  /** Set on a Xugu package specification when a package body exists. */
+  xuguPackageBodyAvailable?: boolean;
+  /** Validity reported for the Xugu package body, independent of the spec. */
+  xuguPackageBodyValid?: boolean | null;
   tableType?: string;
   comment?: string | null;
   valid?: boolean | null;
@@ -924,12 +1015,18 @@ export interface TreeNode {
   federationEnabled?: boolean;
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
     offset: number;
     pageSize: number;
   };
+}
+
+export interface CustomTypeTreeMemberMeta {
+  kind: "field" | "enum-value";
+  displayValue?: string;
+  ordinal?: number;
 }
 
 export interface TableNameFilter {
@@ -1005,6 +1102,7 @@ export interface QueryTab {
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
+  resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
@@ -1024,6 +1122,8 @@ export interface QueryTab {
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
+  /** Distinguishes successive result payloads that reuse the current result slot. */
+  resultGridRevision?: string;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
   resultAutoSave?: boolean;
@@ -1075,9 +1175,12 @@ export interface QueryTab {
     | "mqtt"
     | "nacos"
     | "nacos-dashboard"
+    | "databases"
     | "objects"
     | "structure"
     | "users"
+    | "dameng-users"
+    | "dameng-roles"
     | "dameng-jobs"
     | "processlist"
     | "mysql-dashboard"

@@ -67,6 +67,7 @@ import {
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
 import {
   extractIdentifierDetailsAt,
+  extractQualifiedIdentifierAt,
   isSqlKeyword,
   matchSqlObject,
   matchTable,
@@ -80,7 +81,7 @@ import {
   sqlObjectNavigationTypeFromCompletionObjectType,
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
-import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
+import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, normalizeAlignedSqlWhitespace, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import {
@@ -743,8 +744,7 @@ function editorIndentUnit(): string {
 }
 
 function handleTab(view: EditorViewType): boolean {
-  if (codeMirrorCompletionStatus?.(view.state)) return false;
-  return performNormalTab(view);
+  return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
 }
 
 function performNormalTab(view: EditorViewType): boolean {
@@ -1843,7 +1843,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 
 function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
   const databaseType = props.databaseType;
-  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "victoriametrics" ? "text" : "sql";
+  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" ? "text" : "sql";
   return extendQueryEditorSelection(currentView, {
     databaseType,
     dialect: sqlBehaviorDialect(),
@@ -1854,11 +1854,8 @@ function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
   if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return true;
-  // Snippet fields keep their normal immediate Tab priority when completion
-  // is pending or still inside CodeMirror's interaction delay.
-  if (codeMirrorNextSnippetField?.(view)) return true;
   if (completionStatus) return waitForCompletionTab(view);
-  return false;
+  return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
 function clearPendingCompletionTab() {
@@ -1880,7 +1877,6 @@ function waitForCompletionTab(view: EditorViewType): boolean {
 
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
     if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return;
-    if (codeMirrorNextSnippetField?.(view)) return;
     if (completionStatus && Date.now() - startedAt < COMPLETION_TAB_MAX_WAIT_MS) {
       pendingCompletionTabTimer = setTimeout(retry, COMPLETION_TAB_RETRY_DELAY_MS);
       return;
@@ -1992,18 +1988,23 @@ function sqlExecutionSnapshotForRange(currentView: EditorViewType, range: Pick<S
   };
 }
 
+/**
+ * Locate the qualified identifier at `pos`, delegating to the same quote-aware
+ * parser used by Ctrl+click navigation. A plain word-character scan (the
+ * previous approach here) breaks on quoted identifiers containing characters
+ * outside `[\w$]` (hyphens, spaces, ...), e.g. `schema."my-table"`.
+ *
+ * Every part is re-quoted in the returned text (regardless of whether it was
+ * originally quoted) so downstream re-parsing via `splitQualifiedIdentifier`
+ * round-trips correctly even when a part's raw value isn't a bare word.
+ */
 function identifierRangeAt(sql: string, pos: number): { from: number; to: number; text: string } | null {
-  const isIdentifierChar = (ch: string | undefined) => !!ch && /[\w$.]/.test(ch);
-  if (!isIdentifierChar(sql[pos]) && !isIdentifierChar(sql[pos - 1])) return null;
-
-  let from = pos;
-  while (from > 0 && isIdentifierChar(sql[from - 1])) from--;
-  let to = pos;
-  while (to < sql.length && isIdentifierChar(sql[to])) to++;
-
-  const text = sql.slice(from, to).replace(/^\.+|\.+$/g, "");
-  if (!text || isSqlKeyword(text)) return null;
-  return { from, to, text };
+  const located = extractQualifiedIdentifierAt(sql, pos);
+  if (!located) return null;
+  if (located.parts.length === 1 && !located.parts[0].quoted && isSqlKeyword(located.parts[0].value)) return null;
+  const text = located.parts.map((part) => quoteIdentifier(part.value)).join(".");
+  if (!text) return null;
+  return { from: located.start, to: located.end, text };
 }
 
 type CompletionMetadataScope = Pick<SqlCompletionScope, "database" | "schema">;
@@ -2042,7 +2043,7 @@ function getInsertValueHintTableColumns(table: string, schema?: string, database
 
 function requestInsertValueHintTableColumns(table: string, schema?: string, database?: string) {
   if (!props.connectionId || props.database == null) return;
-  if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "victoriametrics") return;
+  if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "victoriametrics") return;
   const cacheKey = insertHintCacheKey({ name: table, schema, database });
   const hasCachedColumns = props.databaseType === "sqlserver" ? cachedInsertValueHintColumnsByTable.has(cacheKey) : cachedColumnsByTable.has(cacheKey);
   if (hasCachedColumns || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
@@ -2331,6 +2332,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   dom.appendChild(detailNode);
 
   let layoutController: ReturnType<typeof constrainSqlHoverLayout> | null = null;
+  let handleCopy: ((event: ClipboardEvent) => void) | null = null;
 
   if (sqlContent) {
     const separator = document.createElement("div");
@@ -2351,6 +2353,24 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
     // 返回 mount/destroy 给 CodeMirror TooltipView 生命周期钩子，
     // 避免 MutationObserver 监听 body 全子树来兜底清理。
     layoutController = constrainSqlHoverLayout(dom, sqlContainer);
+
+    // The tooltip pads column names/types with literal spaces so they line up
+    // visually (see alignColumnRows). Selecting that text and copying it via
+    // the native OS/browser copy carries those spaces verbatim, which shows
+    // up as long literal space runs when pasted into a plain-text editor.
+    // Normalize just the clipboard payload so the on-screen alignment is
+    // untouched but paste targets get clean single-spaced SQL.
+    handleCopy = (event: ClipboardEvent) => {
+      const selection = document.getSelection();
+      if (!selection || selection.isCollapsed) return;
+      if (!dom.contains(selection.anchorNode) && !dom.contains(selection.focusNode)) return;
+      const text = selection.toString();
+      if (text !== sqlContent) return;
+      const normalized = normalizeAlignedSqlWhitespace(text);
+      if (normalized === text) return;
+      event.clipboardData?.setData("text/plain", normalized);
+      event.preventDefault();
+    };
   }
 
   for (const row of rows) {
@@ -2362,8 +2382,20 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
 
   return {
     dom,
-    mount: layoutController ? () => layoutController?.mount() : undefined,
-    destroy: layoutController ? () => layoutController?.destroy() : undefined,
+    mount:
+      layoutController || handleCopy
+        ? () => {
+            layoutController?.mount();
+            if (handleCopy) document.addEventListener("copy", handleCopy);
+          }
+        : undefined,
+    destroy:
+      layoutController || handleCopy
+        ? () => {
+            layoutController?.destroy();
+            if (handleCopy) document.removeEventListener("copy", handleCopy);
+          }
+        : undefined,
   };
 }
 
@@ -2732,7 +2764,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     setSemanticDiagnostics([]);
     return;
   }
-  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "victoriametrics") {
+  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "victoriametrics") {
     setSemanticDiagnostics([]);
     return;
   }
@@ -3067,7 +3099,7 @@ function localCompletionSchemasForDatabaseDisambiguation(completionContext: Retu
 }
 
 function shouldInsertSqlCompletionSpace(): boolean {
-  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics";
+  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "meilisearch" && props.databaseType !== "victoriametrics";
 }
 
 function completionOptionForItem(item: QueryCompletionItem) {
@@ -3120,7 +3152,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
       markCompletionAccepted(item);
       const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
       const insert = appendSqlCompletionSpace(item.apply ?? item.label, {
-        enabled: shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion,
+        enabled: ("appendSpace" in item && item.appendSpace === true) || (shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion),
         itemType: item.type,
         nextCharacter: view.state.sliceDoc(replaceTo, replaceTo + 1),
       });
@@ -3163,11 +3195,22 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
   const fullDoc = currentState.doc.toString();
   if (!explicit && !shouldAutoOpenRedisCompletion(fullDoc, position)) return null;
 
-  const completionContext = getRedisCompletionContext(fullDoc, position);
+  let commands;
+  try {
+    commands = await connectionStore.listRedisCompletionCommandDocs(props.connectionId, props.database ?? "0");
+  } catch {
+    // Completion is deliberately instance-driven: do not substitute a bundled
+    // command list when the server does not expose command metadata.
+    return null;
+  }
+  if (epoch !== completionEpoch) return null;
+
+  const completionInput = { commands };
+  const completionContext = getRedisCompletionContext(fullDoc, position, completionInput);
   // Key-name completion needs a reliable db index; props.database may briefly be "" on
   // the New Query path before the active db resolves, and only key-argument commands warrant it.
   let keys: string[] = [];
-  if (completionContext.mode === "argument" && props.database && takesKeyArgument(completionContext.mainCommand)) {
+  if (completionContext.mode === "argument" && props.database && takesKeyArgument(completionContext.commandName, completionInput, completionContext.argumentIndex, completionContext.argumentValues)) {
     try {
       keys = await connectionStore.listRedisCompletionKeys(props.connectionId, props.database);
     } catch {
@@ -3178,6 +3221,7 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
 
   const items = buildRedisCompletionItemsFromContext(completionContext, {
     keys,
+    commands,
   });
   if (items.length === 0) return null;
   // Use the built-in filter (the default) so typing narrows the list and moves
@@ -3242,6 +3286,7 @@ async function provideSqlCompletions(context: CompletionContext) {
   if (props.databaseType === "mongodb") {
     return provideMongoCompletions(currentState, position, explicit);
   }
+  if (props.databaseType === "meilisearch") return null;
   if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
     if (!isSqlLikeCompletionStatement(fullDoc, position, sqlCompletionDialectOptions())) {
       return provideElasticsearchCompletions(currentState, position, explicit);
@@ -3547,7 +3592,7 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   if (props.databaseType === "mongodb") {
     return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
   }
-  if (props.databaseType === "victoriametrics") return false;
+  if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch") return false;
   if (props.databaseType === "redis" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
     // Preserve old character-based checks for non-SQL providers.
     if (!insertedText && removedText) {
@@ -4681,6 +4726,10 @@ onMounted(async () => {
           dom.style.display = "none";
           return { dom };
         },
+        // Center the match instead of the default "nearest" alignment, which
+        // often lands the match flush against the viewport edge and makes an
+        // immediate drag-select there trigger CodeMirror's edge autoscroll.
+        scrollToMatch: (range) => EditorView.scrollIntoView(range, { y: "center" }),
       }),
       runGutterComp.of(runStatementGutterExtension()),
       lineNumbers({
@@ -4748,7 +4797,8 @@ onMounted(async () => {
       sqlSignatureComp.of(buildSqlSignatureExtension()),
       diagnosticComp.of(buildSqlDiagnosticExtension()),
       createInsertValueHintsExtension({
-        isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics",
+        isEnabled: () =>
+          settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "meilisearch" && props.databaseType !== "victoriametrics",
         getTableColumns: getInsertValueHintTableColumns,
         requestTableColumns: requestInsertValueHintTableColumns,
       }),

@@ -119,7 +119,7 @@ import McpConnectionScopePicker from "@/components/settings/McpConnectionScopePi
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_THEME_PALETTES, type AppCornerStyle, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
-import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
+import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
@@ -134,6 +134,7 @@ import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSyst
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
 import { DateTimePatterns, normalizeSupportedDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/paginationPageSize";
+import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import type { PromptTemplate } from "@/types/promptTemplate";
 import { GLOBAL_INSTRUCTIONS_MAX, PROMPT_TEMPLATE_CONTENT_MAX, PROMPT_TEMPLATE_NAME_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
 
@@ -274,8 +275,6 @@ const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThe
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
-const editGlobalConnectTimeoutSecs = ref(settingsStore.editorSettings.globalConnectTimeoutSecs);
-const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryTimeoutSecs);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
@@ -310,13 +309,16 @@ const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
+const editColorizeDataGridCellTypes = ref(settingsStore.editorSettings.colorizeDataGridCellTypes);
 const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showIndexIndicatorsInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
+const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
+const editQueryResultMaxRowsEnabled = ref(settingsStore.editorSettings.queryResultMaxRowsEnabled);
+const editQueryResultMaxRows = ref(settingsStore.editorSettings.queryResultMaxRows);
 const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
-const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
 const editRegexMaxMatchCount = ref(settingsStore.editorSettings.regexMaxMatchCount);
 const editAutoCalculateTotalRows = ref(settingsStore.editorSettings.autoCalculateTotalRows);
 const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields));
@@ -326,6 +328,22 @@ const editSqlVariableSyntaxDatabaseType = ref<DatabaseType>(SQL_VARIABLE_SYNTAX_
 
 function updateTableOpenPageSizeDraft(value: string | number) {
   editTableOpenPageSize.value = normalizeTableOpenPageSizeDraft(value);
+}
+
+function updatePageSizeDraft(value: string | number) {
+  editPageSize.value = normalizeTableOpenPageSizeDraft(value);
+}
+
+function updateQueryResultMaxRowsInput(event: Event) {
+  const input = event.currentTarget as HTMLInputElement;
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed) || parsed > MAX_QUERY_RESULT_MAX_ROWS) {
+    input.value = String(editQueryResultMaxRows.value);
+    return;
+  }
+  const normalized = normalizeQueryResultMaxRowsDraft(input.value);
+  if (input.value !== String(normalized)) input.value = String(normalized);
+  editQueryResultMaxRows.value = normalized;
 }
 
 function sqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles): boolean {
@@ -446,8 +464,6 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
-    globalConnectTimeoutSecs: editGlobalConnectTimeoutSecs.value,
-    globalQueryTimeoutSecs: editGlobalQueryTimeoutSecs.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
@@ -467,13 +483,16 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     tabLayout: editTabLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
+    colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
     showIndexIndicatorsInHeader: editShowIndexIndicatorsInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
+    pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
+    queryResultMaxRowsEnabled: editQueryResultMaxRowsEnabled.value,
+    queryResultMaxRows: editQueryResultMaxRows.value,
     infiniteScroll: editInfiniteScroll.value,
-    infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     regexMaxMatchCount: editRegexMaxMatchCount.value,
     autoCalculateTotalRows: editAutoCalculateTotalRows.value,
     tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
@@ -717,8 +736,6 @@ function syncEditorSettingsDraftFromStore() {
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
-  editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
-  editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
@@ -739,13 +756,16 @@ function syncEditorSettingsDraftFromStore() {
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
+  editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
   editShowIndexIndicatorsInHeader.value = settingsStore.editorSettings.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
+  editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
+  editQueryResultMaxRowsEnabled.value = settingsStore.editorSettings.queryResultMaxRowsEnabled;
+  editQueryResultMaxRows.value = settingsStore.editorSettings.queryResultMaxRows;
   editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
-  editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
   editRegexMaxMatchCount.value = settingsStore.editorSettings.regexMaxMatchCount;
   editAutoCalculateTotalRows.value = settingsStore.editorSettings.autoCalculateTotalRows;
   editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
@@ -853,7 +873,8 @@ const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== 
 const duckDbWorkerSettingsRequireRestart = computed(() => editDuckDbWorkerProcessIsolation.value !== startupDuckDbWorkerProcessIsolation.value || normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== startupDuckDbWorkerMaxProcesses.value);
 const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
 const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
-const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value);
+const hasBlockingQueryResultRowLimit = computed(() => editQueryResultMaxRowsEnabled.value && editQueryResultMaxRows.value < editPageSize.value);
+const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
 
 function hasChanges(): boolean {
   return (
@@ -871,20 +892,12 @@ function hasChanges(): boolean {
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
-  const globalConnectTimeoutChanged = editorSettingsPatch.globalConnectTimeoutSecs !== undefined;
-  const globalQueryTimeoutChanged = editorSettingsPatch.globalQueryTimeoutSecs !== undefined;
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
   if (Object.keys(editorSettingsPatch).length > 0) {
     settingsStore.updateEditorSettings(editorSettingsPatch);
     await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
-  }
-  if (globalConnectTimeoutChanged || globalQueryTimeoutChanged) {
-    await connectionStore.applyGlobalTimeouts({
-      connectTimeoutSecs: globalConnectTimeoutChanged ? settingsStore.editorSettings.globalConnectTimeoutSecs : undefined,
-      queryTimeoutSecs: globalQueryTimeoutChanged ? settingsStore.editorSettings.globalQueryTimeoutSecs : undefined,
-    });
   }
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
@@ -933,8 +946,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
-    editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
-    editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
@@ -990,13 +1001,16 @@ function resetDefaultsForTab(tab: SettingsCategory) {
   } else if (tab === "data") {
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
+    editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
     editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
+    editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+    editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
+    editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
-    editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
     editRegexMaxMatchCount.value = DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount;
     editAutoCalculateTotalRows.value = DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows;
     editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
@@ -1029,8 +1043,6 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
-  editGlobalConnectTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalConnectTimeoutSecs;
-  editGlobalQueryTimeoutSecs.value = DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
@@ -1057,13 +1069,16 @@ function resetAllDefaults() {
   editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
+  editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
   editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
+  editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+  editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
+  editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
   editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
-  editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editRegexMaxMatchCount.value = DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount;
   editAutoCalculateTotalRows.value = DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows;
   editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
@@ -2640,7 +2655,7 @@ function normalizeMaxRetries(value: number | undefined): number {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
@@ -2672,6 +2687,8 @@ const aiEditGrokCliPath = ref("");
 const aiEditGrokCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditCodeBuddyCliPath = ref("");
 const aiEditCodeBuddyCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditQoderCliPath = ref("");
+const aiEditQoderCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 
@@ -2706,6 +2723,7 @@ const aiIsOpenCodeCli = computed(() => aiEditProvider.value === "opencode-cli");
 const aiIsCursorCli = computed(() => aiEditProvider.value === "cursor-cli");
 const aiIsGrokCli = computed(() => aiEditProvider.value === "grok-cli");
 const aiIsCodeBuddyCli = computed(() => aiEditProvider.value === "codebuddy-cli");
+const aiIsQoderCli = computed(() => aiEditProvider.value === "qoder-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
 const aiCliCommandName = computed(() => {
@@ -2715,6 +2733,7 @@ const aiCliCommandName = computed(() => {
   if (aiIsCursorCli.value) return "agent";
   if (aiIsGrokCli.value) return "grok";
   if (aiIsCodeBuddyCli.value) return "codebuddy";
+  if (aiIsQoderCli.value) return "qodercli";
   return "codex";
 });
 const aiCliLoginCommand = computed(() => {
@@ -2724,6 +2743,7 @@ const aiCliLoginCommand = computed(() => {
   if (aiIsCursorCli.value) return "agent login";
   if (aiIsGrokCli.value) return "grok login";
   if (aiIsCodeBuddyCli.value) return "codebuddy";
+  if (aiIsQoderCli.value) return "qodercli login";
   return "codex login";
 });
 const aiEditCliPath = computed({
@@ -2734,6 +2754,7 @@ const aiEditCliPath = computed({
     if (aiIsCursorCli.value) return aiEditCursorCliPath.value;
     if (aiIsGrokCli.value) return aiEditGrokCliPath.value;
     if (aiIsCodeBuddyCli.value) return aiEditCodeBuddyCliPath.value;
+    if (aiIsQoderCli.value) return aiEditQoderCliPath.value;
     return aiEditCodexCliPath.value;
   },
   set: (value: string) => {
@@ -2749,6 +2770,8 @@ const aiEditCliPath = computed({
       aiEditGrokCliPath.value = value;
     } else if (aiIsCodeBuddyCli.value) {
       aiEditCodeBuddyCliPath.value = value;
+    } else if (aiIsQoderCli.value) {
+      aiEditQoderCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
@@ -2761,6 +2784,7 @@ const aiEditCliEnvRows = computed(() => {
   if (aiIsCursorCli.value) return aiEditCursorCliEnvRows.value;
   if (aiIsGrokCli.value) return aiEditGrokCliEnvRows.value;
   if (aiIsCodeBuddyCli.value) return aiEditCodeBuddyCliEnvRows.value;
+  if (aiIsQoderCli.value) return aiEditQoderCliEnvRows.value;
   return aiEditCodexCliEnvRows.value;
 });
 watch(aiIsCliProvider, (isCliProvider) => {
@@ -2861,6 +2885,8 @@ function removeCliEnvRow(id: string) {
     aiEditGrokCliEnvRows.value = aiEditGrokCliEnvRows.value.filter((row) => row.id !== id);
   } else if (aiIsCodeBuddyCli.value) {
     aiEditCodeBuddyCliEnvRows.value = aiEditCodeBuddyCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsQoderCli.value) {
+    aiEditQoderCliEnvRows.value = aiEditQoderCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
@@ -2897,6 +2923,8 @@ function currentAiEditConfig() {
     grokCliEnv: aiIsGrokCli.value ? cliEnvFromRows(aiEditGrokCliEnvRows.value) : {},
     codebuddyCliPath: aiEditCodeBuddyCliPath.value.trim() || undefined,
     codebuddyCliEnv: aiIsCodeBuddyCli.value ? cliEnvFromRows(aiEditCodeBuddyCliEnvRows.value) : {},
+    qoderCliPath: aiEditQoderCliPath.value.trim() || undefined,
+    qoderCliEnv: aiIsQoderCli.value ? cliEnvFromRows(aiEditQoderCliEnvRows.value) : {},
   };
 }
 
@@ -2974,6 +3002,8 @@ function aiEnterEditMode(configId?: string) {
       aiEditGrokCliEnvRows.value = aiEnvRowsFromConfig(config.grokCliEnv);
       aiEditCodeBuddyCliPath.value = config.codebuddyCliPath ?? "";
       aiEditCodeBuddyCliEnvRows.value = aiEnvRowsFromConfig(config.codebuddyCliEnv);
+      aiEditQoderCliPath.value = config.qoderCliPath ?? "";
+      aiEditQoderCliEnvRows.value = aiEnvRowsFromConfig(config.qoderCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
@@ -3003,6 +3033,8 @@ function aiEnterEditMode(configId?: string) {
     aiEditGrokCliEnvRows.value = [];
     aiEditCodeBuddyCliPath.value = "";
     aiEditCodeBuddyCliEnvRows.value = [];
+    aiEditQoderCliPath.value = "";
+    aiEditQoderCliEnvRows.value = [];
   }
 }
 
@@ -3651,26 +3683,6 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-execute-all-on-blank-line" v-model="editExecuteAllOnBlankLine" :disabled="editExecuteMode !== 'current'" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-global-connect-timeout">{{ t("settings.globalConnectTimeout") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.globalConnectTimeoutDescription") }}
-                    </p>
-                  </div>
-                  <Input id="editor-global-connect-timeout" v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" max="300" step="1" class="w-24" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-global-query-timeout">{{ t("settings.globalQueryTimeout") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.globalQueryTimeoutDescription") }}
-                    </p>
-                  </div>
-                  <Input id="editor-global-query-timeout" v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" max="300" step="1" class="w-24" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -4390,119 +4402,6 @@ onUnmounted(() => {
 
               <Separator />
 
-              <div class="settings-appearance-group settings-option-stack">
-                <Label>{{ t("settings.dataGridDisplay") }}</Label>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-column-comments-in-header">
-                      {{ t("settings.showColumnCommentsInHeader") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showColumnCommentsInHeaderDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-column-types-in-header">
-                      {{ t("settings.showColumnTypesInHeader") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showColumnTypesInHeaderDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="show-column-types-in-header" v-model="editShowColumnTypesInHeader" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-index-indicators-in-header">
-                      {{ t("settings.showIndexIndicatorsInHeader") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showIndexIndicatorsInHeaderDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="show-index-indicators-in-header" v-model="editShowIndexIndicatorsInHeader" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="compact-column-header-actions">
-                      {{ t("settings.compactColumnHeaderActions") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.compactColumnHeaderActionsDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="data-grid-quick-entry">
-                      {{ t("settings.dataGridQuickEntry") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.dataGridQuickEntryDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="data-grid-quick-entry" v-model="editDataGridQuickEntry" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="data-grid-auto-transpose-single-row">
-                      {{ t("settings.dataGridAutoTransposeSingleRow") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.dataGridAutoTransposeSingleRowDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="data-grid-auto-transpose-single-row" v-model="editDataGridAutoTransposeSingleRow" />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="infinite-scroll">
-                      {{ t("settings.infiniteScroll") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.infiniteScrollDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
-                </div>
-                <div v-if="editInfiniteScroll" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="infinite-scroll-max-rows">
-                      {{ t("settings.infiniteScrollMaxRows") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.infiniteScrollMaxRowsDescription") }}
-                    </p>
-                  </div>
-                  <Input
-                    id="infinite-scroll-max-rows"
-                    v-model="editInfiniteScrollMaxRows"
-                    type="number"
-                    inputmode="numeric"
-                    :min="1000"
-                    :max="50000"
-                    class="h-7 w-24 px-2 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                  />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="auto-calculate-total-rows">
-                      {{ t("settings.autoCalculateTotalRows") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.autoCalculateTotalRowsDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="auto-calculate-total-rows" v-model="editAutoCalculateTotalRows" />
-                </div>
-              </div>
-
-              <Separator />
-
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <Label>{{ t("settings.toolbarTitle") }}</Label>
@@ -4831,7 +4730,152 @@ onUnmounted(() => {
                       {{ t("settings.tableOpenPageSizeDescription") }}
                     </p>
                   </div>
-                  <Input id="table-open-page-size" type="number" inputmode="numeric" class="h-7 w-24 px-2 text-right text-xs tabular-nums" :min="MIN_RESULT_PAGE_SIZE" :max="MAX_RESULT_PAGE_SIZE" :model-value="editTableOpenPageSize" @update:model-value="updateTableOpenPageSizeDraft" />
+                  <Input id="table-open-page-size" type="number" inputmode="numeric" class="h-7 w-24 px-2 text-left text-xs tabular-nums" :min="MIN_RESULT_PAGE_SIZE" :max="MAX_RESULT_PAGE_SIZE" :model-value="editTableOpenPageSize" @update:model-value="updateTableOpenPageSizeDraft" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="query-page-size">
+                      {{ t("settings.queryPageSize") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.queryPageSizeDescription", { max: MAX_RESULT_PAGE_SIZE.toLocaleString() }) }}
+                    </p>
+                  </div>
+                  <Input
+                    id="query-page-size"
+                    type="number"
+                    inputmode="numeric"
+                    class="h-7 w-24 px-2 text-left text-xs tabular-nums"
+                    :min="MIN_RESULT_PAGE_SIZE"
+                    :max="MAX_RESULT_PAGE_SIZE"
+                    :model-value="editPageSize"
+                    :aria-invalid="hasBlockingQueryResultRowLimit"
+                    @update:model-value="updatePageSizeDraft"
+                  />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="query-result-max-rows-enabled">
+                      {{ t("settings.queryResultMaxRows") }}
+                    </Label>
+                    <p class="text-xs" :class="hasBlockingQueryResultRowLimit ? 'text-destructive' : 'text-muted-foreground'">
+                      {{ hasBlockingQueryResultRowLimit ? t("settings.queryResultMaxRowsTooSmall", { pageSize: editPageSize }) : editQueryResultMaxRowsEnabled ? t("settings.queryResultMaxRowsDescription") : t("settings.queryResultMaxRowsUnlimitedDescription") }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Input
+                      id="query-result-max-rows"
+                      type="number"
+                      inputmode="numeric"
+                      class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
+                      :min="1"
+                      :max="MAX_QUERY_RESULT_MAX_ROWS"
+                      :model-value="editQueryResultMaxRows"
+                      :disabled="!editQueryResultMaxRowsEnabled"
+                      :aria-invalid="hasBlockingQueryResultRowLimit"
+                      @input="updateQueryResultMaxRowsInput"
+                    />
+                    <Switch id="query-result-max-rows-enabled" v-model="editQueryResultMaxRowsEnabled" :aria-label="t('settings.queryResultMaxRowsEnabled')" />
+                  </div>
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll">
+                      {{ t("settings.infiniteScroll") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="auto-calculate-total-rows">
+                      {{ t("settings.autoCalculateTotalRows") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.autoCalculateTotalRowsDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="auto-calculate-total-rows" v-model="editAutoCalculateTotalRows" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-column-comments-in-header">
+                      {{ t("settings.showColumnCommentsInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showColumnCommentsInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-column-types-in-header">
+                      {{ t("settings.showColumnTypesInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showColumnTypesInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-column-types-in-header" v-model="editShowColumnTypesInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="colorize-data-grid-cell-types">
+                      {{ t("settings.colorizeDataGridCellTypes") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.colorizeDataGridCellTypesDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="colorize-data-grid-cell-types" v-model="editColorizeDataGridCellTypes" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-index-indicators-in-header">
+                      {{ t("settings.showIndexIndicatorsInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showIndexIndicatorsInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-index-indicators-in-header" v-model="editShowIndexIndicatorsInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="compact-column-header-actions">
+                      {{ t("settings.compactColumnHeaderActions") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.compactColumnHeaderActionsDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-quick-entry">
+                      {{ t("settings.dataGridQuickEntry") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridQuickEntryDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-quick-entry" v-model="editDataGridQuickEntry" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-auto-transpose-single-row">
+                      {{ t("settings.dataGridAutoTransposeSingleRow") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridAutoTransposeSingleRowDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-auto-transpose-single-row" v-model="editDataGridAutoTransposeSingleRow" />
                 </div>
               </div>
 
@@ -6215,15 +6259,15 @@ onUnmounted(() => {
               <div class="space-y-2">
                 <Label>{{ t("settings.mcpConfig") }}</Label>
                 <Tabs v-model="mcpConfigTab" class="space-y-3">
-                  <TabsList class="h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
-                    <TabsTrigger value="claude" class="h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
-                    <TabsTrigger value="cursor" class="h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
-                    <TabsTrigger value="trae" class="h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
-                    <TabsTrigger value="vscode" class="h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
-                    <TabsTrigger value="windsurf" class="h-7 flex-none shrink-0 px-2.5">Windsurf</TabsTrigger>
-                    <TabsTrigger value="codex" class="h-7 flex-none shrink-0 px-2.5">Codex</TabsTrigger>
-                    <TabsTrigger value="opencode" class="h-7 flex-none shrink-0 px-2.5">OpenCode</TabsTrigger>
-                    <TabsTrigger value="cherry-studio" class="h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
+                  <TabsList class="settings-mcp-config-tabs h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
+                    <TabsTrigger value="claude" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
+                    <TabsTrigger value="cursor" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
+                    <TabsTrigger value="trae" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
+                    <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
+                    <TabsTrigger value="windsurf" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Windsurf</TabsTrigger>
+                    <TabsTrigger value="codex" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Codex</TabsTrigger>
+                    <TabsTrigger value="opencode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">OpenCode</TabsTrigger>
+                    <TabsTrigger value="cherry-studio" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="claude" class="m-0">
@@ -6791,6 +6835,28 @@ html.dbx-legacy-webview .settings-layout .settings-export-number-input::-webkit-
   appearance: auto !important;
   min-height: 1.5rem !important;
   opacity: 1 !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-mcp-config-tabs {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 0.25rem !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  white-space: nowrap !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-mcp-config-tab {
+  display: inline-flex !important;
+  flex: 0 0 auto !important;
+  width: max-content !important;
+  min-width: max-content !important;
+  max-width: none !important;
+  padding-left: 0.625rem !important;
+  padding-right: 0.625rem !important;
+  white-space: nowrap !important;
 }
 
 html.dbx-legacy-webview .settings-ai-back-button {

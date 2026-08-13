@@ -183,6 +183,10 @@ export function clearDataGridPendingSnapshotsForTab(tabId: string) {
   }
 }
 
+export function clearDataGridPendingSnapshot(cacheKey: string) {
+  pendingChangesCache.delete(cacheKey);
+}
+
 export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const connectionStore = useConnectionStore();
   const historyStore = useHistoryStore();
@@ -1120,12 +1124,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return { ok: true, rowCount: mappedRows.length };
   }
 
-  function clonedRowData(item: RowItem): CellValue[] {
+  function clonedRowData(item: RowItem, resolvedValues?: ReadonlyMap<number, CellValue>): CellValue[] {
     const columnInfoByName = new Map((tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]));
     return item.data.map((val, i) => {
       const columnName = sourceColumns.value?.[i] ?? result.value.columns[i];
       const columnInfo = columnInfoByName.get(columnName.toLowerCase());
-      return shouldClearClonedColumn(columnName, columnInfo) ? null : val;
+      if (shouldClearClonedColumn(columnName, columnInfo)) return null;
+      return resolvedValues?.has(i) ? (resolvedValues.get(i) ?? null) : val;
     });
   }
 
@@ -1137,10 +1142,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return /\b(auto_increment|autoincrement|identity|generated)\b/i.test(extra) || /\bnextval\s*\(/i.test(columnDefault);
   }
 
-  function cloneRow(rowId: number) {
+  function cloneRow(rowId: number, resolvedValues?: ReadonlyMap<number, CellValue>) {
     const item = getRowItem(rowId);
     if (!item) return;
-    const clonedData = clonedRowData(item);
+    const clonedData = clonedRowData(item, resolvedValues);
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
@@ -1159,13 +1164,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     });
   }
 
-  function cloneRows(rowIds: number[]) {
+  function cloneRows(rowIds: number[], resolvedValues?: ReadonlyMap<number, ReadonlyMap<number, CellValue>>) {
     const rowsToClone = rowIds.map((rowId) => getRowItem(rowId)).filter(Boolean) as RowItem[];
     if (rowsToClone.length === 0) return;
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     for (const item of rowsToClone) {
-      const clonedData = clonedRowData(item);
+      const clonedData = clonedRowData(item, resolvedValues?.get(item.id));
       newRows.value.push(clonedData);
       newRowMeta.value.push(clonedRowMeta(item, clonedData));
     }
@@ -1388,6 +1393,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     };
   }
 
+  function saveDriverProfile() {
+    const id = connectionId.value;
+    return id ? connectionStore.getConfig(id)?.driver_profile : undefined;
+  }
+
   function tableHistoryTarget() {
     if (!tableMeta.value) return "";
     return [tableMeta.value.schema, tableMeta.value.tableName].filter(Boolean).join(".");
@@ -1514,7 +1524,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     let preparedSave: Awaited<ReturnType<typeof api.prepareDataGridSave>> | undefined;
     if (stmtOptions) {
       try {
-        preparedSave = await api.prepareDataGridSave(stmtOptions);
+        preparedSave = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
       } catch (e: any) {
         saveError.value = normalizeDataGridSaveError(databaseType.value, e);
         await finishInterruptedSaveChanges(snapshot);
@@ -1720,7 +1730,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
       const stmtOptions = saveStatementOptions();
       if (!stmtOptions) return [];
-      const prepared = await api.prepareDataGridSave(stmtOptions);
+      const prepared = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
       if (prepared?.validationError) {
         saveError.value = prepared.validationError;
         return [];
