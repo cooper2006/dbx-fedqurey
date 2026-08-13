@@ -82,7 +82,8 @@ mod tests {
         assert_eq!(analysis.connections[0], "my_pg");
         assert_eq!(analysis.table_refs.len(), 1);
         assert_eq!(analysis.table_refs[0].connection_name, "my_pg");
-        assert_eq!(analysis.table_refs[0].schema_name, Some("public".to_string()));
+        assert_eq!(analysis.table_refs[0].database_name, Some("public".to_string()));
+        assert_eq!(analysis.table_refs[0].schema_name, None);
         assert_eq!(analysis.table_refs[0].table_name, "users");
     }
 
@@ -233,7 +234,8 @@ mod tests {
         assert_eq!(analysis.single_connection, Some("doris".to_string()));
         assert_eq!(analysis.table_refs.len(), 1);
         assert_eq!(analysis.table_refs[0].connection_name, "doris");
-        assert_eq!(analysis.table_refs[0].schema_name, Some("freequery".to_string()));
+        assert_eq!(analysis.table_refs[0].database_name, Some("freequery".to_string()));
+        assert_eq!(analysis.table_refs[0].schema_name, None);
         assert_eq!(analysis.table_refs[0].table_name, "DIM_BM_A01SFZJLX");
 
         let rewritten = rewrite_federated_sql(sql, &analysis);

@@ -2345,14 +2345,14 @@ fn list_tables_sql(
         }
     }
     if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
-        let escaped = filter.to_ascii_lowercase().replace('\\', "\\").replace('%', "~%").replace('_', "~_");
+        let escaped = filter.to_ascii_lowercase().replace('\\', "\\");
         let pattern = format!("%{}%", escaped);
         if crate::sql::fuzzy_filter_enabled(filter) {
             let fuzzy_pattern = crate::sql::fuzzy_like_pattern_with_escape(&filter.to_ascii_lowercase(), |value| {
-                value.replace('\\', "\\").replace('%', "~%").replace('_', "~_")
+                value.replace('\\', "\\")
             });
             sql.push_str(&format!(
-                " AND (LOWER(TABLE_NAME) LIKE {} ESCAPE '~' OR LOWER(TABLE_COMMENT) LIKE {} ESCAPE '~' OR LOWER(TABLE_NAME) LIKE {} ESCAPE '~' OR LOWER(TABLE_COMMENT) LIKE {} ESCAPE '~')",
+                " AND (LOWER(TABLE_NAME) LIKE {} OR LOWER(TABLE_COMMENT) LIKE {} OR LOWER(TABLE_NAME) LIKE {} OR LOWER(TABLE_COMMENT) LIKE {})",
                 quote_value(&pattern),
                 quote_value(&pattern),
                 quote_value(&fuzzy_pattern),
@@ -2360,7 +2360,7 @@ fn list_tables_sql(
             ));
         } else {
             sql.push_str(&format!(
-                " AND (LOWER(TABLE_NAME) LIKE {} ESCAPE '~' OR LOWER(TABLE_COMMENT) LIKE {} ESCAPE '~')",
+                " AND (LOWER(TABLE_NAME) LIKE {} OR LOWER(TABLE_COMMENT) LIKE {})",
                 quote_value(&pattern),
                 quote_value(&pattern)
             ));
@@ -2378,7 +2378,7 @@ fn list_tables_sql(
 }
 
 fn quote_table_name_like_pattern(pattern: &str) -> String {
-    quote_value(&pattern.trim().to_ascii_lowercase().replace('%', "~%").replace('_', "~_"))
+    quote_value(&pattern.trim().to_ascii_lowercase())
 }
 
 fn append_table_name_filter_sql(sql: &mut String, filter: Option<&TableNameFilter>) {
@@ -2392,13 +2392,13 @@ fn append_table_name_filter_sql(sql: &mut String, filter: Option<&TableNameFilte
     if !include_patterns.is_empty() {
         let clauses = include_patterns
             .iter()
-            .map(|pattern| format!("LOWER(TABLE_NAME) LIKE {} ESCAPE '~'", quote_table_name_like_pattern(pattern)))
+            .map(|pattern| format!("LOWER(TABLE_NAME) LIKE {}", quote_table_name_like_pattern(pattern)))
             .collect::<Vec<_>>()
             .join(" OR ");
         sql.push_str(&format!(" AND ({clauses})"));
     }
     for pattern in exclude_patterns {
-        sql.push_str(&format!(" AND LOWER(TABLE_NAME) NOT LIKE {} ESCAPE '~'", quote_table_name_like_pattern(pattern)));
+        sql.push_str(&format!(" AND LOWER(TABLE_NAME) NOT LIKE {}", quote_table_name_like_pattern(pattern)));
     }
 }
 
@@ -2522,7 +2522,7 @@ fn mysql_completion_schemas_sql(pattern: &str, limit: usize) -> String {
     format!(
         "SELECT SCHEMA_NAME AS schema_name \
          FROM information_schema.SCHEMATA \
-         WHERE SCHEMA_NAME LIKE {} ESCAPE '~' \
+         WHERE SCHEMA_NAME LIKE {} \
          ORDER BY SCHEMA_NAME LIMIT {}",
         quote_value(pattern),
         limit,
@@ -2539,7 +2539,7 @@ fn mysql_completion_tables_sql(
     format!(
         "SELECT TABLE_NAME AS object_name, TABLE_TYPE AS table_type, TABLE_COMMENT AS object_comment \
          FROM information_schema.TABLES \
-         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME LIKE {pattern} ESCAPE '~' AND TABLE_TYPE IN ({table_types}) \
+         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME LIKE {pattern} AND TABLE_TYPE IN ({table_types}) \
          ORDER BY TABLE_NAME LIMIT {limit}",
         db = quote_value(database),
         pattern = quote_value(pattern),
@@ -2558,7 +2558,7 @@ fn mysql_completion_routines_sql(
     format!(
         "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS routine_type, ROUTINE_COMMENT AS object_comment, DATA_TYPE AS data_type \
          FROM information_schema.ROUTINES \
-         WHERE ROUTINE_SCHEMA = {db} AND ROUTINE_NAME LIKE {pattern} ESCAPE '~' AND ROUTINE_TYPE IN ({routine_types}) \
+         WHERE ROUTINE_SCHEMA = {db} AND ROUTINE_NAME LIKE {pattern} AND ROUTINE_TYPE IN ({routine_types}) \
          ORDER BY ROUTINE_NAME LIMIT {limit}",
         db = quote_value(database),
         pattern = quote_value(pattern),
@@ -2571,7 +2571,7 @@ fn mysql_completion_columns_sql(database: &str, table: &str, pattern: &str, limi
     format!(
         "SELECT COLUMN_NAME AS object_name, COLUMN_TYPE AS data_type, COLUMN_COMMENT AS object_comment \
          FROM information_schema.COLUMNS \
-         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME = {table} AND COLUMN_NAME LIKE {pattern} ESCAPE '~' \
+         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME = {table} AND COLUMN_NAME LIKE {pattern} \
          ORDER BY ORDINAL_POSITION LIMIT {limit}",
         db = quote_value(database),
         table = quote_value(table),
@@ -2621,8 +2621,9 @@ fn mysql_completion_like_pattern(value: &str, mode: Option<&CompletionAssistantM
     if value.trim().is_empty() || value == "%" {
         return "%".to_string();
     }
-    let escaped = value.trim().replace('\\', "\\").replace('%', "~%").replace('_', "~_");
+    let escaped = value.trim().replace('\\', "\\");
     match mode.unwrap_or(&CompletionAssistantMatchMode::Prefix) {
+        CompletionAssistantMatchMode::Prefix if escaped.ends_with('%') => escaped,
         CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
         CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
     }
@@ -2844,10 +2845,7 @@ fn show_table_status_sql(database: &str, filter: Option<&str>) -> String {
         let conditions = patterns
             .iter()
             .flat_map(|pattern| {
-                [
-                    format!("Name LIKE {} ESCAPE '~'", quote_value(pattern)),
-                    format!("Comment LIKE {} ESCAPE '~'", quote_value(pattern)),
-                ]
+                [format!("Name LIKE {}", quote_value(pattern)), format!("Comment LIKE {}", quote_value(pattern))]
             })
             .collect::<Vec<_>>();
         sql.push_str(" WHERE ");
@@ -2869,19 +2867,17 @@ fn show_tables_filter_conditions(database: &str, filter: Option<&str>, exact_nam
         .filter(|filter| !filter.is_empty())
         .into_iter()
         .flat_map(mysql_fallback_like_patterns)
-        .map(|pattern| format!("{table_name_column} LIKE {} ESCAPE '~'", quote_value(&pattern)))
+        .map(|pattern| format!("{table_name_column} LIKE {}", quote_value(&pattern)))
         .collect::<Vec<_>>();
     conditions.extend(exact_names.iter().map(|name| format!("{table_name_column} = {}", quote_value(name))));
     conditions
 }
 
 fn mysql_fallback_like_patterns(filter: &str) -> Vec<String> {
-    let escaped = filter.replace('\\', "\\").replace('%', "~%").replace('_', "~_");
+    let escaped = filter.replace('\\', "\\");
     let mut patterns = vec![format!("%{escaped}%")];
     if crate::sql::fuzzy_filter_enabled(filter) {
-        patterns.push(crate::sql::fuzzy_like_pattern_with_escape(filter, |value| {
-            value.replace('\\', "\\").replace('%', "~%").replace('_', "~_")
-        }));
+        patterns.push(crate::sql::fuzzy_like_pattern_with_escape(filter, |value| value.replace('\\', "\\")));
     }
     patterns
 }
@@ -6085,10 +6081,10 @@ mod tests {
 
         assert!(sql.contains("FROM information_schema.TABLES"));
         assert!(sql.contains("TABLE_SCHEMA = 'app'"));
-        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%user~_~%%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%user~_~%%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%s%e%r%~_%~%%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%u%s%e%r%~_%~%%' ESCAPE '~'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%user_%%'"));
+        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%user_%%'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%s%e%r%_%%%'"));
+        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%u%s%e%r%_%%%'"));
         assert!(sql.contains("ORDER BY TABLE_NAME"));
         assert!(sql.contains("LIMIT 101"));
         assert!(sql.contains("OFFSET 200"));
@@ -6098,18 +6094,18 @@ mod tests {
     fn mysql_list_tables_sql_adds_fuzzy_filter_pattern() {
         let sql = list_tables_sql("app", Some("sysu"), Some(100), None, None, None);
 
-        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%sysu%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%sysu%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%s%y%s%u%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%s%y%s%u%' ESCAPE '~'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%sysu%'"));
+        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%sysu%'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%s%y%s%u%'"));
+        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%s%y%s%u%'"));
     }
 
     #[test]
     fn mysql_list_tables_sql_skips_fuzzy_filter_for_single_character() {
         let sql = list_tables_sql("app", Some("u"), Some(100), None, None, None);
 
-        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%u%' ESCAPE '~'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%'"));
+        assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%u%'"));
         assert_eq!(sql.matches("LOWER(TABLE_NAME) LIKE").count(), 1);
         assert_eq!(sql.matches("LOWER(TABLE_COMMENT) LIKE").count(), 1);
         assert!(!sql.contains(" OR LOWER(TABLE_NAME) LIKE"));
@@ -6168,12 +6164,12 @@ mod tests {
         assert!(tables_sql.starts_with("SHOW FULL TABLES FROM `app` WHERE "));
         assert!(tables_sql.contains("`Tables_in_app` LIKE"));
         assert!(tables_sql.contains("missing"));
-        assert!(tables_sql.contains("ESCAPE"));
+        assert!(!tables_sql.contains("ESCAPE"));
         assert!(status_sql.starts_with("SHOW TABLE STATUS FROM `app` WHERE "));
         assert!(status_sql.contains("Name LIKE"));
         assert!(status_sql.contains("Comment LIKE"));
         assert!(status_sql.contains("missing"));
-        assert!(status_sql.contains("ESCAPE"));
+        assert!(!status_sql.contains("ESCAPE"));
         assert!(!tables_sql.eq(&show_tables_filtered_sql("app", true, None, &[])));
     }
 
@@ -6224,10 +6220,11 @@ mod tests {
             exclude_patterns: vec!["%_bak".to_string()],
         };
         let sql = list_tables_sql("app", None, Some(100), Some(200), None, Some(&filter));
+        eprintln!("SQL2: {}", sql);
 
-        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'ads~_cp~%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'user~_~%' ESCAPE '~'"));
-        assert!(sql.contains("LOWER(TABLE_NAME) NOT LIKE '~%~_bak' ESCAPE '~'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'ads_cp%'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'user_%'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) NOT LIKE '%_bak'"));
         assert!(sql.find("LOWER(TABLE_NAME) LIKE").unwrap() < sql.find("ORDER BY TABLE_NAME").unwrap());
         assert!(sql.find("ORDER BY TABLE_NAME").unwrap() < sql.find("LIMIT 100").unwrap());
     }
@@ -6605,7 +6602,7 @@ mod tests {
         assert_eq!(mysql_completion_like_pattern("Temp", Some(&CompletionAssistantMatchMode::Contains)), "%Temp%");
         assert_eq!(
             mysql_completion_like_pattern("order_100%", Some(&CompletionAssistantMatchMode::Prefix)),
-            "order~_100~%%"
+            "order_100%"
         );
     }
 
@@ -6621,12 +6618,12 @@ mod tests {
             mysql_completion_routines_sql("app", "%audit%", &[CompletionAssistantObjectKind::Routine], 50);
         let column_sql = mysql_completion_columns_sql("app", "users", "id%", 25);
 
-        assert!(table_sql.contains("TABLE_NAME LIKE 'Temp%' ESCAPE '~'"));
+        assert!(table_sql.contains("TABLE_NAME LIKE 'Temp%'"));
         assert!(table_sql.contains("TABLE_TYPE IN ('BASE TABLE','SYSTEM VERSIONED','VIEW')"));
         assert!(table_sql.contains("ORDER BY TABLE_NAME LIMIT 100"));
-        assert!(routine_sql.contains("ROUTINE_NAME LIKE '%audit%' ESCAPE '~'"));
+        assert!(routine_sql.contains("ROUTINE_NAME LIKE '%audit%'"));
         assert!(routine_sql.contains("ROUTINE_TYPE IN ('PROCEDURE','FUNCTION')"));
-        assert!(column_sql.contains("COLUMN_NAME LIKE 'id%' ESCAPE '~'"));
+        assert!(column_sql.contains("COLUMN_NAME LIKE 'id%'"));
         assert!(column_sql.contains("ORDER BY ORDINAL_POSITION LIMIT 25"));
     }
 
