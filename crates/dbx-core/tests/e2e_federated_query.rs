@@ -120,11 +120,14 @@ mod e2e_tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: false,
             read_only: false,
             is_production: false,
             production_databases: Vec::new(),
             database_info: None,
             federation_enabled,
+            default_schema: None,
+            docs_notes_path: None,
         }
     }
 

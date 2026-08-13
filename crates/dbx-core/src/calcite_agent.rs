@@ -1055,6 +1055,7 @@ mod tests {
             production_databases: Vec::new(),
             database_info: None,
             one_time: false,
+            save_password: false,
             read_only: false,
             default_schema: None,
             docs_notes_path: None,

@@ -563,26 +563,28 @@ public class CalciteAgent {
     }
 
     /**
-     * 重写联邦 SQL
-     * 将 连接名.Schema.表名 转换为 Calcite 格式："连接名"."Schema"."表名"
+     * 联邦查询 SQL 重写：将 连接名.database.table 和 连接名.database.schema.table 格式
+     * 转换为 Calcite JdbcSchema 可识别的格式。
+     *
+     * - 3-part: connId.database.table → "connId"."database"."table"
+     * - 4-part: connId.database.schema.table → "connId"."database"."schema"."table"
+     *
      * Calcite 会通过已注册的 Schema 自动路由到正确的数据源
      */
     private String rewriteFederatedSql(String sql) {
-        // 将 连接名.Schema.表名 和 连接名.Database.Schema.表名 重写为 "连接名"."表名"
-        // 因为每个连接注册为单个 JdbcSchema（映射到数据库默认 Schema），表直接在连接名下可访问
         String result = sql;
 
         for (String connId : registeredSources.keySet()) {
-            // 处理四段式：connId.database.schema.table → "connId"."table"
+            // 处理四段式：connId.database.schema.table → "connId"."database"."schema"."table"
             // 必须先处理四段式（更长的匹配），再处理三段式
             String pattern4 = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
                 "\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)";
-            result = result.replaceAll(pattern4, "\"" + connId + "\".\"$3\"");
+            result = result.replaceAll(pattern4, "\"" + connId + "\".\"$1\".\"$2\".\"$3\"");
 
-            // 匹配三段式 connId.schema.table → "connId"."table"
+            // 匹配三段式 connId.database.table → "connId"."database"."table"
             String pattern3 = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
                 "\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)";
-            result = result.replaceAll(pattern3, "\"" + connId + "\".\"$2\"");
+            result = result.replaceAll(pattern3, "\"" + connId + "\".\"$1\".\"$2\"");
         }
 
         return result;

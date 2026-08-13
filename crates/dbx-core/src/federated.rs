@@ -2,7 +2,9 @@
 //!
 //! This module implements the core federation logic:
 //! 1. Parse SQL using sqlparser to extract table references
-//! 2. Detect 3-part naming convention: `connection_name.schema.table`
+//! 2. Detect naming conventions:
+//!    - 3-part: `connection.database.table` (database is required, schema auto-detected from dialect)
+//!    - 4-part: `connection.database.schema.table` (full qualified)
 //! 3. Map each table reference to its owning connection
 //! 4. Determine if single-connection fast path or multi-connection Calcite path is needed
 
@@ -228,7 +230,7 @@ fn extract_table_refs(
 
         // Check if this is a federated reference (has connection prefix)
         if parts.len() >= 3 {
-            // 3 parts: connection.schema.table (PostgreSQL) or connection.database.table (MySQL)
+            // 3 parts: connection.database.table (database is required)
             // 4 parts: connection.database.schema.table (full qualified)
             // Try to match the first part as a connection name (exact first, then case-insensitive)
             let conn_name = parts[0];
@@ -238,8 +240,8 @@ fn extract_table_refs(
                     // connection.database.schema.table
                     (Some(parts[1].to_string()), Some(parts[2].to_string()), parts[3].to_string())
                 } else {
-                    // connection.schema.table (3 parts)
-                    (None, Some(parts[1].to_string()), parts[2].to_string())
+                    // connection.database.table (3 parts)
+                    (Some(parts[1].to_string()), None, parts[2].to_string())
                 };
 
                 // Use the canonical connection name from the config so downstream
@@ -346,9 +348,11 @@ pub fn rewrite_federated_sql(sql: &str, analysis: &FederatedAnalysis) -> Option<
         if ref_.connection_name == *conn_name {
             let mut new_parts: Vec<ObjectNamePart> = Vec::new();
             if let Some(ref db) = ref_.database_name {
+                // database part (parts[1] in connection.database.table or connection.database.schema.table)
                 new_parts.push(ObjectNamePart::Identifier(Ident::new(db)));
             }
             if let Some(ref schema) = ref_.schema_name {
+                // schema part (parts[2] in connection.database.schema.table, if present)
                 new_parts.push(ObjectNamePart::Identifier(Ident::new(schema)));
             }
             new_parts.push(ObjectNamePart::Identifier(Ident::new(&ref_.table_name)));
@@ -513,6 +517,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: false,
             read_only: false,
             is_production: false,
             production_databases: Vec::new(),
@@ -537,7 +542,9 @@ mod tests {
         assert_eq!(analysis.single_connection, Some("PostgreSQL".to_string()));
         assert_eq!(analysis.table_refs.len(), 1);
         assert_eq!(analysis.table_refs[0].connection_name, "PostgreSQL");
-        assert_eq!(analysis.table_refs[0].schema_name, Some("public".to_string()));
+        // 3-part: connection.database.table — parts[1] is the database name
+        assert_eq!(analysis.table_refs[0].database_name, Some("public".to_string()));
+        assert_eq!(analysis.table_refs[0].schema_name, None);
         assert_eq!(analysis.table_refs[0].table_name, "users");
 
         // Rewrite must strip the lowercase prefix and produce the target table ref.
@@ -560,7 +567,9 @@ mod tests {
         assert_eq!(analysis.single_connection, Some("my_pg".to_string()));
         assert_eq!(analysis.table_refs.len(), 1);
         assert_eq!(analysis.table_refs[0].connection_name, "my_pg");
-        assert_eq!(analysis.table_refs[0].schema_name, Some("public".to_string()));
+        // 3-part: connection.database.table — parts[1] is now the database name
+        assert_eq!(analysis.table_refs[0].database_name, Some("public".to_string()));
+        assert_eq!(analysis.table_refs[0].schema_name, None);
         assert_eq!(analysis.table_refs[0].table_name, "users");
     }
 
@@ -622,12 +631,14 @@ mod tests {
     #[test]
     fn test_rewrite_single_connection_sql() {
         let conn = make_test_connection("my_pg", DatabaseType::Postgres, "mydb");
+        // 3-part: connection.database.table
         let sql = "SELECT * FROM my_pg.public.users WHERE id = 1";
 
         let analysis = analyze_federation(sql, &[conn.clone()]);
         let rewritten = rewrite_federated_sql(sql, &analysis);
 
         assert!(rewritten.is_some());
+        // 3-part strips connection only, keeps database.table
         assert_eq!(rewritten.unwrap(), "SELECT * FROM public.users WHERE id = 1");
     }
 
@@ -707,7 +718,9 @@ mod tests {
         assert_eq!(analysis.single_connection, Some("doris-Local".to_string()));
         assert_eq!(analysis.table_refs.len(), 1);
         assert_eq!(analysis.table_refs[0].connection_name, "doris-Local");
-        assert_eq!(analysis.table_refs[0].schema_name, Some("freequery".to_string()));
+        // 3-part: connection.database.table — parts[1] is the database name
+        assert_eq!(analysis.table_refs[0].database_name, Some("freequery".to_string()));
+        assert_eq!(analysis.table_refs[0].schema_name, None);
         assert_eq!(analysis.table_refs[0].table_name, "DIM_BM_AD_PS");
 
         // Rewrite must strip the hyphenated connection prefix entirely.
