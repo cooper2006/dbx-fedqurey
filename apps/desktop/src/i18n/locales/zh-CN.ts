@@ -1932,6 +1932,7 @@ export default withEnglishFallback({
     },
     legacy: "后端返回了错误。",
     unknown: "发生了未预期的后端错误。",
+    requestFailed: "后端请求失败。",
   },
   common: {
     fileNotFound: "文件不存在：{path}",

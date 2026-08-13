@@ -2007,6 +2007,7 @@ export default {
     },
     legacy: "Backend returned an error.",
     unknown: "An unexpected backend error occurred.",
+    requestFailed: "Backend request failed.",
   },
   common: {
     fileNotFound: "File does not exist: {path}",

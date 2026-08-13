@@ -144,6 +144,9 @@ const patterns: [RegExp, string][] = [
 
   // Web auth rate limiting (crates/dbx-web/src/auth.rs)
   [/^Please try again in (\d+)s$/, "auth.rateLimited"],
+
+  // Generic backend errors
+  [/^Backend request failed$/, "backendErrors.requestFailed"],
 ];
 
 // Named placeholders for each pattern's capture groups, in capture order.
