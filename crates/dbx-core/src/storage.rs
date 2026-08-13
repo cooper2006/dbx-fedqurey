@@ -4435,7 +4435,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
-            federation_enabled: false,
+            federation_enabled: true,
         }
     }
 
