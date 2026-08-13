@@ -46,7 +46,7 @@ pub struct FederatedAnalysis {
     pub is_single_connection: bool,
     /// The single connection name if applicable
     pub single_connection: Option<String>,
-    /// Whether the query uses explicit federation syntax (connection.schema.table)
+    /// Whether the query uses explicit federation syntax (connection.database.table)
     pub uses_federation_syntax: bool,
 }
 
