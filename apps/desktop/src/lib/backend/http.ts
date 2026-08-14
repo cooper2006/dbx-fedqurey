@@ -203,6 +203,7 @@ import type {
   NacosSearchProgress,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
@@ -234,6 +235,55 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
+}
+
+async function postQueryWithDiagnostics<T>(url: string, body: unknown, traceId?: string): Promise<T> {
+  if (!isDebugLoggingEnabled()) return post(url, body);
+
+  const startedAt = performance.now();
+  const serializedBody = JSON.stringify(body);
+  const response = await fetch(apiUrl(url), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: serializedBody,
+  });
+  const headersAt = performance.now();
+  const responseText = await response.text();
+  const bodyAt = performance.now();
+  if (!response.ok) {
+    appendDebugLog("warn", "[DBX][query-transport:http:error]", {
+      traceId: traceId?.slice(0, 8),
+      status: response.status,
+      requestBytes: new TextEncoder().encode(serializedBody).byteLength,
+      responseBytes: new TextEncoder().encode(responseText).byteLength,
+      responseHeadersMs: Math.round(headersAt - startedAt),
+      responseBodyMs: Math.round(bodyAt - headersAt),
+      totalMs: Math.round(bodyAt - startedAt),
+      backendCoreMs: response.headers.get("x-dbx-core-ms"),
+      backendSerializeMs: response.headers.get("x-dbx-serialize-ms"),
+    });
+    throw await backendResponseError(
+      new Response(responseText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      }),
+    );
+  }
+  const result = JSON.parse(responseText) as T;
+  const parsedAt = performance.now();
+  appendDebugLog("info", "[DBX][query-transport:http]", {
+    traceId: traceId?.slice(0, 8),
+    requestBytes: new TextEncoder().encode(serializedBody).byteLength,
+    responseBytes: new TextEncoder().encode(responseText).byteLength,
+    responseHeadersMs: Math.round(headersAt - startedAt),
+    responseBodyMs: Math.round(bodyAt - headersAt),
+    jsonParseMs: Math.round(parsedAt - bodyAt),
+    totalMs: Math.round(parsedAt - startedAt),
+    backendCoreMs: response.headers.get("x-dbx-core-ms"),
+    backendSerializeMs: response.headers.get("x-dbx-serialize-ms"),
+  });
+  return result;
 }
 
 async function get<T>(url: string): Promise<T> {
@@ -900,6 +950,7 @@ export async function executeQuery(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -927,6 +978,7 @@ export async function executeMulti(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;
@@ -938,14 +990,18 @@ export async function executeMulti(
     executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
-  return post("/api/query/execute-multi", {
-    connectionId,
-    database,
-    sql,
-    schema,
+  return postQueryWithDiagnostics(
+    "/api/query/execute-multi",
+    {
+      connectionId,
+      database,
+      sql,
+      schema,
+      executionId,
+      ...options,
+    },
     executionId,
-    ...options,
-  });
+  );
 }
 
 export interface ExecuteMultiProgress {
@@ -970,6 +1026,7 @@ export async function executeMultiWithProgress(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;
@@ -2162,7 +2219,7 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
           finish(() => reject(new Error(progress.errorMessage || "Export failed")));
         } else if (progress.status === "Done") {
           // Trigger browser download
-          downloadTableExportFile(exportId, request.format);
+          downloadTableExportFile(exportId);
           finish(() => resolve(progress));
         } else {
           finish(() => resolve(progress));
@@ -2176,11 +2233,9 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
   });
 }
 
-function downloadTableExportFile(exportId: string, format: string): void {
-  const ext = format === "markdown" || format === "md" ? "md" : format;
+function downloadTableExportFile(exportId: string): void {
   const a = document.createElement("a");
   a.href = apiUrl(`/api/export/table/download/${exportId}`);
-  a.download = `table_export_${exportId}.${ext}`;
   a.click();
 }
 
@@ -2218,7 +2273,7 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
         if (progress.status === "Error") {
           finish(() => reject(new Error(progress.errorMessage || "Export failed")));
         } else if (progress.status === "Done") {
-          downloadQueryResultExportFile(exportId, request.format);
+          downloadQueryResultExportFile(exportId);
           finish(() => resolve(progress));
         } else {
           finish(() => resolve(progress));
@@ -2232,10 +2287,9 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
   });
 }
 
-function downloadQueryResultExportFile(exportId: string, format: string): void {
+function downloadQueryResultExportFile(exportId: string): void {
   const a = document.createElement("a");
   a.href = apiUrl(`/api/export/query-result/download/${exportId}`);
-  a.download = `query_result_export_${exportId}.${format}`;
   a.click();
 }
 
@@ -3790,8 +3844,8 @@ export async function checkMcpServerStatus(): Promise<import("@/lib/backend/taur
     native_bin_path: null,
     script_path: null,
     data_dir: null,
-    install_command: "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org",
-    update_command: "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org",
+    install_command: "npm install -g @dbx-app/mcp-server@latest",
+    update_command: "npm install -g @dbx-app/mcp-server@latest",
     error: "MCP Server status is only available in the desktop app.",
   };
 }

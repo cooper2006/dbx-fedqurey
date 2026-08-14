@@ -6940,6 +6940,23 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6">
+                <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                  <div class="flex items-center gap-1">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckDisabled") }}</Label>
+                    <Tooltip>
+                      <TooltipTrigger as-child>
+                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                        {{ t("connection.elasticsearchConnectivityCheckDisabledHint") }}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <div class="col-span-3">
+                    <Switch v-model="elasticsearchConnectivityCheckDisabled" @update:model-value="resetTestState" />
+                  </div>
+                </div>
+
                 <section v-if="form.db_type === 'nacos'" data-nacos-advanced-settings class="overflow-hidden rounded-lg border">
                   <div class="border-b bg-muted/20 px-4 py-3">
                     <div class="text-sm font-medium">{{ t("nacos.nacosAdvancedTitle") }}</div>

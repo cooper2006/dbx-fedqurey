@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.io.Reader;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.math.BigDecimal;
@@ -17,6 +19,7 @@ import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.Clob;
 import java.sql.DatabaseMetaData;
 import java.sql.Date;
 import java.sql.Driver;
@@ -310,6 +313,7 @@ public final class DbxJdbcPlugin {
                 optionalText(params, "schema"),
                 positiveInt(params, "maxRows", MAX_ROWS),
                 nonNegativeInt(params, "fetchSize", 0),
+                nonNegativeInt(params, "rowOffset", 0),
                 nonNegativeInt(params, "timeoutSecs", -1)
             );
             case "executeQueryPage", "execute_query_page" -> executeQueryPage(
@@ -535,7 +539,6 @@ public final class DbxJdbcPlugin {
             properties.setProperty("password", password);
         }
         applyConnectTimeout(connection, properties);
-        applyPagedFetchProperties(connection, url, properties);
         applyJdbcxExtensionSecurity(connection, url, properties);
         if (isOracleUrl(url)) {
             applyOracleProperties(connection, properties);
@@ -626,25 +629,6 @@ public final class DbxJdbcPlugin {
             normalized.equals("org.mariadb.jdbc.driver");
     }
 
-    private static void applyPagedFetchProperties(JsonNode connection, String url, Properties properties) {
-        if (!isMysqlConnection(connection, url) || jdbcUrlHasParameter(url, "useCursorFetch")) {
-            return;
-        }
-        properties.putIfAbsent("useCursorFetch", "true");
-    }
-
-    private static boolean isMysqlConnection(JsonNode connection, String url) {
-        if (urlMatchesPrefix(url, "jdbc:mysql:")) {
-            return true;
-        }
-        String driverClass = optionalText(connection, "jdbc_driver_class");
-        if (driverClass == null) {
-            return false;
-        }
-        String normalized = driverClass.toLowerCase(Locale.ROOT);
-        return normalized.equals("com.mysql.cj.jdbc.driver") || normalized.equals("com.mysql.jdbc.driver");
-    }
-
     private static boolean isPostgresConnection(JsonNode connection) {
         if (urlMatchesPrefix(jdbcUrl(connection), "jdbc:postgresql:")) {
             return true;
@@ -685,6 +669,7 @@ public final class DbxJdbcPlugin {
         String schema,
         int maxRows,
         int fetchSize,
+        int rowOffset,
         int timeoutSecs
     ) throws Exception {
         long start = System.nanoTime();
@@ -708,6 +693,10 @@ public final class DbxJdbcPlugin {
                     for (int i = 1; i <= columnCount; i++) {
                         String label = meta.getColumnLabel(i);
                         columns.add(label == null || label.isBlank() ? meta.getColumnName(i) : label);
+                    }
+                    for (int skipped = 0; skipped < rowOffset && rs.next(); skipped++) {
+                        // Caché/IRIS does not support SQL offset pagination; advance
+                        // the forward-only JDBC cursor before collecting this page.
                     }
                     while (rs.next()) {
                         if (rows.size() >= maxRows) {
@@ -3037,12 +3026,28 @@ public final class DbxJdbcPlugin {
         int index,
         boolean preserveOracleDateTime
     ) throws SQLException {
+        int columnType = meta.getColumnType(index);
+
+        if (columnType == Types.BOOLEAN) {
+            boolean boolValue = rs.getBoolean(index);
+            if (!rs.wasNull()) {
+                return boolValue;
+            }
+            return null;
+        }
+
         Object value = rs.getObject(index);
         if (value == null) {
             return null;
         }
         if (value instanceof byte[] bytes) {
+            if (columnType == Types.BIT && bytes.length == 1 && (bytes[0] == 't' || bytes[0] == 'f')) {
+                return bytes[0] == 't';
+            }
             return binaryToHex(bytes);
+        }
+        if (value instanceof Clob clob) {
+            return clobToString(clob);
         }
         if (isBinaryColumn(meta, index)) {
             byte[] bytes = rs.getBytes(index);
@@ -3062,6 +3067,20 @@ public final class DbxJdbcPlugin {
             return value;
         }
         return value.toString();
+    }
+
+    private static String clobToString(Clob clob) throws SQLException {
+        try (Reader reader = clob.getCharacterStream()) {
+            StringBuilder out = new StringBuilder();
+            char[] buffer = new char[8192];
+            int count;
+            while ((count = reader.read(buffer)) != -1) {
+                out.append(buffer, 0, count);
+            }
+            return out.toString();
+        } catch (IOException error) {
+            throw new SQLException("Failed to read CLOB value", error);
+        }
     }
 
     private static Object readTemporalValue(

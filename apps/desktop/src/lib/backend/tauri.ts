@@ -3,6 +3,7 @@ import { BackendErrorException, type BackendError } from "@/lib/backend/errorUti
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 
 /** Normalize Tauri rejections once at the public backend boundary. */
 async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -1115,6 +1116,7 @@ export async function executeQuery(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1146,6 +1148,7 @@ export async function executeMulti(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;
@@ -1157,8 +1160,10 @@ export async function executeMulti(
     executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
+  const diagnosticsEnabled = isDebugLoggingEnabled();
+  const startedAt = diagnosticsEnabled ? performance.now() : 0;
   try {
-    return await invoke("execute_multi", {
+    const results = await invoke<QueryResult[]>("execute_multi", {
       connectionId,
       database,
       sql,
@@ -1166,7 +1171,23 @@ export async function executeMulti(
       executionId,
       ...options,
     });
+    if (diagnosticsEnabled) {
+      appendDebugLog("info", "[DBX][query-transport:tauri]", {
+        traceId: executionId?.slice(0, 8),
+        totalMs: Math.round(performance.now() - startedAt),
+        resultCount: results.length,
+        rowCounts: results.map((result) => result.rows.length),
+        columnCounts: results.map((result) => result.columns.length),
+      });
+    }
+    return results;
   } catch (error) {
+    if (diagnosticsEnabled) {
+      appendDebugLog("warn", "[DBX][query-transport:tauri:error]", {
+        traceId: executionId?.slice(0, 8),
+        totalMs: Math.round(performance.now() - startedAt),
+      });
+    }
     throw new BackendErrorException(error);
   }
 }
@@ -1193,6 +1214,7 @@ export async function executeMultiWithProgress(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;

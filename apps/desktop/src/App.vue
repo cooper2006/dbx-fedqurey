@@ -40,6 +40,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
+import { parseRecentConnectionIds, rankRecentConnections, RECENT_CONNECTION_IDS_STORAGE_KEY, recordRecentConnection } from "@/lib/connection/recentConnections";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/sql/newQueryContext";
 import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/table/objectSourceEditor";
@@ -332,7 +333,18 @@ const connectionStats = computed(() => ({
   connected: connectionStore.connectedIds.size,
   types: new Set(connectionStore.connections.map((c) => c.driver_profile || c.db_type)).size,
 }));
-const recentConnections = computed(() => connectionStore.connections.slice(0, 5));
+const recentConnections = computed(() => rankRecentConnections(connectionStore.connections, recentConnectionIds.value));
+
+function rememberRecentConnection(connectionId: string | null) {
+  if (!connectionId) return;
+  const nextIds = recordRecentConnection(recentConnectionIds.value, connectionId);
+  if (nextIds === recentConnectionIds.value) return;
+  recentConnectionIds.value = nextIds;
+  safeLocalStorageSet(RECENT_CONNECTION_IDS_STORAGE_KEY, JSON.stringify(nextIds));
+}
+
+watch(() => connectionStore.activeConnectionId, rememberRecentConnection);
+
 const savedSqlHistoryItems = computed(() => {
   const folderById = new Map(savedSqlStore.allFolders.map((folder) => [folder.id, folder]));
   const folderPath = (folderId?: string): string | undefined => {
@@ -693,7 +705,7 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
     queryStore.markTabClean(tab);
     return true;
   } catch (e: any) {
-    toast(t("savedSql.saveFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
     return false;
   }
 }
@@ -838,7 +850,7 @@ async function confirmSaveSqlToLibrary() {
     closePendingSavedTab();
     toast(t("savedSql.saved"), 2000);
   } catch (e: any) {
-    toast(t("savedSql.saveFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
   }
 }
 
@@ -1081,6 +1093,7 @@ async function newQuery() {
 async function openConnectionQuery(connectionId: string) {
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
+  rememberRecentConnection(connectionId);
   connectionStore.activeConnectionId = connectionId;
   const initialTarget = quickConnectionOpenTarget(connection);
   if (initialTarget.kind === "mq-admin") {

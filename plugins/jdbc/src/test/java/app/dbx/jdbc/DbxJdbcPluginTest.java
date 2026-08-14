@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.Clob;
 import java.sql.DatabaseMetaData;
 import java.sql.Date;
 import java.sql.Driver;
@@ -69,6 +70,35 @@ final class DbxJdbcPluginTest {
 
         assertFalse(response.has("error"), response.toString());
         assertEquals("APP", response.path("result").path("rows").path(0).path(0).asText());
+    }
+
+    @Test
+    void executeQuerySkipsRowsBeforeCollectingThePage() throws Exception {
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE IF NOT EXISTS page_rows(id INT PRIMARY KEY)"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "MERGE INTO page_rows KEY(id) VALUES (1), (2), (3)"
+            }
+            """.formatted(CONNECTION));
+
+        JsonNode response = request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "SELECT id FROM page_rows ORDER BY id",
+              "rowOffset": 1,
+              "maxRows": 1
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(2, response.path("result").path("rows").path(0).path(0).asInt());
+        assertEquals(1, response.path("result").path("rows").size());
     }
 
     @Test
@@ -362,6 +392,70 @@ final class DbxJdbcPluginTest {
 
         assertEquals(null, method.invoke(null, rs, columnMeta(Types.DATE), 1, true));
         assertEquals(List.of("getObject"), calls);
+    }
+
+    @Test
+    void readValueReadsVendorClobImplementationsAsText() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        Clob clob = (Clob) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Clob.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getCharacterStream" -> new java.io.StringReader("GaussDB CLOB 中文内容");
+                case "toString" -> "com.huawei.gauss.jdbc.inner.GaussClobImpl@4c1909a3";
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getObject" -> clob;
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals("GaussDB CLOB 中文内容", method.invoke(null, rs, columnMeta(Types.CLOB), 1, false));
+    }
+
+    @Test
+    void readValueConvertsGaussDbBooleanBytesWithoutCollapsingMultiBitValues() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+
+        assertEquals(true, method.invoke(null, objectResultSet(new byte[] { 't' }), columnMeta(Types.BIT), 1, false));
+        assertEquals(false, method.invoke(null, objectResultSet(new byte[] { 'f' }), columnMeta(Types.BIT), 1, false));
+        assertEquals(null, method.invoke(null, objectResultSet(null), columnMeta(Types.BIT), 1, false));
+        assertEquals("0x0102", method.invoke(null, objectResultSet(new byte[] { 1, 2 }), columnMeta(Types.BIT), 1, false));
+    }
+
+    @Test
+    void readValueUsesJdbcBooleanAccessForBooleanColumns() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+
+        assertEquals(true, method.invoke(null, booleanResultSet(true), columnMeta(Types.BOOLEAN), 1, false));
+        assertEquals(false, method.invoke(null, booleanResultSet(false), columnMeta(Types.BOOLEAN), 1, false));
+        assertEquals(null, method.invoke(null, booleanResultSet(null), columnMeta(Types.BOOLEAN), 1, false));
     }
 
     @Test
@@ -766,51 +860,24 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
-    void mysqlPagedQueriesEnableConnectorCursorFetchingByDefault() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "applyPagedFetchProperties",
-            JsonNode.class,
-            String.class,
-            Properties.class
-        );
-        method.setAccessible(true);
-        Properties properties = new Properties();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:mysql://127.0.0.1:3306/app",
-              "jdbc_driver_class": "com.mysql.cj.jdbc.Driver"
-            }
-            """);
+    void mysqlConnectionsDoNotForceCursorFetch() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:mysql:dbx-capture:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:mysql:dbx-capture:demo",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
 
-        method.invoke(null, connection, "jdbc:mysql://127.0.0.1:3306/app", properties);
-
-        assertEquals("true", properties.getProperty("useCursorFetch"));
-    }
-
-    @Test
-    void mysqlPagedQueriesPreserveExplicitCursorFetchSetting() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "applyPagedFetchProperties",
-            JsonNode.class,
-            String.class,
-            Properties.class
-        );
-        method.setAccessible(true);
-        Properties properties = new Properties();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false"
-            }
-            """);
-
-        method.invoke(
-            null,
-            connection,
-            "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false",
-            properties
-        );
-
-        assertFalse(properties.containsKey("useCursorFetch"));
+            assertFalse(response.has("error"), response.toString());
+            assertFalse(driver.properties.get(0).containsKey("useCursorFetch"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
     }
 
     @Test
@@ -2154,6 +2221,29 @@ final class DbxJdbcPluginTest {
                     case "getColumnType" -> columnType;
                     default -> defaultValue(method.getReturnType());
                 };
+            }
+        );
+    }
+
+    private static ResultSet objectResultSet(Object value) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getObject" -> value;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet booleanResultSet(Boolean value) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getBoolean" -> Boolean.TRUE.equals(value);
+                case "wasNull" -> value == null;
+                default -> defaultValue(method.getReturnType());
             }
         );
     }

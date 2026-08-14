@@ -2,7 +2,7 @@ import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/t
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
 export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-database-browser" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
@@ -45,6 +45,7 @@ const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure",
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-constraints", "group-partitions", "group-table-partitions", "group-table-subpartitions"]);
 const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
   if (type === "view") return "VIEW";
@@ -104,6 +105,7 @@ function canOpenTreeNodeSource(type: TreeNodeType, dbType?: DatabaseType): boole
 export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType): TreeNodeRowAction {
   if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (type === "extension") return "open-extension-details";
+  if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
   if (dataNodeTypes.has(type)) return "open-data";
   // PostgreSQL-family custom types: open read-only details (toggle when expandable).
   if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
@@ -154,4 +156,14 @@ export function copyNameForTreeNode(node: TreeNode): string {
     return node.label.replace(/\s+\(.+\)$/, "");
   }
   return node.label;
+}
+
+export function copyDisplayPathForTreeNode(node: TreeNode, connectionName: string): string | null {
+  const connection = connectionName.trim();
+  const database = node.database?.trim();
+  if (!connection || !database) return null;
+  if (node.type === "database") return `${connection}.${database}`;
+  if (!displayPathObjectNodeTypes.has(node.type)) return null;
+  const objectName = (node.objectName || (node.type === "table" ? node.tableName : undefined) || node.label).trim();
+  return objectName ? `${connection}.${database}.${objectName}` : null;
 }

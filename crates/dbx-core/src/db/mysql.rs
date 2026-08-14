@@ -79,9 +79,9 @@ impl MySqlQueryDialect {
             supports_admin_show_results: matches!(
                 db_type,
                 DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
-            ) || profile
-                .as_deref()
-                .is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch")),
+            ) || profile.as_deref().is_some_and(|profile| {
+                matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch" | "tidb")
+            }),
         }
     }
 }
@@ -3107,6 +3107,26 @@ fn list_routines_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
+    list_routines_sql_for_query(database, object_types, limit, offset, RoutineMetadataQuery::Timestamps)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoutineMetadataQuery {
+    Timestamps,
+    Legacy,
+}
+
+fn routine_metadata_queries() -> [RoutineMetadataQuery; 2] {
+    [RoutineMetadataQuery::Timestamps, RoutineMetadataQuery::Legacy]
+}
+
+fn list_routines_sql_for_query(
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    query: RoutineMetadataQuery,
+) -> String {
     let routine_types = [
         ("PROCEDURE", requested_object_type(object_types, "PROCEDURE")),
         ("FUNCTION", requested_object_type(object_types, "FUNCTION")),
@@ -3115,9 +3135,13 @@ fn list_routines_sql(
     .filter_map(|(routine_type, requested)| requested.then_some(format!("'{}'", routine_type)))
     .collect::<Vec<_>>()
     .join(", ");
+    let timestamps = match query {
+        RoutineMetadataQuery::Timestamps => "CREATED AS created_at, LAST_ALTERED AS updated_at",
+        RoutineMetadataQuery::Legacy => "NULL AS created_at, NULL AS updated_at",
+    };
     format!(
         "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS object_type, NULL AS object_comment, \
-           NULL AS created_at, NULL AS updated_at, \
+           {timestamps}, \
            NULL AS parent_schema, NULL AS parent_name, \
            CASE WHEN ROUTINE_TYPE = 'PROCEDURE' THEN 2 ELSE 3 END AS sort_order \
          FROM information_schema.ROUTINES \
@@ -3126,6 +3150,40 @@ fn list_routines_sql(
         db = quote_value(database),
         pagination = sql_pagination(limit, offset),
     )
+}
+
+async fn query_routine_rows(
+    conn: &mut mysql_async::Conn,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<mysql_async::Row>, String> {
+    let mut last_error = None;
+    for query in routine_metadata_queries() {
+        let sql = match query {
+            RoutineMetadataQuery::Timestamps => list_routines_sql(database, object_types, limit, offset),
+            RoutineMetadataQuery::Legacy => {
+                list_routines_sql_for_query(database, object_types, limit, offset, RoutineMetadataQuery::Legacy)
+            }
+        };
+        let result = match conn.query_iter(&sql).await {
+            Ok(result) => result.collect_and_drop::<mysql_async::Row>().await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(rows) => return Ok(rows),
+            Err(error) => {
+                if query == RoutineMetadataQuery::Timestamps {
+                    log::debug!(
+                        "Routine timestamps are unavailable for database `{database}`; retrying legacy metadata: {error}"
+                    );
+                }
+                last_error = Some(error.to_string());
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Routine metadata returned no result".to_string()))
 }
 
 fn list_completion_triggers_sql(database: &str) -> String {
@@ -3269,16 +3327,10 @@ pub async fn list_objects(
     // OceanBase/TiDB variants, restricted accounts) reject information_schema.ROUTINES with
     // ER_UNKNOWN_ERROR (1105). Degrading gracefully keeps tables/views usable.
     if wants_routines {
-        let routines_sql = list_routines_sql(database, object_types, query_limit, query_offset);
-        match conn.query_iter(&routines_sql).await {
-            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-                Ok(routine_rows) => {
-                    objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
-                }
-                Err(e) => {
-                    log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
-                }
-            },
+        match query_routine_rows(&mut conn, database, object_types, query_limit, query_offset).await {
+            Ok(routine_rows) => {
+                objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
+            }
             Err(e) => {
                 log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
             }
@@ -3440,9 +3492,7 @@ fn table_infos_to_objects(
 
 async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let routines_sql = list_routines_sql(database, None, None, None);
-    let result = conn.query_iter(&routines_sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let rows = query_routine_rows(&mut conn, database, None, None, None).await?;
     Ok(rows.iter().map(|row| row_to_object(row, database)).collect())
 }
 
@@ -3450,12 +3500,8 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let mut objects = Vec::new();
 
-    let routines_sql = list_routines_sql(database, None, None, None);
-    match conn.query_iter(&routines_sql).await {
-        Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-            Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
-            Err(e) => log::warn!("Skipping routines for completion in database `{}`: {}", database, e),
-        },
+    match query_routine_rows(&mut conn, database, None, None, None).await {
+        Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
         Err(e) => log::warn!("Skipping routines for completion in database `{}`: {}", database, e),
     }
 
@@ -3520,7 +3566,7 @@ fn normalize_mysql_column_charset_metadata(columns: &mut [ColumnInfo], table_col
 /// Example: "主键" → UTF-8 bytes [E4 B8 BB E9 94 AE]
 ///   → each byte → CP1252 char → UTF-8 re-encoded → garbled text
 ///   → reversal: map each char back to its CP1252 byte, decode as UTF-8
-pub(super) fn fix_potential_double_encoding(s: &str) -> String {
+pub(crate) fn fix_potential_double_encoding(s: &str) -> String {
     // Map each character to its CP1252 byte value
     let mut bytes = Vec::with_capacity(s.len());
     for c in s.chars() {
@@ -4074,9 +4120,13 @@ async fn execute_result_set_with_text_protocol_on_conn(
     max_rows: Option<usize>,
     max_result_bytes: Option<usize>,
     result_key_columns: &[String],
+    diagnostic_trace_id: Option<&str>,
     start: Instant,
 ) -> Result<MySqlQueryResult, String> {
+    let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
+    let dispatch_started_at = diagnostics_enabled.then(Instant::now);
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    let dispatch_ms = dispatch_started_at.map_or(0, |started_at| started_at.elapsed().as_millis());
     if !advance_to_result_set_with_columns(&mut result).await? {
         let affected_rows = result.affected_rows();
         let warnings = result.warnings();
@@ -4146,19 +4196,28 @@ async fn execute_result_set_with_text_protocol_on_conn(
     let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
     let mut large_value_cells = Vec::new();
     let mut truncated = false;
+    let mut row_read_time = Duration::ZERO;
+    let mut row_convert_time = Duration::ZERO;
     let mut stream = result
         .stream::<mysql_async::Row>()
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Empty result set stream".to_string())?;
 
-    while let Some(row) = stream.next().await {
+    loop {
+        let read_started_at = diagnostics_enabled.then(Instant::now);
+        let next_row = stream.next().await;
+        if let Some(started_at) = read_started_at {
+            row_read_time += started_at.elapsed();
+        }
+        let Some(row) = next_row else { break };
         let row = row.map_err(|e| e.to_string())?;
         if result_rows.len() >= row_limit {
             truncated = true;
             break;
         }
         let row_index = result_rows.len();
+        let convert_started_at = diagnostics_enabled.then(Instant::now);
         let (values, srids, mut row_large_values) = mysql_row_to_json_with_srids_and_previews(
             &row,
             &mut spatial_columns,
@@ -4169,6 +4228,9 @@ async fn execute_result_set_with_text_protocol_on_conn(
         result_rows.push(values);
         spatial_values.push(srids);
         large_value_cells.append(&mut row_large_values);
+        if let Some(started_at) = convert_started_at {
+            row_convert_time += started_at.elapsed();
+        }
     }
     drop(stream);
 
@@ -4176,6 +4238,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
     // terminator packet arrived, so `result.warnings()`/`result.info()` still
     // hold the previous statement's values; skip capture instead of reporting
     // stale messages.
+    let finalize_started_at = diagnostics_enabled.then(Instant::now);
     let messages = if truncated {
         drop(result);
         Vec::new()
@@ -4185,6 +4248,20 @@ async fn execute_result_set_with_text_protocol_on_conn(
         drop(result);
         collect_mysql_server_messages(conn, warnings, &info).await
     };
+    if diagnostics_enabled {
+        log::info!(
+            "[query][mysql-result] trace_id={} protocol=text dispatch_ms={} row_read_ms={} row_convert_ms={} finalize_ms={} rows={} columns={} truncated={} preview_cells={}",
+            diagnostic_trace_id.unwrap_or("none"),
+            dispatch_ms,
+            row_read_time.as_millis(),
+            row_convert_time.as_millis(),
+            finalize_started_at.map_or(0, |started_at| started_at.elapsed().as_millis()),
+            result_rows.len(),
+            columns.len(),
+            truncated,
+            large_value_cells.len()
+        );
+    }
 
     Ok(MySqlQueryResult {
         result: QueryResult {
@@ -4213,6 +4290,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
     max_rows: Option<usize>,
     max_result_bytes: Option<usize>,
     result_key_columns: &[String],
+    diagnostic_trace_id: Option<&str>,
     start: Instant,
 ) -> Result<Vec<MySqlQueryResult>, String> {
     // Per-set warnings/info read after each `collect()` are only accurate when
@@ -4226,9 +4304,14 @@ async fn execute_result_sets_with_text_protocol_on_conn(
     // per-set messages stay empty and only the final SHOW WARNINGS attachment
     // on the last result set reports warnings.
     let capture_per_set_messages = conn.opts().deprecate_eof();
+    let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
+    let dispatch_started_at = diagnostics_enabled.then(Instant::now);
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    let dispatch_ms = dispatch_started_at.map_or(0, |started_at| started_at.elapsed().as_millis());
     let mut results: Vec<MySqlQueryResult> = Vec::new();
     let mut result_set_warnings: Vec<u16> = Vec::new();
+    let mut row_read_time = Duration::ZERO;
+    let mut row_convert_time = Duration::ZERO;
 
     while advance_to_result_set_with_columns(&mut result).await? {
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
@@ -4242,16 +4325,26 @@ async fn execute_result_sets_with_text_protocol_on_conn(
         let protected_indexes = mysql_result_protected_column_indexes(result.columns_ref(), result_key_columns);
 
         let rows = if max_result_bytes.is_none() && should_collect_text_result_set(sql, row_limit, max_rows) {
+            let read_started_at = diagnostics_enabled.then(Instant::now);
             let rows: Vec<mysql_async::Row> = result.collect().await.map_err(|e| e.to_string())?;
+            if let Some(started_at) = read_started_at {
+                row_read_time += started_at.elapsed();
+            }
             truncated = rows.len() > row_limit;
-            rows.iter()
+            let convert_started_at = diagnostics_enabled.then(Instant::now);
+            let converted_rows = rows
+                .iter()
                 .take(row_limit)
                 .map(|row| {
                     let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns);
                     spatial_values.push(srids);
                     values
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            if let Some(started_at) = convert_started_at {
+                row_convert_time += started_at.elapsed();
+            }
+            converted_rows
         } else {
             let mut rows = Vec::new();
             let mut stream = result
@@ -4260,10 +4353,17 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "Empty result set stream".to_string())?;
 
-            while let Some(row) = stream.next().await {
+            loop {
+                let read_started_at = diagnostics_enabled.then(Instant::now);
+                let next_row = stream.next().await;
+                if let Some(started_at) = read_started_at {
+                    row_read_time += started_at.elapsed();
+                }
+                let Some(row) = next_row else { break };
                 let row = row.map_err(|e| e.to_string())?;
                 if rows.len() < row_limit {
                     let row_index = rows.len();
+                    let convert_started_at = diagnostics_enabled.then(Instant::now);
                     let (values, srids, mut row_large_values) = mysql_row_to_json_with_srids_and_previews(
                         &row,
                         &mut spatial_columns,
@@ -4274,6 +4374,9 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                     rows.push(values);
                     spatial_values.push(srids);
                     large_value_cells.append(&mut row_large_values);
+                    if let Some(started_at) = convert_started_at {
+                        row_convert_time += started_at.elapsed();
+                    }
                 } else {
                     truncated = true;
                 }
@@ -4309,6 +4412,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
     }
 
     if results.is_empty() {
+        let finalize_started_at = diagnostics_enabled.then(Instant::now);
         let affected_rows = result.affected_rows();
         let warnings = result.warnings();
         let info = result.info().into_owned();
@@ -4329,6 +4433,16 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             elasticsearch_raw_body: None,
             messages,
         }));
+        if diagnostics_enabled {
+            log::info!(
+                "[query][mysql-result] trace_id={} protocol=text-multi dispatch_ms={} row_read_ms={} row_convert_ms={} finalize_ms={} result_count=1 row_counts=[0] column_counts=[0] truncated_sets=0 preview_cells=0",
+                diagnostic_trace_id.unwrap_or("none"),
+                dispatch_ms,
+                row_read_time.as_millis(),
+                row_convert_time.as_millis(),
+                finalize_started_at.map_or(0, |started_at| started_at.elapsed().as_millis())
+            );
+        }
         return Ok(results);
     }
     // Without per-set capture (no CLIENT_DEPRECATE_EOF) the per-iteration
@@ -4339,6 +4453,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
         let last_index = result_set_warnings.len() - 1;
         result_set_warnings[last_index] = result.warnings();
     }
+    let finalize_started_at = diagnostics_enabled.then(Instant::now);
     drop(result);
 
     // SHOW WARNINGS only reports the last executed statement, so detailed
@@ -4355,6 +4470,22 @@ async fn execute_result_sets_with_text_protocol_on_conn(
         } else {
             results[index].result.messages.push(mysql_warnings_fallback_message(warnings));
         }
+    }
+
+    if diagnostics_enabled {
+        log::info!(
+            "[query][mysql-result] trace_id={} protocol=text-multi dispatch_ms={} row_read_ms={} row_convert_ms={} finalize_ms={} result_count={} row_counts={:?} column_counts={:?} truncated_sets={} preview_cells={}",
+            diagnostic_trace_id.unwrap_or("none"),
+            dispatch_ms,
+            row_read_time.as_millis(),
+            row_convert_time.as_millis(),
+            finalize_started_at.map_or(0, |started_at| started_at.elapsed().as_millis()),
+            results.len(),
+            results.iter().map(|result| result.result.rows.len()).collect::<Vec<_>>(),
+            results.iter().map(|result| result.result.columns.len()).collect::<Vec<_>>(),
+            results.iter().filter(|result| result.result.truncated).count(),
+            results.iter().map(|result| result.large_value_cells.len()).sum::<usize>()
+        );
     }
 
     Ok(results)
@@ -4378,9 +4509,13 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     row_limit: usize,
     max_result_bytes: Option<usize>,
     result_key_columns: &[String],
+    diagnostic_trace_id: Option<&str>,
     start: Instant,
 ) -> Result<MySqlQueryResult, String> {
+    let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
+    let dispatch_started_at = diagnostics_enabled.then(Instant::now);
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
+    let dispatch_ms = dispatch_started_at.map_or(0, |started_at| started_at.elapsed().as_millis());
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
     let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
     let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
@@ -4392,19 +4527,28 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
     let mut large_value_cells = Vec::new();
     let mut truncated = false;
+    let mut row_read_time = Duration::ZERO;
+    let mut row_convert_time = Duration::ZERO;
     let mut stream = result
         .stream::<mysql_async::Row>()
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Empty result set stream".to_string())?;
 
-    while let Some(row) = stream.next().await {
+    loop {
+        let read_started_at = diagnostics_enabled.then(Instant::now);
+        let next_row = stream.next().await;
+        if let Some(started_at) = read_started_at {
+            row_read_time += started_at.elapsed();
+        }
+        let Some(row) = next_row else { break };
         let row = row.map_err(|e| e.to_string())?;
         if result_rows.len() >= row_limit {
             truncated = true;
             break;
         }
         let row_index = result_rows.len();
+        let convert_started_at = diagnostics_enabled.then(Instant::now);
         let (values, srids, mut row_large_values) = mysql_row_to_json_with_srids_and_previews(
             &row,
             &mut spatial_columns,
@@ -4415,6 +4559,9 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         result_rows.push(values);
         spatial_values.push(srids);
         large_value_cells.append(&mut row_large_values);
+        if let Some(started_at) = convert_started_at {
+            row_convert_time += started_at.elapsed();
+        }
     }
     drop(stream);
 
@@ -4422,6 +4569,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     // terminator packet arrived, so `result.warnings()`/`result.info()` still
     // hold the previous statement's values; skip capture instead of reporting
     // stale messages.
+    let finalize_started_at = diagnostics_enabled.then(Instant::now);
     let messages = if truncated {
         drop(result);
         Vec::new()
@@ -4431,6 +4579,20 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         drop(result);
         collect_mysql_server_messages(conn, warnings, &info).await
     };
+    if diagnostics_enabled {
+        log::info!(
+            "[query][mysql-result] trace_id={} protocol=prepared dispatch_ms={} row_read_ms={} row_convert_ms={} finalize_ms={} rows={} columns={} truncated={} preview_cells={}",
+            diagnostic_trace_id.unwrap_or("none"),
+            dispatch_ms,
+            row_read_time.as_millis(),
+            row_convert_time.as_millis(),
+            finalize_started_at.map_or(0, |started_at| started_at.elapsed().as_millis()),
+            result_rows.len(),
+            columns.len(),
+            truncated,
+            large_value_cells.len()
+        );
+    }
 
     Ok(MySqlQueryResult {
         result: QueryResult {
@@ -4679,7 +4841,9 @@ pub async fn execute_query_on_conn_with_max_rows(
     max_rows: Option<usize>,
     dialect: MySqlQueryDialect,
 ) -> Result<QueryResult, String> {
-    execute_query_on_conn_with_limits(conn, sql, bare, max_rows, None, &[], dialect).await.map(|result| result.result)
+    execute_query_on_conn_with_limits(conn, sql, bare, max_rows, None, &[], dialect, None)
+        .await
+        .map(|result| result.result)
 }
 
 pub async fn execute_query_on_conn_with_limits(
@@ -4690,6 +4854,7 @@ pub async fn execute_query_on_conn_with_limits(
     max_result_bytes: Option<usize>,
     result_key_columns: &[String],
     dialect: MySqlQueryDialect,
+    diagnostic_trace_id: Option<&str>,
 ) -> Result<MySqlQueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
@@ -4703,6 +4868,7 @@ pub async fn execute_query_on_conn_with_limits(
                 max_rows,
                 max_result_bytes,
                 result_key_columns,
+                diagnostic_trace_id,
                 start,
             )
             .await
@@ -4713,6 +4879,7 @@ pub async fn execute_query_on_conn_with_limits(
                 row_limit,
                 max_result_bytes,
                 result_key_columns,
+                diagnostic_trace_id,
                 start,
             )
             .await
@@ -4726,6 +4893,7 @@ pub async fn execute_query_on_conn_with_limits(
                         max_rows,
                         max_result_bytes,
                         result_key_columns,
+                        diagnostic_trace_id,
                         start,
                     )
                     .await
@@ -4778,7 +4946,7 @@ pub async fn execute_query_results_on_conn_with_max_rows(
     max_rows: Option<usize>,
     dialect: MySqlQueryDialect,
 ) -> Result<Vec<QueryResult>, String> {
-    execute_query_results_on_conn_with_limits(conn, sql, bare, max_rows, None, &[], dialect)
+    execute_query_results_on_conn_with_limits(conn, sql, bare, max_rows, None, &[], dialect, None)
         .await
         .map(|results| results.into_iter().map(|result| result.result).collect())
 }
@@ -4791,6 +4959,7 @@ pub async fn execute_query_results_on_conn_with_limits(
     max_result_bytes: Option<usize>,
     result_key_columns: &[String],
     dialect: MySqlQueryDialect,
+    diagnostic_trace_id: Option<&str>,
 ) -> Result<Vec<MySqlQueryResult>, String> {
     if is_result_set_query(sql, dialect) && (bare || prefers_text_protocol_query(sql, dialect)) {
         let start = Instant::now();
@@ -4801,13 +4970,23 @@ pub async fn execute_query_results_on_conn_with_limits(
             max_rows,
             max_result_bytes,
             result_key_columns,
+            diagnostic_trace_id,
             start,
         )
         .await
     } else {
-        execute_query_on_conn_with_limits(conn, sql, bare, max_rows, max_result_bytes, result_key_columns, dialect)
-            .await
-            .map(|result| vec![result])
+        execute_query_on_conn_with_limits(
+            conn,
+            sql,
+            bare,
+            max_rows,
+            max_result_bytes,
+            result_key_columns,
+            dialect,
+            diagnostic_trace_id,
+        )
+        .await
+        .map(|result| vec![result])
     }
 }
 
@@ -6030,12 +6209,55 @@ mod tests {
     }
 
     #[test]
+    fn tidb_admin_show_queries_are_treated_as_result_sets() {
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("tidb"));
+
+        for sql in [
+            "ADMIN SHOW DDL",
+            "ADMIN SHOW DDL JOBS 20",
+            "-- inspect DDL\nadmin /* TiDB */ show ddl jobs 20",
+            "ADMIN SHOW DDL JOB QUERIES 1",
+        ] {
+            assert!(is_result_set_query(sql, dialect), "{sql}");
+            assert!(requires_text_protocol_query(sql, dialect), "{sql}");
+        }
+    }
+
+    #[test]
+    fn tidb_non_show_admin_statements_are_not_treated_as_result_sets() {
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("tidb"));
+
+        for sql in [
+            "ADMIN SET BDR ROLE PRIMARY",
+            "ADMIN CANCEL DDL JOBS 1",
+            "ADMIN PAUSE DDL JOBS 1",
+            "ADMIN RESUME DDL JOBS 1",
+            "ADMIN ALTER DDL JOBS 1 THREAD = 8",
+        ] {
+            assert!(!is_result_set_query(sql, dialect), "{sql}");
+            assert!(!requires_text_protocol_query(sql, dialect), "{sql}");
+        }
+    }
+
+    #[test]
     fn mysql_admin_show_queries_are_not_treated_as_result_sets() {
         let sql = "ADMIN SHOW FRONTEND CONFIG LIKE '%default_replication_num%'";
         let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, None);
 
         assert!(!is_result_set_query(sql, dialect));
         assert!(!requires_text_protocol_query(sql, dialect));
+    }
+
+    #[test]
+    fn unrelated_mysql_profiles_do_not_enable_admin_show_results() {
+        let sql = "ADMIN SHOW DDL JOBS 20";
+
+        for profile in ["mariadb", "oceanbase", "tdsql", "polardb", "greatsql", "custom"] {
+            let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some(profile));
+
+            assert!(!is_result_set_query(sql, dialect), "{profile}");
+            assert!(!requires_text_protocol_query(sql, dialect), "{profile}");
+        }
     }
 
     #[test]
@@ -6541,8 +6763,8 @@ mod tests {
         assert!(!sql.contains("UNION"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
-        assert!(!sql.contains("LAST_ALTERED"));
-        assert!(!sql.contains("CREATED AS created_at"));
+        assert!(sql.contains("CREATED AS created_at"));
+        assert!(sql.contains("LAST_ALTERED AS updated_at"));
     }
 
     #[test]
@@ -6553,6 +6775,59 @@ mod tests {
         assert!(sql.contains("ROUTINE_TYPE IN ('PROCEDURE')"));
         assert!(!sql.contains("'FUNCTION'"));
         assert!(sql.ends_with("LIMIT 101 OFFSET 200"));
+    }
+
+    #[test]
+    fn mysql_list_routines_legacy_sql_preserves_filtering_and_paging() {
+        let object_types = vec!["FUNCTION".to_string()];
+        let sql =
+            list_routines_sql_for_query("app", Some(&object_types), Some(101), Some(200), RoutineMetadataQuery::Legacy);
+
+        assert!(sql.contains("NULL AS created_at, NULL AS updated_at"));
+        assert!(!sql.contains("CREATED AS created_at"));
+        assert!(sql.contains("ROUTINE_TYPE IN ('FUNCTION')"));
+        assert!(!sql.contains("ROUTINE_TYPE IN ('PROCEDURE')"));
+        assert!(sql.ends_with("LIMIT 101 OFFSET 200"));
+    }
+
+    #[test]
+    fn mysql_routine_metadata_queries_are_bounded_to_one_fallback() {
+        assert_eq!(routine_metadata_queries(), [RoutineMetadataQuery::Timestamps, RoutineMetadataQuery::Legacy]);
+    }
+
+    #[test]
+    fn mysql_routine_row_preserves_creation_and_update_times() {
+        let columns = [
+            "object_name",
+            "object_type",
+            "object_comment",
+            "created_at",
+            "updated_at",
+            "parent_schema",
+            "parent_name",
+            "sort_order",
+        ]
+        .into_iter()
+        .map(|name| Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(name.as_bytes()))
+        .collect();
+        let row = mysql_test_row_with_columns(
+            vec![
+                Value::Bytes(b"refresh_orders".to_vec()),
+                Value::Bytes(b"PROCEDURE".to_vec()),
+                Value::NULL,
+                Value::Bytes(b"2026-08-13 04:00:00".to_vec()),
+                Value::Bytes(b"2026-08-13 04:05:00".to_vec()),
+                Value::NULL,
+                Value::NULL,
+                Value::Int(2),
+            ],
+            columns,
+        );
+
+        let object = row_to_object(&row, "app");
+
+        assert_eq!(object.created_at.as_deref(), Some("2026-08-13 04:00:00"));
+        assert_eq!(object.updated_at.as_deref(), Some("2026-08-13 04:05:00"));
     }
 
     #[test]
