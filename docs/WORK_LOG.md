@@ -8,20 +8,24 @@
 - 从 upstream/main 同步最新代码（`4dd34b9a0 Merge upstream/main`），保留本地联邦查询修改
 - 补全前端 `DatabaseType` 中的 `opentenbase` 类型（`f64a60225`）
 - 刷新联邦查询相关文档至最新版本
-- 将标签 `v0.5.86` 更新指向新 HEAD（`b60cf08c8`）
-- 推送到 origin/main
+- 将标签 `v0.5.86` 更新指向新 HEAD（`efce99010`）
+- **推送失败**：网络无法访问 github.com（port 443 连接超时）
 
 **修改文件**：
-- `docs/FEDERATED_QUERY_SUMMARY.md`：更新至最新版本，反映上游合并和 opentenbase 支持
-- `docs/FEDERATED_QUERY_IMPLEMENTATION.md`：同上
-- `docs/federated-query-design/federated-query-design.html`：版本更新至 2.6
-- `docs/federated-query-guide/federated-query-guide.html`：版本更新至 1.6
-- `docs/WORK_LOG.md`：记录本次操作
+- `docs/WORK_LOG.md`：记录所有操作
+
+**待用户手动执行**：
+```bash
+git push origin main
+git push origin v0.5.86 --force
+```
 
 **验证**：
 - 编译通过
 - 前后端服务正常运行（后端 :4224，前端 :5173）
 - 7 个数据库类型全部支持：opentenbase、meilisearch、elasticsearch、qdrant、milvus、weaviate、chromadb
+- HEAD: `efce99010 docs: refresh federated query documentation and update work log`
+- 标签: `v0.5.86 -> efce99010`
 
 ---
 

@@ -3,6 +3,10 @@
     {
       "tool": "Bash(cd *)",
       "decision": "allow"
+    },
+    {
+      "tool": "Read",
+      "decision": "allow"
     }
   ]
 }
