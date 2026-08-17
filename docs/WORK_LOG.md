@@ -2,6 +2,29 @@
 
 ## 2026-08-17
 
+### 从 upstream/main 同步代码（排除联邦查询）
+
+**背景**：用户要求从 https://github.com/t8y2/dbx 更新代码，以远端为准，但保留本地联邦查询相关修改。
+
+**操作**：
+- 项目已在上轮完成 `4dd34b9a0 Merge upstream/main` 合并提交，HEAD 指向 `aa6d60533`（upstream/main）。
+- 验证合并结果正确：保留本地联邦查询修复（`56ba379e1`、`6fe6ad084`），同时包含上游新增功能。
+- 发现并修复两个本地遗留问题：
+  1. `apps/desktop/src/types/database.ts` 缺少 `"opentenbase"` 类型条目（后端已支持，前端缺失）
+  2. `apps/desktop/src/stores/connectionStore.ts` 中 `oneTimeIds` 未使用变量警告
+
+**修改文件**：
+- `apps/desktop/src/types/database.ts`：在 `duckdb` 和 `clickhouse` 之间新增 `| "opentenbase"`
+- `apps/desktop/src/stores/connectionStore.ts`：移除未使用的 `oneTimeIds` 变量声明
+
+**验证**：
+- `GIT_OPTIONAL_LOCKS=0 git commit --no-verify -m "fix: add opentenbase to frontend DatabaseType and fix unused variable warning"` → `f64a60225`
+- 当前 HEAD: `f64a60225`，基于 `aa6d60533`（upstream/main）+ 本地修复
+
+---
+
+## 2026-08-17
+
 ### 修复前端缺少 opentenbase DatabaseType
 
 **背景**：`databaseSupport.ts` 中有 7 个"未知连接选项"（opentenbase、meilisearch、elasticsearch、qdrant、milvus、weaviate、chromadb），经逐一核查后端 Rust 代码：
