@@ -14,7 +14,7 @@ use crate::agent_connection::{
     oracle_alternate_connect_configs, oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver,
     trino_like_jdbc_connection_string, AgentSessionRole,
 };
-use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
+use crate::agent_manager::{AgentManager, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::database_capabilities;
 use crate::db;
@@ -29,6 +29,7 @@ use crate::models::connection::{
 use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
+use crate::session_credentials::SessionCredentialStore;
 use crate::storage::{normalize_duckdb_worker_max_processes, Storage, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
 use crate::task_supervisor::TaskSupervisor;
 
@@ -62,21 +63,8 @@ pub enum MysqlMode {
     OceanBaseOracle,
 }
 
-fn is_oceanbase_mysql_config(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::Mysql
-        && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("oceanbase"))
-}
-
-pub(crate) fn oceanbase_mysql_query_timeout_sql(config: &ConnectionConfig, timeout_secs: u64) -> Option<String> {
-    if !is_oceanbase_mysql_config(config) || timeout_secs == 0 {
-        return None;
-    }
-    let timeout_us = timeout_secs.saturating_mul(1_000_000);
-    Some(format!("SET ob_query_timeout = {timeout_us}"))
-}
-
 fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
-    oceanbase_mysql_query_timeout_sql(config, config.query_timeout_secs).into_iter().collect()
+    db::oceanbase_mysql::query_timeout_sql(config, config.query_timeout_secs).into_iter().collect()
 }
 
 fn mysql_pool_setup_queries(config: &ConnectionConfig, url: &str) -> Vec<String> {
@@ -99,6 +87,7 @@ pub enum PoolKind {
     Redis(db::redis_driver::RedisConnection),
     DuckDbWorker(DuckDbWorkerHandle),
     MongoDb(mongodb::Client),
+    DynamoDb(db::dynamodb_driver::DynamoDbClient),
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
@@ -107,9 +96,7 @@ pub enum PoolKind {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
-    VictoriaMetrics(crate::db::victoriametrics_driver::VictoriaMetricsClient),
-    #[cfg(feature = "mq-admin")]
-    Mqtt(std::sync::Arc<crate::mqtt::client::MqttClient>),
+    VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     ExternalDriver {
         driver_id: String,
@@ -122,6 +109,9 @@ pub enum PoolKind {
     /// Nacos admin connection marker.
     Nacos,
     Consul(crate::consul::ConsulClient),
+    /// MQTT broker connection with an active client.
+    #[cfg(feature = "mq-admin")]
+    Mqtt(Arc<super::mqtt::client::MqttClient>),
 }
 
 impl PoolKind {
@@ -183,6 +173,8 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Snowflake
             | DatabaseType::Trino
             | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
@@ -217,13 +209,17 @@ pub struct AppState {
     pub plugins: PluginRegistry,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
-    pub calcite_agent: std::sync::Arc<std::sync::Mutex<Option<crate::calcite_agent::CalciteAgentManager>>>,
     duckdb_worker_process_isolation: AtomicBool,
     duckdb_worker_max_processes: AtomicUsize,
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
+    /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
+    /// 绝不落盘）。键为 `(owner_scope, connection_id)`：桌面端 owner 为空串，
+    /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
+    /// AI/元数据从它读取，前端通过状态接口查询。
+    pub session_credentials: SessionCredentialStore,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
@@ -664,6 +660,17 @@ pub fn gaussdb_m_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str,
     });
     let params = upsert_connection_url_param(Some(raw_params), "sslmode", &sslmode);
     let params = upsert_connection_url_param(Some(&params), "ssl", if sslmode == "disable" { "false" } else { "true" });
+    let target_server_type = config
+        .external_config
+        .as_ref()
+        .and_then(|ext| ext.get("gaussdbTargetServerType"))
+        .and_then(|v| v.as_str())
+        .filter(|v| *v == "master" || *v == "slave" || *v == "any");
+    let params = if let Some(value) = target_server_type {
+        upsert_connection_url_param(Some(&params), "targetServerType", value)
+    } else {
+        params
+    };
     if !params.is_empty() {
         jdbc_url.push('?');
         jdbc_url.push_str(&params);
@@ -960,6 +967,43 @@ impl AppState {
         }
     }
 
+    /// save_password=false 连接：持久化/运行态 config 的 password 恒为空，从本次
+    /// 运行期会话凭据仓库补主密码，使手动/编辑器/AI/元数据/池重建复用首次输入，
+    /// 不再反复弹窗。会话凭据只在内存中，进程退出即丢；"断开并忘记"后仓库为空，
+    /// 此处自然回到空密码（需重新输入）。
+    ///
+    /// owner 作用域取自 [`crate::session_credentials::current_credential_owner`]：
+    /// Web 请求由鉴权中间件注入会话 token，桌面端/后台任务为空串。这样不同登录
+    /// 会话只会读取各自输入的密码，不会跨会话复用。
+    pub fn apply_session_credential(
+        &self,
+        config: &ConnectionConfig,
+        db_config: &mut ConnectionConfig,
+        connection_id: &str,
+    ) {
+        if !config.save_password && db_config.password.is_empty() {
+            let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
+            if let Some(session_password) = self.session_credentials.get(&owner, connection_id) {
+                db_config.password = session_password;
+            }
+        }
+    }
+
+    /// no-save 连接复用已有池时，若该池由"另一个 owner 会话"创建，则不应复用
+    /// （否则会话 B 会直接使用会话 A 输入的临时密码建立的连接）。返回 `true`
+    /// 表示需要销毁旧池、以当前 owner 的凭据重建。
+    async fn pool_credential_owner_mismatch(&self, config: &ConnectionConfig, pool_key: &str) -> bool {
+        if config.save_password {
+            return false;
+        }
+        let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
+        if owner.is_empty() {
+            // 桌面端/未注入 owner：单用户场景，按既有逻辑复用。
+            return false;
+        }
+        self.session_credentials.pool_owner_mismatch(pool_key, &owner)
+    }
+
     async fn handle_shared_connection_open_error(
         &self,
         error: crate::agent_runtime::SharedConnectionOpenError,
@@ -1037,11 +1081,11 @@ impl AppState {
                 app_version,
             ),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
-            calcite_agent: Arc::new(std::sync::Mutex::new(None)),
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
+            session_credentials: SessionCredentialStore::new(),
             #[cfg(feature = "mq-admin")]
             mq_registry: crate::mq::MqAdminRegistry::new(),
         }
@@ -1295,6 +1339,12 @@ impl AppState {
         if wait_for_drain {
             self.wait_for_pool_drain(&pool_key).await;
         }
+        #[cfg(feature = "mq-admin")]
+        let mq_keepalive_adapter = if matches!(&pool, PoolKind::MessageQueue) {
+            self.mq_registry.get_cached_adapter(&config.id).await
+        } else {
+            None
+        };
         let routing = self.pool_routing_control();
         let previous = loop {
             let mut connections = self.connections.write().await;
@@ -1312,7 +1362,13 @@ impl AppState {
             // candidate never reaches this point, so the existing route keeps its state.
             routing.stop_keepalive(&pool_key);
             activity.insert(pool_key.clone(), PoolActivity::now());
-            self.start_keepalive_task(&pool_key, &pool, config);
+            self.start_keepalive_task(
+                &pool_key,
+                &pool,
+                config,
+                #[cfg(feature = "mq-admin")]
+                mq_keepalive_adapter.clone(),
+            );
             break Ok(connections.insert(pool_key.clone(), pool));
         };
         let previous = match previous {
@@ -1333,6 +1389,14 @@ impl AppState {
         if !route_is_available {
             routing.detach_pool_by_key(&pool_key, true).await;
             return Err("Agent runtime is unavailable while publishing the connection pool".to_string());
+        }
+        // 记录 no-save 池由哪个 owner 会话创建，供多会话复用判定使用
+        // （见 pool_credential_owner_mismatch）。已保存密码连接始终共享池，不记录。
+        if !config.save_password {
+            let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
+            if !owner.is_empty() {
+                self.session_credentials.record_pool_owner(&pool_key, &owner);
+            }
         }
         Ok(())
     }
@@ -1425,7 +1489,6 @@ impl AppState {
         pool: PoolKind,
         config: &ConnectionConfig,
     ) {
-        // mq_registry only exists in mq-admin builds; other builds reject MQ connects before a pool is created.
         #[cfg(feature = "mq-admin")]
         if matches!(pool, PoolKind::MessageQueue) {
             self.mq_registry.drop_connection(connection_id).await;
@@ -1434,9 +1497,21 @@ impl AppState {
         self.pool_routing_control().close_pool_with_timeout(pool_key, pool).await;
     }
 
-    fn start_keepalive_task(&self, pool_key: &str, pool: &PoolKind, config: &ConnectionConfig) {
+    fn start_keepalive_task(
+        &self,
+        pool_key: &str,
+        pool: &PoolKind,
+        config: &ConnectionConfig,
+        #[cfg(feature = "mq-admin")] mq_adapter: Option<std::sync::Arc<dyn crate::mq::port::MessageQueueAdmin>>,
+    ) {
         let interval_secs = config.keepalive_interval_secs;
         let mut target = keepalive_target_from_pool(pool, config);
+        #[cfg(feature = "mq-admin")]
+        if target.is_none() {
+            if let Some(adapter) = mq_adapter {
+                target = Some(KeepaliveTarget::MessageQueue(adapter));
+            }
+        }
         if interval_secs == 0 {
             return;
         }
@@ -1449,10 +1524,28 @@ impl AppState {
 
         let key = pool_key.to_string();
         let interval = Duration::from_secs(interval_secs.max(1));
+        // MQ keepalive runs a full adapter test_connection (agent RPC); use query timeout
+        // so slow clusters are not spuriously dropped by the shorter connect timeout.
+        #[cfg(feature = "mq-admin")]
+        let timeout = if matches!(target, Some(KeepaliveTarget::MessageQueue(_))) {
+            match config.effective_query_timeout_secs() {
+                0 => Duration::from_secs(300), // UI "unlimited" still needs a keepalive bound
+                secs => Duration::from_secs(secs.max(1)),
+            }
+        } else {
+            Duration::from_secs(config.effective_connect_timeout_secs().max(1))
+        };
+        #[cfg(not(feature = "mq-admin"))]
         let timeout = Duration::from_secs(config.effective_connect_timeout_secs().max(1));
         let routing = self.pool_routing_control();
         let connections = self.connections.clone();
         let running_queries = self.running_queries.clone();
+        // MQ pool markers are empty; close_pool_kind is a no-op, so keepalive must
+        // drop the registry adapter or reconnect would reuse a dead agent.
+        #[cfg(feature = "mq-admin")]
+        let mq_registry = self.mq_registry.clone();
+        #[cfg(feature = "mq-admin")]
+        let mq_connection_id = config.id.clone();
         self.task_supervisor.spawn_replace(format!("keepalive:{pool_key}"), move |shutdown| async move {
             loop {
                 tokio::select! {
@@ -1472,6 +1565,17 @@ impl AppState {
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
                             let replace_runtime =
                                 err.recovery_decision().is_some_and(RecoveryDecision::replaces_runtime);
+                            // PoolKind::MessageQueue is a unit marker, so matches_pool cannot
+                            // Arc::ptr_eq. Identity-check the registry adapter before teardown.
+                            #[cfg(feature = "mq-admin")]
+                            if let KeepaliveTarget::MessageQueue(adapter) = target {
+                                if !mq_registry.is_current_adapter(&mq_connection_id, adapter).await {
+                                    log::debug!("Skipping stale MQ keepalive result for replaced pool '{key}'");
+                                    break;
+                                }
+                            }
+                            #[cfg(feature = "mq-admin")]
+                            let drop_mq = matches!(target, KeepaliveTarget::MessageQueue(_));
                             if !detach_keepalive_target_if_current(
                                 &routing,
                                 &connections,
@@ -1482,6 +1586,11 @@ impl AppState {
                             .await
                             {
                                 log::debug!("Skipping stale keepalive result for replaced pool '{key}'");
+                            } else {
+                                #[cfg(feature = "mq-admin")]
+                                if drop_mq {
+                                    mq_registry.drop_connection(&mq_connection_id).await;
+                                }
                             }
                             break;
                         }
@@ -1490,8 +1599,22 @@ impl AppState {
                                 "Connection keepalive timed out for '{key}' after {}s; invalidating pool",
                                 timeout.as_secs()
                             );
+                            #[cfg(feature = "mq-admin")]
+                            if let KeepaliveTarget::MessageQueue(adapter) = target {
+                                if !mq_registry.is_current_adapter(&mq_connection_id, adapter).await {
+                                    log::debug!("Skipping stale MQ keepalive timeout for replaced pool '{key}'");
+                                    break;
+                                }
+                            }
+                            #[cfg(feature = "mq-admin")]
+                            let drop_mq = matches!(target, KeepaliveTarget::MessageQueue(_));
                             if !detach_keepalive_target_if_current(&routing, &connections, &key, target, false).await {
                                 log::debug!("Skipping stale keepalive timeout for replaced pool '{key}'");
+                            } else {
+                                #[cfg(feature = "mq-admin")]
+                                if drop_mq {
+                                    mq_registry.drop_connection(&mq_connection_id).await;
+                                }
                             }
                             break;
                         }
@@ -1648,26 +1771,7 @@ impl AppState {
     ) -> Result<String, String> {
         let config = {
             let configs = self.configs.read().await;
-            if let Some(config) = configs.get(connection_id) {
-                config.clone()
-            } else {
-                drop(configs);
-                // Cache miss: connections created/edited in another session (e.g. the DBX
-                // desktop UI) after this process started update storage but not this
-                // process's in-memory cache. Reconcile from storage before failing so a
-                // query on a connection that exists in storage is not reported as
-                // "Connection config not found".
-                let loaded = self.storage.load_connections().await.map_err(|e| {
-                    format!("Connection config not found: failed to load connections from storage: {e}")
-                })?;
-                let config = loaded
-                    .iter()
-                    .find(|c| c.id == connection_id)
-                    .cloned()
-                    .ok_or_else(|| "Connection config not found".to_string())?;
-                self.configs.write().await.insert(config.id.clone(), config.clone());
-                config
-            }
+            configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
         validate_connection_url_params(&config)?;
         let db_type = Some(config.db_type);
@@ -1684,6 +1788,11 @@ impl AppState {
                 drop(conns);
                 if self.remove_pool_if_duckdb_isolation_mismatch(&pool_key).await {
                     // Recreate below using the current DuckDB isolation mode.
+                } else if self.pool_credential_owner_mismatch(&config, &pool_key).await {
+                    // 创建该 no-save 池的是另一个登录会话：销毁旧池，用当前会话的
+                    // 凭据重建，避免跨会话复用他人输入的临时密码。
+                    self.remove_stale_connection_pool(&pool_key).await;
+                    break;
                 } else if !validate_existing_pool || !self.remove_stale_connection_pool(&pool_key).await {
                     self.touch_pool_activity(&pool_key).await;
                     return Ok(pool_key);
@@ -1701,7 +1810,8 @@ impl AppState {
             break;
         }
 
-        let db_config = database_connection_config_with_catalog(&config, database, catalog);
+        let mut db_config = database_connection_config_with_catalog(&config, database, catalog);
+        self.apply_session_credential(&config, &mut db_config, connection_id);
 
         validate_h2_file_connection(&db_config)?;
         self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
@@ -1716,10 +1826,6 @@ impl AppState {
             return Err(err);
         }
         let url = connection_url_for_endpoint(&db_config, &host, port);
-        log::info!(
-            "[connection] get_or_create_pool_for_session_inner: connection_id={}, db_type={:?}, database={:?}, catalog={:?}, host={}, port={}, url={}",
-            connection_id, db_config.db_type, database, catalog, host, port, url
-        );
         let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
         let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
         let mysql_pool_max_connections = mysql_pool_max_connections_for_session(client_session_id);
@@ -1737,12 +1843,6 @@ impl AppState {
                 PoolKind::Mysql(pool, mode)
             }
             DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
-                log::info!(
-                    "[connection] Doris/StarRocks pool: connection_id={}, database={:?}, url={}",
-                    connection_id,
-                    database,
-                    url
-                );
                 let pool = if database.is_none() {
                     connect_bare_metadata_pool(&db_config, &host, port, connect_timeout, mysql_pool_max_connections)
                         .await?
@@ -1894,8 +1994,23 @@ impl AppState {
                     if should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or("")) });
+                        let legacy_agent_key =
+                            AgentManager::db_type_to_agent_key(&DatabaseType::MongoDb, Some("mongodb-legacy"))
+                                .ok_or_else(|| "MongoDB (Legacy) Agent mapping is unavailable".to_string())?;
+                        crate::agent_service::ensure_agent_driver_ready(&self.agent_manager, legacy_agent_key)
+                            .await
+                            .map_err(|err| {
+                                format!("{native_err}\n\nFailed to prepare MongoDB (Legacy) fallback driver: {err}")
+                            })?;
                         let mut client =
-                            self.agent_manager.spawn(&DatabaseType::MongoDb, Some("mongodb-legacy")).await?;
+                            self.agent_manager.spawn(&DatabaseType::MongoDb, Some("mongodb-legacy")).await.map_err(
+                                |err| {
+                                    format!(
+                                        "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
+                                        mongo_legacy_error_with_auth_hint(&err)
+                                    )
+                                },
+                            )?;
                         client.connect(connect_params).await.map_err(|err| {
                             format!(
                                 "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
@@ -1907,6 +2022,11 @@ impl AppState {
                         return Err(native_err);
                     }
                 }
+            }
+            DatabaseType::DynamoDb => {
+                let client = db::dynamodb_driver::connect(&db_config, &host, port)?;
+                db::dynamodb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::DynamoDb(client)
             }
             DatabaseType::ClickHouse => {
                 let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
@@ -1950,11 +2070,12 @@ impl AppState {
                 PoolKind::Easysearch(client)
             }
             DatabaseType::Meilisearch => {
-                let client = db::meilisearch_driver::MeilisearchClient::new(
+                let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                     &url,
                     Some(&db_config.password),
                     db_config.ssl,
                     db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
                     connect_timeout,
                 )?;
                 db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
@@ -2005,11 +2126,11 @@ impl AppState {
                 db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::VictoriaMetrics(client)
             }
-            #[cfg(feature = "mq-admin")]
-            DatabaseType::Mqtt => {
-                let mqtt_config = crate::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
-                let client = crate::mqtt::client::MqttClient::connect(mqtt_config).await?;
-                PoolKind::Mqtt(client)
+            DatabaseType::Nacos => {
+                let admin_config = self.nacos_admin_config_for_connection(connection_id, &config).await?;
+                let adapter = self.nacos_registry.build_transient_config(admin_config).await?;
+                adapter.test_connection().await?;
+                PoolKind::Nacos
             }
             DatabaseType::Consul => {
                 let mut consul_config = crate::consul::ConsulConfig::from_connection(&db_config)?;
@@ -2021,12 +2142,6 @@ impl AppState {
                 let client = crate::consul::ConsulClient::new(consul_config).await?;
                 client.probe().await?;
                 PoolKind::Consul(client)
-            }
-            DatabaseType::Nacos => {
-                let admin_config = self.nacos_admin_config_for_connection(connection_id, &config).await?;
-                let adapter = self.nacos_registry.build_transient_config(admin_config).await?;
-                adapter.test_connection().await?;
-                PoolKind::Nacos
             }
             agent_connection_pool_database_type!() => {
                 let connect_params = agent_connect_params_with_role(
@@ -2247,7 +2362,7 @@ impl AppState {
                 // Temporary "__test_*" probes must not retain agents in the registry.
                 // reconnect fast-path caching only applies to durable connection ids;
                 // drain_connection_pools no longer drops MQ adapters (reconnect reuse).
-                if connection_id.starts_with("__test_") {
+                if connection_id.starts_with(crate::runtime_config::TEST_PROBE_ID_PREFIX) {
                     let adapter = self.mq_registry.build_transient_config(mqc, agent_launch).await?;
                     adapter.test_connection().await?;
                     if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
@@ -2281,6 +2396,18 @@ impl AppState {
                 return Err(
                     "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
                         .to_string(),
+                );
+            }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::Mqtt => {
+                let mqtt_config = crate::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
+                let client = crate::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                PoolKind::Mqtt(client)
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::Mqtt => {
+                return Err(
+                    "MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string()
                 );
             }
             DatabaseType::Calcite => {
@@ -2431,6 +2558,15 @@ impl AppState {
             // A TNS descriptor may contain several failover addresses, so rewriting it
             // through one local tunnel endpoint would silently break Oracle Net routing.
             return Err("Oracle TNS connections cannot be combined with SSH, proxy, or HTTP tunnel layers. Remove the transport layer or use Service Name/SID mode.".to_string());
+        }
+
+        #[cfg(feature = "mq-admin")]
+        if config.db_type == DatabaseType::MessageQueue
+            && crate::mq::config::MqAdminConfig::from_connection(config)?.system_kind
+                == crate::mq::types::MqSystemKind::RocketMq
+        {
+            self.rocketmq_socks_proxy_for_transport_layers(connection_id, &transport_layers).await?;
+            return Ok((config.host.clone(), config.port));
         }
 
         let (remote_host, remote_port) = connection_remote_endpoint(config);
@@ -2638,6 +2774,69 @@ impl AppState {
     }
 
     #[cfg(feature = "mq-admin")]
+    async fn rocketmq_socks_proxy_for_transport_layers(
+        &self,
+        connection_id: &str,
+        transport_layers: &[TransportLayerConfig],
+    ) -> Result<crate::mq::config::MqSocksProxy, String> {
+        // ProxyType 仅此 mq-admin 分支用到，局部导入避免在关闭 mq-admin 时
+        // 顶层 import 触发 unused 警告。
+        use crate::models::connection::ProxyType;
+        let final_layer = transport_layers.last().ok_or("No transport layers configured")?;
+        match final_layer {
+            TransportLayerConfig::Ssh(_) => {
+                let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_socks5(
+                    connection_id,
+                    transport_layers,
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                    &self.http_tunnels,
+                )
+                .await?;
+                Ok(crate::mq::config::MqSocksProxy {
+                    host: "127.0.0.1".to_string(),
+                    port: local_port,
+                    username: String::new(),
+                    password: String::new(),
+                })
+            }
+            TransportLayerConfig::Proxy(proxy) if proxy.proxy_type == ProxyType::Socks5 => {
+                if transport_layers.len() == 1 {
+                    Ok(crate::mq::config::MqSocksProxy {
+                        host: proxy.host.clone(),
+                        port: proxy.port,
+                        username: proxy.username.clone(),
+                        password: proxy.password.clone(),
+                    })
+                } else {
+                    let local_port = db::transport_layer_tunnel::start_transport_layers(
+                        connection_id,
+                        &transport_layers[..transport_layers.len() - 1],
+                        &proxy.host,
+                        proxy.port,
+                        &self.tunnels,
+                        &self.proxy_tunnels,
+                        &self.http_tunnels,
+                    )
+                    .await?;
+                    Ok(crate::mq::config::MqSocksProxy {
+                        host: "127.0.0.1".to_string(),
+                        port: local_port,
+                        username: proxy.username.clone(),
+                        password: proxy.password.clone(),
+                    })
+                }
+            }
+            TransportLayerConfig::Proxy(_) => {
+                Err("RocketMQ requires a SOCKS5 proxy as the final proxy layer".to_string())
+            }
+            TransportLayerConfig::HttpTunnel(_) => {
+                Err("RocketMQ does not support an HTTP tunnel as the final transport layer".to_string())
+            }
+        }
+    }
+
+    #[cfg(feature = "mq-admin")]
     pub async fn mq_admin_config_for_connection(
         &self,
         connection_id: &str,
@@ -2646,6 +2845,12 @@ impl AppState {
         let mqc = crate::mq::config::MqAdminConfig::from_connection(config)?;
         if !config.has_effective_transport_layers() {
             return Ok(mqc);
+        }
+
+        if mqc.system_kind == crate::mq::types::MqSystemKind::RocketMq {
+            let transport_layers = self.resolved_transport_layers(config).await?;
+            let proxy = self.rocketmq_socks_proxy_for_transport_layers(connection_id, &transport_layers).await?;
+            return Ok(mqc.with_socks_proxy(&proxy.host, proxy.port, &proxy.username, &proxy.password));
         }
 
         if mqc.system_kind == crate::mq::types::MqSystemKind::RabbitMq {
@@ -2738,6 +2943,11 @@ impl AppState {
 
         let (host, port) = self.connection_host_port(connection_id, config).await?;
         let nacos_config = nacos_config.with_server_endpoint(&host, port)?;
+        let transport_layers = self.resolved_transport_layers(config).await?;
+        if transport_layers.is_empty() {
+            return Ok(nacos_config);
+        }
+
         if nacos_config.rnacos_console_addr.is_empty() {
             return Ok(nacos_config);
         }
@@ -2751,10 +2961,6 @@ impl AppState {
         let console_port = console_url
             .port_or_known_default()
             .ok_or_else(|| "r-nacos console address does not include a port".to_string())?;
-        let transport_layers = self.resolved_transport_layers(config).await?;
-        if transport_layers.is_empty() {
-            return Ok(nacos_config);
-        }
         let console_transport_id = rnacos_console_transport_id(connection_id);
         let local_port = match db::transport_layer_tunnel::start_transport_layers(
             &console_transport_id,
@@ -2903,6 +3109,18 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::DynamoDb(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::dynamodb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("DynamoDB connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::ClickHouse(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -2999,8 +3217,6 @@ impl AppState {
                         }
                     }
                 }
-                #[cfg(feature = "mq-admin")]
-                PoolKind::Mqtt(_) => false,
                 PoolKind::Rqlite(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -3071,8 +3287,10 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Nacos => false,
-                PoolKind::Consul(_) => false,
+                | PoolKind::Nacos
+                | PoolKind::Consul(_) => false,
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(_) => false,
             }
         };
 
@@ -3455,7 +3673,13 @@ impl AppState {
             }
         };
         if let (Some(config), Some(client)) = (config, client) {
-            self.start_keepalive_task(pool_key, &PoolKind::Agent(client), &config);
+            self.start_keepalive_task(
+                pool_key,
+                &PoolKind::Agent(client),
+                &config,
+                #[cfg(feature = "mq-admin")]
+                None,
+            );
         }
     }
 
@@ -3848,6 +4072,13 @@ impl AppState {
                         false
                     }
                 },
+                PoolKind::DynamoDb(client) => match db::dynamodb_driver::test_connection(client, timeout).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::warn!("DynamoDB connection pool '{key}' is unhealthy: {e}");
+                        false
+                    }
+                },
                 PoolKind::ClickHouse(client) => match db::clickhouse_driver::test_connection(client, timeout).await {
                     Ok(()) => true,
                     Err(e) => {
@@ -3915,12 +4146,6 @@ impl AppState {
                         }
                     }
                 }
-                #[cfg(feature = "mq-admin")]
-                PoolKind::Mqtt(client) => {
-                    // MQTT clients don't have a simple ping; treat as healthy for keepalive
-                    let _ = client;
-                    true
-                }
                 PoolKind::Rqlite(client) => match db::rqlite_driver::test_connection(client, timeout).await {
                     Ok(()) => true,
                     Err(e) => {
@@ -3972,8 +4197,10 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Nacos => true,
-                PoolKind::Consul(_) => true,
+                | PoolKind::Nacos
+                | PoolKind::Consul(_) => true,
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(_) => true,
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy && !matches!(pool, PoolKind::Agent(_)) {
@@ -4068,6 +4295,7 @@ impl AppState {
         let pool_keys = self.connections.read().await.keys().cloned().collect::<Vec<_>>();
         self.stop_keepalive_tasks(&pool_keys).await;
         self.pool_activity.write().await.clear();
+        self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
         self.connections.write().await.drain().collect()
@@ -4106,6 +4334,7 @@ impl AppState {
                 cancel_contexts.remove(key);
             }
         }
+        self.session_credentials.remove_pool_owners(&keys_to_remove);
         let mut conns = self.connections.write().await;
         let mut removed = Vec::with_capacity(keys_to_remove.len());
         for key in keys_to_remove {
@@ -4205,10 +4434,10 @@ enum KeepaliveTarget {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
-    VictoriaMetrics(crate::db::victoriametrics_driver::VictoriaMetricsClient),
-    #[cfg(feature = "mq-admin")]
-    Mqtt(std::sync::Arc<crate::mqtt::client::MqttClient>),
+    VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
+    #[cfg(feature = "mq-admin")]
+    MessageQueue(Arc<dyn crate::mq::port::MessageQueueAdmin>),
 }
 
 #[derive(Debug)]
@@ -4246,6 +4475,10 @@ impl KeepaliveTarget {
         match (self, pool) {
             (Self::Agent(expected), PoolKind::Agent(current)) => Arc::ptr_eq(expected, current),
             (Self::SqlServer(expected), PoolKind::SqlServer(current)) => Arc::ptr_eq(expected, current),
+            #[cfg(feature = "mq-admin")]
+            (Self::MessageQueue(_), PoolKind::MessageQueue) => true,
+            #[cfg(feature = "mq-admin")]
+            (Self::MessageQueue(_), _) | (_, PoolKind::MessageQueue) => false,
             (Self::Agent(_), _) | (_, PoolKind::Agent(_)) | (Self::SqlServer(_), _) | (_, PoolKind::SqlServer(_)) => {
                 false
             }
@@ -4302,8 +4535,6 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
         PoolKind::VictoriaMetrics(client) => Some(KeepaliveTarget::VictoriaMetrics(client.clone())),
-        #[cfg(feature = "mq-admin")]
-        PoolKind::Mqtt(client) => Some(KeepaliveTarget::Mqtt(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
         _ => None,
     }
@@ -4353,11 +4584,6 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         KeepaliveTarget::VictoriaMetrics(client) => {
             db::victoriametrics_driver::test_connection(client, timeout).await.map_err(Into::into)
         }
-        #[cfg(feature = "mq-admin")]
-        KeepaliveTarget::Mqtt(_client) => {
-            // MQTT keepalive - just check if connected
-            Ok(())
-        }
         KeepaliveTarget::Agent(client) => {
             let Ok(mut client) = client.try_lock() else {
                 return Ok(());
@@ -4367,6 +4593,10 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
                 Err(error) if is_agent_validate_connection_unsupported(&error.to_string()) => Ok(()),
                 Err(error) => Err(KeepaliveError::Agent(error)),
             }
+        }
+        #[cfg(feature = "mq-admin")]
+        KeepaliveTarget::MessageQueue(adapter) => {
+            adapter.test_connection().await.map(|_| ()).map_err(KeepaliveError::from)
         }
     }
 }
@@ -4393,8 +4623,12 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
             .unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::MessageQueue {
         parse_mq_admin_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
+    } else if config.db_type == DatabaseType::Mqtt {
+        parse_mqtt_broker_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::Nacos {
         parse_nacos_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
+    } else if config.db_type == DatabaseType::Consul {
+        parse_consul_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else {
         (config.host.clone(), config.port)
     }
@@ -4464,6 +4698,42 @@ fn parse_nacos_server_host_port(config: &ConnectionConfig) -> Option<(String, u1
     let host = url.host_str()?.to_string();
     let port = url.port_or_known_default()?;
     Some((host, port))
+}
+
+fn parse_consul_server_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
+    let value = config
+        .external_config
+        .as_ref()?
+        .get("serverAddr")
+        .or_else(|| config.external_config.as_ref()?.get("server_addr"))?
+        .as_str()?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    let url = reqwest::Url::parse(value).ok()?;
+    Some((url.host_str()?.to_string(), url.port_or_known_default()?))
+}
+
+fn parse_mqtt_broker_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
+    let value = config
+        .external_config
+        .as_ref()?
+        .get("host")
+        .or_else(|| config.external_config.as_ref()?.get("host"))?
+        .as_str()?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    let port = config
+        .external_config
+        .as_ref()?
+        .get("port")
+        .or_else(|| config.external_config.as_ref()?.get("port"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1883) as u16;
+    Some((value.to_string(), port))
 }
 
 fn normalize_client_session_id(client_session_id: Option<&str>) -> Option<String> {
@@ -4553,6 +4823,26 @@ fn session_scoped_pool_key_for(
     session_scoped_pool_key(base_pool_key, client_session_id)
 }
 
+/// 两个运行态连接配置是否视为同一连接（用于决定是否销毁连接池）。
+///
+/// 仅当双方都是 `save_password=false` 时才忽略 `password` 字段的差异：这类连接
+/// 在 connect 时运行态配置可能携带会话密码，持久化同步后为空，这种空值差异不应
+/// 触发池重建。若任一方 `save_password=true`，密码是真实的连接参数，任何密码变更
+/// （包括用户保存了新密码）都必须销毁旧池，否则旧池会继续用旧密码认证。
+pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionConfig) -> bool {
+    if a == b {
+        return true;
+    }
+    if !a.save_password && !b.save_password {
+        let mut a = a.clone();
+        a.password.clear();
+        let mut b = b.clone();
+        b.password.clear();
+        return a == b;
+    }
+    false
+}
+
 fn pool_key_for_session_role(
     config: Option<&ConnectionConfig>,
     base_pool_key: String,
@@ -4582,6 +4872,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => PoolKind::DuckDbWorker(()),
         PoolKind::MongoDb(client) => PoolKind::MongoDb(client.clone()),
+        PoolKind::DynamoDb(client) => PoolKind::DynamoDb(client.clone()),
         PoolKind::ClickHouse(client) => PoolKind::ClickHouse(client.clone()),
         PoolKind::SqlServer(client) => PoolKind::SqlServer(client.clone()),
         PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
@@ -4591,8 +4882,6 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
         PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
-        #[cfg(feature = "mq-admin")]
-        PoolKind::Mqtt(client) => PoolKind::Mqtt(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
         PoolKind::ExternalDriver { driver_id, config, session } => {
             PoolKind::ExternalDriver { driver_id: driver_id.clone(), config: config.clone(), session: session.clone() }
@@ -4600,6 +4889,8 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
         PoolKind::Consul(client) => PoolKind::Consul(client.clone()),
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
     }
 }
@@ -4624,6 +4915,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => {}
         PoolKind::MongoDb(client) => {
+            drop(client);
+        }
+        PoolKind::DynamoDb(client) => {
             drop(client);
         }
         PoolKind::ClickHouse(client) => {
@@ -4653,10 +4947,6 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         PoolKind::VictoriaMetrics(client) => {
             drop(client);
         }
-        #[cfg(feature = "mq-admin")]
-        PoolKind::Mqtt(client) => {
-            let _ = client; // MQTT client cleanup handled internally
-        }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             client.disconnect().await?;
@@ -4667,6 +4957,11 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
         PoolKind::Consul(_) => {}
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => {
+            // 发送 DISCONNECT 并等待事件循环任务结束
+            client.disconnect().await;
+        }
     }
     Ok(())
 }
@@ -4864,7 +5159,51 @@ pub async fn probe_connection_endpoint(config: &ConnectionConfig, host: &str, po
         return Ok(());
     }
     let timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
-    db::probe_tcp_endpoint(&format!("{:?}", config.db_type), host, port, timeout).await
+
+    let entries = connection_probe_endpoints(host, port);
+
+    if entries.is_empty() {
+        return Err("no host entries to probe".to_string());
+    }
+
+    // Probe each node sequentially; return success on the first reachable node.
+    // This matches the failover semantics of the real connection path.
+    let mut last_error = String::new();
+    for (entry_host, entry_port) in &entries {
+        match db::probe_tcp_endpoint(&format!("{:?}", config.db_type), entry_host, *entry_port, timeout).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
+fn connection_probe_endpoints(host: &str, default_port: u16) -> Vec<(String, u16)> {
+    host.split(',').filter_map(|part| parse_connection_probe_endpoint(part.trim(), default_port)).collect()
+}
+
+fn parse_connection_probe_endpoint(endpoint: &str, default_port: u16) -> Option<(String, u16)> {
+    if endpoint.is_empty() {
+        return None;
+    }
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        let close = rest.find(']')?;
+        let host = rest[..close].to_string();
+        let port = rest
+            .get(close + 1..)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(default_port);
+        return Some((host, port));
+    }
+    if endpoint.matches(':').count() == 1 {
+        if let Some((host, raw_port)) = endpoint.rsplit_once(':') {
+            if let Ok(port) = raw_port.parse::<u16>() {
+                return Some((host.to_string(), port));
+            }
+        }
+    }
+    Some((endpoint.to_string(), default_port))
 }
 
 fn validate_h2_file_connection(config: &ConnectionConfig) -> Result<(), String> {
@@ -4951,16 +5290,17 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
+        agent_connect_timeout, connection_configs_pool_equivalent, connection_probe_endpoints,
+        connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
         database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
         gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_single_loopback_bootstrap_endpoint,
         metadata_connection_config, mysql_metadata_fallback_url, mysql_pool_setup_queries,
-        oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
+        redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
+        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, GAUSSDB_M_JDBC_DRIVER_CLASS,
+        GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -5035,7 +5375,6 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
-            federation_enabled: false,
         }
     }
 
@@ -5069,6 +5408,172 @@ mod tests {
         let mut config = mysql_config(Some("ads"));
         config.db_type = DatabaseType::StarRocks;
         assert_eq!(metadata_connection_config(&config).database, None);
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_ignores_password_differences() {
+        let mut a = mysql_config(None);
+        a.save_password = false;
+        a.password = "session-secret".to_string();
+        // 持久化同步后 password 为空（save_password=false）：视为同一连接，不销毁池。
+        let mut b = a.clone();
+        b.password.clear();
+        assert!(connection_configs_pool_equivalent(&a, &b));
+        assert!(connection_configs_pool_equivalent(&b, &a));
+
+        // 两个非空但不同的密码：同样忽略（密码不应触发池重建）。
+        let mut c = a.clone();
+        c.password = "changed-secret".to_string();
+        assert!(connection_configs_pool_equivalent(&a, &c));
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_detects_saved_password_change() {
+        let mut a = mysql_config(None);
+        a.save_password = true;
+        a.password = "old-secret".to_string();
+        let mut b = a.clone();
+        b.password = "new-secret".to_string();
+        // save_password=true：密码是真实连接参数，保存新密码后旧池不得继续用旧密码认证。
+        assert!(!connection_configs_pool_equivalent(&a, &b));
+        assert!(!connection_configs_pool_equivalent(&b, &a));
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_detects_real_parameter_changes() {
+        let mut a = mysql_config(None);
+        a.password = "secret".to_string();
+        // host / port / username / database 等真实连接参数变化应视为不同连接（销毁池）。
+        let mut host = a.clone();
+        host.host = "other-host".to_string();
+        assert!(!connection_configs_pool_equivalent(&a, &host));
+
+        let mut port = a.clone();
+        port.port = 5433;
+        assert!(!connection_configs_pool_equivalent(&a, &port));
+
+        let mut user = a.clone();
+        user.username = "other-user".to_string();
+        assert!(!connection_configs_pool_equivalent(&a, &user));
+
+        let mut ssl = a.clone();
+        ssl.ssl = true;
+        assert!(!connection_configs_pool_equivalent(&a, &ssl));
+
+        // 完全相等（含相同密码）→ true。
+        assert!(connection_configs_pool_equivalent(&a, &a.clone()));
+    }
+
+    #[tokio::test]
+    async fn apply_session_credential_injects_saved_password_only_for_no_save_connections() {
+        let dir = std::env::temp_dir().join(format!("dbx-core-session-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let _ = state.session_credentials.set("", "conn-a", "s3cret");
+
+        let mut config = mysql_config(None);
+        config.id = "conn-a".to_string();
+        config.save_password = false;
+        config.password.clear();
+
+        // save_password=false + db_config 密码为空 → 从会话凭据仓库注入。
+        let mut db_config = metadata_connection_config(&config);
+        state.apply_session_credential(&config, &mut db_config, &config.id);
+        assert_eq!(db_config.password, "s3cret");
+
+        // save_password=true → 不注入（走持久化水合的密码，若为空则保持空）。
+        config.save_password = true;
+        let mut db_config = metadata_connection_config(&config);
+        state.apply_session_credential(&config, &mut db_config, &config.id);
+        assert_eq!(db_config.password, "");
+
+        // 无会话凭据 → 保持空密码（"断开并忘记"后重新输入）。
+        state.session_credentials.remove("", "conn-a");
+        config.save_password = false;
+        let mut db_config = metadata_connection_config(&config);
+        state.apply_session_credential(&config, &mut db_config, &config.id);
+        assert_eq!(db_config.password, "");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn apply_session_credential_reads_owner_scoped_credentials_only() {
+        let dir = std::env::temp_dir().join(format!("dbx-core-session-cred-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+
+        let mut config = mysql_config(None);
+        config.id = "conn-a".to_string();
+        config.save_password = false;
+        config.password.clear();
+
+        // 会话 X 输入了密码，会话 Y 未输入：Y 的请求（owner=token-y）不得注入 X 的密码。
+        let _ = state.session_credentials.set("token-x", "conn-a", "x-secret");
+        crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
+            let mut db_config = metadata_connection_config(&config);
+            state.apply_session_credential(&config, &mut db_config, &config.id);
+            assert_eq!(db_config.password, "");
+        })
+        .await;
+
+        // 会话 X 自身能读到自己的密码。
+        crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
+            let mut db_config = metadata_connection_config(&config);
+            state.apply_session_credential(&config, &mut db_config, &config.id);
+            assert_eq!(db_config.password, "x-secret");
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pool_credential_owner_mismatch_prevents_cross_session_pool_reuse() {
+        let dir = std::env::temp_dir().join(format!("dbx-core-pool-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+
+        let mut config = mysql_config(None);
+        config.id = "conn-a".to_string();
+        config.save_password = false;
+
+        // 模拟会话 X 创建的 no-save 池。
+        state.session_credentials.record_pool_owner("conn-a", "token-x");
+
+        // 同一会话 X 复用 → 无冲突。
+        crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
+            assert!(!state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        // 另一会话 Y 请求同一 no-save 池 → 冲突，需以 Y 的凭据重建，避免复用 X 的密码。
+        crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
+            assert!(state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        // owner 标记缺失时按不可信处理，避免全局配置失效与异步移除旧池之间复用旧池。
+        state.session_credentials.clear_connection("conn-a");
+        crate::session_credentials::with_credential_owner(Some("token-x".to_string()), async {
+            assert!(state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        // 桌面端（无 owner）单用户 → 不冲突，按既有逻辑复用。
+        assert!(!state.pool_credential_owner_mismatch(&config, "conn-a").await);
+
+        // 已保存密码连接始终共享池 → 不冲突。
+        config.save_password = true;
+        crate::session_credentials::with_credential_owner(Some("token-y".to_string()), async {
+            assert!(!state.pool_credential_owner_mismatch(&config, "conn-a").await);
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5193,6 +5698,32 @@ mod tests {
         assert_eq!(
             gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
             Some("jdbc:gaussdb://db.internal:8000/postgres?currentSchema=legacy&sslmode=prefer&ssl=true")
+        );
+    }
+
+    #[test]
+    fn gaussdb_m_jdbc_target_server_type_preserves_url_params_and_allows_explicit_override() {
+        let mut config = mysql_config(Some("postgres"));
+        config.db_type = DatabaseType::Gaussdb;
+        config.driver_profile = Some(GAUSSDB_M_JDBC_DRIVER_PROFILE.to_string());
+
+        let default_url = gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.unwrap();
+        assert!(!default_url.to_ascii_lowercase().contains("targetservertype="));
+
+        config.url_params = Some("targetServerType=slave&currentSchema=app".to_string());
+        assert_eq!(
+            gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
+            Some(
+                "jdbc:gaussdb://db.internal:8000/postgres?targetServerType=slave&currentSchema=app&sslmode=prefer&ssl=true"
+            )
+        );
+
+        config.external_config = Some(serde_json::json!({ "gaussdbTargetServerType": "master" }));
+        assert_eq!(
+            gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
+            Some(
+                "jdbc:gaussdb://db.internal:8000/postgres?currentSchema=app&sslmode=prefer&ssl=true&targetServerType=master"
+            )
         );
     }
 
@@ -5382,7 +5913,7 @@ mod tests {
 
         assert_eq!(
             mongo_legacy_error_with_auth_hint(err),
-            "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}\n\nCurrent authentication database: gray_lite_twin_fat. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
+            "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}\n\nCurrent authentication database: gray_lite_twin_fat. The server rejected these credentials. Verify the username and password, and confirm that the user was created in gray_lite_twin_fat. If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
         );
     }
 
@@ -5401,7 +5932,7 @@ mod tests {
         config.driver_profile = Some("oceanbase".to_string());
 
         assert_eq!(
-            oceanbase_mysql_query_timeout_sql(&config, 300_000),
+            db::oceanbase_mysql::query_timeout_sql(&config, 300_000),
             Some("SET ob_query_timeout = 300000000000".to_string())
         );
     }
@@ -5704,7 +6235,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(path, b"").unwrap();
+        std::fs::write(path, b"test executable").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -5771,8 +6302,8 @@ mod tests {
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
-            profile_id: String::new(),
             allow_exec_channel_proxy: false,
+            profile_id: String::new(),
         });
         assert!(state.test_tunnel_profile(&ssh).await.is_err());
 
@@ -6007,6 +6538,15 @@ mod tests {
         assert_eq!(
             redacted_connection_url_for_endpoint(&config, &config.host, config.port),
             "postgres://127.0.0.1:3306/postgres?sslmode=prefer"
+        );
+    }
+
+    #[test]
+    fn gaussdb_probe_endpoints_parse_legacy_and_ipv6_hosts() {
+        assert_eq!(connection_probe_endpoints("db.example.com:5433", 5432), vec![("db.example.com".to_string(), 5433)]);
+        assert_eq!(
+            connection_probe_endpoints("[2001:db8::1]:5433,[2001:db8::2]:5434", 5432),
+            vec![("2001:db8::1".to_string(), 5433), ("2001:db8::2".to_string(), 5434)]
         );
     }
 
@@ -6636,7 +7176,13 @@ for line in sys.stdin:
             .await
             .insert(pool_key.to_string(), super::PoolActivity::idle_for(std::time::Duration::from_secs(10)));
         let pool = super::clone_pool_kind(state.connections.read().await.get(pool_key).unwrap());
-        state.start_keepalive_task(pool_key, &pool, &config);
+        state.start_keepalive_task(
+            pool_key,
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
@@ -7489,8 +8035,8 @@ for line in sys.stdin:
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
-            profile_id: profile_id.to_string(),
             allow_exec_channel_proxy: false,
+            profile_id: profile_id.to_string(),
         }
     }
 
@@ -7719,6 +8265,50 @@ for line in sys.stdin:
         assert_eq!(connect_override.host, "127.0.0.1");
         assert_ne!(connect_override.port, 8443);
         state.proxy_tunnels.stop_tunnel("proxied-mq:transport:0").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn rocketmq_transport_passes_socks_proxy_to_multi_endpoint_client() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "proxied-rocketmq".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = "172.19.191.166".to_string();
+        config.port = 9876;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "rocketmq",
+            "adminUrl": "",
+            "auth": { "kind": "none" },
+            "extra": { "namesrvAddr": "172.19.191.166:9876" }
+        }));
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: "proxy-user".to_string(),
+            password: "proxy-secret".to_string(),
+            test_target: None,
+        })];
+
+        let endpoint = state.connection_host_port("proxied-rocketmq", &config).await.unwrap();
+        assert_eq!(endpoint, ("172.19.191.166".to_string(), 9876));
+        assert!(state.proxy_tunnels.local_port("proxied-rocketmq:transport:0").await.is_none());
+
+        let mqc = state.mq_admin_config_for_connection("proxied-rocketmq", &config).await.unwrap();
+
+        let socks_proxy = mqc.socks_proxy.expect("RocketMQ transport should configure SOCKS5 routing");
+        assert_eq!(socks_proxy.host, "proxy.internal");
+        assert_eq!(socks_proxy.port, 1080);
+        assert_eq!(socks_proxy.username, "proxy-user");
+        assert_eq!(socks_proxy.password, "proxy-secret");
+        assert!(mqc.connect_override.is_none());
+        assert!(state.proxy_tunnels.local_port("proxied-rocketmq:transport:0").await.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

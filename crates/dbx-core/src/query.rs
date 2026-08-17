@@ -17,14 +17,11 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent_manager::DEFAULT_JRE_KEY;
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
-use crate::calcite_agent::{CalciteAgentConfig, CalciteAgentManager};
 use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
-use crate::federated::{analyze_federation, rewrite_federated_sql, validate_federation};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::{is_write_sql, strip_sql_comments_and_literals};
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
@@ -2114,122 +2111,6 @@ fn is_native_sql_server_error(db_type: Option<DatabaseType>, message: &str) -> b
         _ => false,
     }
 }
-/// 执行多连接联邦查询
-///
-/// 当 SQL 中引用了多个数据库连接（如 `pg_conn.public.users JOIN mysql_conn.shop.orders`）时，
-/// 通过 Calcite Agent 执行跨连接查询。
-///
-/// 流程：
-/// 1. 获取或创建 CalciteAgentManager
-/// 2. 启动 Agent（如果尚未运行）
-/// 3. 注册所有涉及的连接
-/// 4. 通过 Agent 执行联邦查询
-/// 5. 将结果转换为 QueryResult
-async fn execute_multi_connection_federated_query(
-    state: &AppState,
-    sql: &str,
-    analysis: &crate::federated::FederatedAnalysis,
-    cancel_token: Option<CancellationToken>,
-    all_connections: &[ConnectionConfig],
-) -> Result<db::QueryResult, QueryExecutionError> {
-    let conn_map: std::collections::HashMap<&str, &ConnectionConfig> =
-        all_connections.iter().map(|c| (c.name.as_str(), c)).collect();
-
-    // 获取或创建 CalciteAgentManager
-    let manager = {
-        let mut guard = state.calcite_agent.lock().unwrap();
-        if let Some(ref mgr) = *guard {
-            mgr.clone()
-        } else {
-            let mut config = CalciteAgentConfig::auto_discover();
-            // 让 Calcite Agent 使用与其它驱动 Agent 一致的 Java 运行时（受 Driver Manager 的
-            // Managed/System/Custom 配置控制）。否则会固定用 PATH 上的 `java`，在 macOS 下
-            // 通常落到 /usr/bin/java 占位符而无法启动，报 "Agent process closed stdout during startup"。
-            if let Ok(java) =
-                state.agent_manager.resolve_java_runtime(&state.agent_manager.load_state(), DEFAULT_JRE_KEY)
-            {
-                config.java_path = java.to_string_lossy().to_string();
-            }
-            if !config.is_jar_available() {
-                return Err(QueryExecutionError::Sql(format!(
-                    "Calcite Agent JAR not found. Federated queries across multiple connections require the Calcite Agent.\n\
-                     Expected JAR at: agents/drivers/calcite/build/libs/dbx-agent-calcite.jar\n\
-                     Please build it with: cd agents && ./gradlew :drivers:calcite:shadowJar"
-                )));
-            }
-            let mgr = CalciteAgentManager::new(config);
-            *guard = Some(mgr.clone());
-            mgr
-        }
-    };
-
-    // 启动 Agent（如果尚未运行）
-    let app_version = state.agent_manager.agent_app_version();
-    if !manager.is_running().await {
-        log::info!("Starting Calcite Agent for multi-connection federated query");
-        manager
-            .start(app_version)
-            .await
-            .map_err(|e| QueryExecutionError::Sql(format!("Failed to start Calcite Agent: {e}")))?;
-    }
-
-    // 注册所有涉及的连接
-    for conn_name in &analysis.connections {
-        let conn_config = match conn_map.get(conn_name.as_str()) {
-            Some(c) => *c,
-            None => {
-                log::debug!(
-                    "[federated] Connection '{}' not found, available: {:?}",
-                    conn_name,
-                    conn_map.keys().collect::<Vec<_>>()
-                );
-                return Err(QueryExecutionError::Sql(format!(
-                    "Connection '{conn_name}' not found in configured connections"
-                )));
-            }
-        };
-
-        // 检查是否已注册
-        let already_registered = {
-            let registered = manager.registered_connections_list().await;
-            registered.contains(conn_name)
-        };
-        log::debug!("[federated] Connection '{}' already_registered={}", conn_name, already_registered);
-
-        if !already_registered {
-            log::info!("Registering connection '{}' with Calcite Agent", conn_name);
-            manager.register_connection(conn_config).await.map_err(|e| {
-                QueryExecutionError::Sql(format!("Failed to register connection '{conn_name}' with Calcite Agent: {e}"))
-            })?;
-        }
-    }
-
-    // 执行联邦查询
-    log::info!("Executing multi-connection federated query via Calcite Agent");
-    let fed_result = manager
-        .execute_federated_query(sql, cancel_token)
-        .await
-        .map_err(|e| QueryExecutionError::Sql(format!("Calcite Agent query failed: {e}")))?;
-
-    // 转换为 QueryResult
-    let result = db::QueryResult {
-        columns: fed_result.columns,
-        column_types: vec![],
-        column_sortables: vec![],
-        spatial_columns: vec![],
-        spatial_values: vec![],
-        rows: fed_result.rows,
-        affected_rows: 0,
-        execution_time_ms: fed_result.duration_ms as u128,
-        truncated: false,
-        session_id: None,
-        has_more: false,
-        elasticsearch_raw_body: None,
-        messages: vec![],
-    };
-
-    Ok(result)
-}
 
 pub async fn do_execute(
     state: &AppState,
@@ -2351,90 +2232,15 @@ pub async fn execute_sql_statement_with_options_typed(
         return Err(MONGO_SHELL_COMMAND_HINT.into());
     }
 
-    // Check for federated query patterns
-    let mut effective_sql = sql.to_string();
-    {
-        // Reconcile the in-memory configs cache with storage so connections created or edited
-        // in another session (e.g. the DBX desktop UI) after this process started are visible.
-        // Otherwise the connection set built below from the cache won't recognize `conn.schema.table`
-        // prefixes and the query falls through to the single-connection pool path, which surfaces
-        // "Connection config not found" for a connection that exists in storage.
-        if let Ok(stored) = state.storage.load_connections().await {
-            let mut configs = state.configs.write().await;
-            for config in stored {
-                if !configs.contains_key(&config.id) {
-                    configs.insert(config.id.clone(), config);
-                }
-            }
-            drop(configs);
-        } else {
-            log::warn!("Failed to reload connections from storage for federation analysis");
-        }
-
-        let configs = state.configs.read().await;
-        let all_connections: Vec<ConnectionConfig> = configs.values().cloned().collect();
-        drop(configs);
-
-        log::info!(
-            "[federated] About to analyze federation: sql_len={}, connection_count={}, database={:?}",
-            effective_sql.len(),
-            all_connections.len(),
-            database
-        );
-        for conn in &all_connections {
-            log::info!(
-                "[federated]   connection: id={}, name={}, db_type={:?}, driver_profile={:?}, federation_enabled={}, database={:?}",
-                conn.id, conn.name, conn.db_type, conn.driver_profile, conn.federation_enabled, conn.database
-            );
-        }
-
-        let federation_analysis = analyze_federation(&effective_sql, &all_connections);
-
-        log::info!(
-            "[federated] Analysis result: uses_federation={}, is_single_connection={}, single_connection={:?}, connections={:?}",
-            federation_analysis.uses_federation_syntax,
-            federation_analysis.is_single_connection,
-            federation_analysis.single_connection,
-            federation_analysis.connections
-        );
-
-        // Validate federation access (check federation_enabled and schema visibility)
-        if federation_analysis.uses_federation_syntax {
-            if let Err(e) = validate_federation(&federation_analysis, &all_connections) {
-                log::info!("[federated] Federation validation failed: {e}");
-                return Err(e.to_string().into());
-            }
-        }
-
-        // If single connection with federation syntax, rewrite SQL and continue normally
-        if federation_analysis.is_single_connection && federation_analysis.uses_federation_syntax {
-            if let Some(rewritten_sql) = rewrite_federated_sql(&effective_sql, &federation_analysis) {
-                log::info!(
-                    "[federated] Rewrote federated SQL for single connection: original={}, rewritten={}",
-                    effective_sql,
-                    rewritten_sql
-                );
-                effective_sql = rewritten_sql;
-            } else {
-                log::info!("[federated] rewrite_federated_sql returned None, using original SQL");
-            }
-        } else if federation_analysis.uses_federation_syntax && !federation_analysis.is_single_connection {
-            // Multi-connection federated query - delegate to Calcite Agent
-            log::info!("[federated] Multi-connection federated query detected, delegating to Calcite");
-            return execute_multi_connection_federated_query(
-                state,
-                &effective_sql,
-                &federation_analysis,
-                cancel_token,
-                &all_connections,
-            )
-            .await;
-        } else {
-            log::info!("[federated] No federation syntax detected, executing directly against pool");
-        }
-    }
-
     let db_type = connection_database_type(state, connection_id).await;
+    validate_query_execution_mode(db_type, sql, &options)?;
+    let has_executable_sql = db_type.map_or_else(
+        || crate::sql::has_executable_sql(sql),
+        |db_type| crate::sql::has_executable_sql_for_database(sql, db_type),
+    );
+    if !has_executable_sql {
+        return Ok(empty_query_result(0));
+    }
 
     if let Some(target_database) = postgres_drop_database_target(db_type, sql) {
         return execute_postgres_drop_database(state, connection_id, &target_database, sql, cancel_token, options)
@@ -2446,25 +2252,10 @@ pub async fn execute_sql_statement_with_options_typed(
     // on that tab-scoped pool so connection-level state (for example MySQL @vars)
     // survives across runs.
     let pool_database = query_pool_database(database, options.catalog.as_deref());
-    log::info!(
-        "[query] do_execute_typed: connection_id={}, db_type={:?}, database={:?}, pool_database={:?}, catalog={:?}",
-        connection_id,
-        db_type,
-        database,
-        pool_database,
-        options.catalog
-    );
-    log::info!(
-        "[query] Creating pool for session: connection_id={}, pool_database={:?}, client_session_id={:?}",
-        connection_id,
-        pool_database,
-        options.client_session_id
-    );
     let pool_key = state
         .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
         .await
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
-    log::info!("[query] Pool created/selected: pool_key={}", pool_key);
 
     if is_canceled(&cancel_token) {
         return Err(pre_dispatch_canceled_query_execution_error());
@@ -2476,7 +2267,7 @@ pub async fn execute_sql_statement_with_options_typed(
         &pool_key,
         mysql_dialect,
         Some(database),
-        &effective_sql,
+        sql,
         schema,
         cancel_token.clone(),
         options.clone(),
@@ -2496,17 +2287,8 @@ pub async fn execute_sql_statement_with_options_typed(
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
-                do_execute_typed(
-                    state,
-                    &new_key,
-                    mysql_dialect,
-                    Some(database),
-                    &effective_sql,
-                    schema,
-                    cancel_token,
-                    options,
-                )
-                .await,
+                do_execute_typed(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options)
+                    .await,
             )
         }
         Some(PoolErrorAction::Discard) => {
@@ -5457,7 +5239,6 @@ for line in sys.stdin:
             is_production: false,
             production_databases: vec![],
             database_info: None,
-            federation_enabled: false,
         }
     }
 
@@ -7245,7 +7026,6 @@ for line in sys.stdin:
             is_production: false,
             production_databases: vec![],
             database_info: None,
-            federation_enabled: false,
         };
 
         let params = external_driver_query_params(
