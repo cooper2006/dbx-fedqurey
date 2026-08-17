@@ -2,6 +2,41 @@
 
 ## 2026-08-17
 
+### 修复前端缺少 opentenbase DatabaseType
+
+**背景**：`databaseSupport.ts` 中有 7 个"未知连接选项"（opentenbase、meilisearch、elasticsearch、qdrant、milvus、weaviate、chromadb），经逐一核查后端 Rust 代码：
+- **elasticsearch**、**meilisearch**、**qdrant**、**milvus**、**weaviate**、**chromadb**：后端已有完整的 `DatabaseType` 枚举值、`PoolKind`、驱动实现，前端 `DatabaseType` 类型也已包含。
+- **opentenbase**：后端以 `driver_profile: Some("opentenbase")` + `DatabaseType::Postgres` 方式识别，属于 PostgreSQL 兼容层；但前端 TypeScript `DatabaseType` 联合类型中缺失 `"opentenbase"` 条目，导致该数据库在前端显示为未知。
+
+**修改文件**：
+- `apps/desktop/src/types/database.ts`：在 `duckdb` 和 `clickhouse` 之间新增 `| "opentenbase"`
+
+**验证**：TypeScript 编译环境因权限限制无法运行 `tsc`；手动比对 `docs/data/databaseSupport.ts` 的 id 集合与 `database.ts` 的 DatabaseType 联合类型，除以下 19 个数据库外其余均已覆盖：
+- 后端使用 `driver_profile` 而非独立 `DatabaseType`：cloudberry, cockroachdb, dolt, greatsql, mariadb, oceanbase, phoenix, polardb, selectdb, tdsql, tidb
+- JDBC/消息队列/特殊用途：jdbcx, kafka, rabbitmq, request（链接到 GitHub Discussions，非真实 DB）
+- 这些 19 个不在这 7 个目标之内，属于其他已知缺失项。
+
+---
+
+## 项目操作约束
+
+- 默认使用中文回复。
+- 只允许操作当前项目文件夹。
+- 禁止删除任何文件。
+- 需要确认的操作先问用户。
+- 无法判断的文件放入「待确认清单」，不强行处理。
+- 每次实际修改后更新本文件。
+- 每轮只读取 AGENTS.md、本文件最新状态和本轮相关文件。
+- 不重复扫描整个项目，不重复读取无关文档。
+- 只修改当前任务必要文件，不顺手重构、格式化、升级依赖或扩展功能。
+- 已明确的低风险任务一次完成，减少重复确认和拆轮次。
+- 测试只做本轮必要范围，未受影响模块不重复全量测试。
+- 出错先定位原因，再做最小修改，不盲目重写。
+
+---
+
+## 2026-08-17
+
 ### 启动 web 版前后端服务
 
 - **后端**：`dbx-web` 已在运行（PID 46113，端口 4224），验证 HTTP 响应正常（`/` 返回 404 属正常，服务在监听）。
@@ -42,23 +77,6 @@
 - 提交联邦修复：`56ba379e1`（6 个文件：connection.rs、federated.rs、query.rs(core)、schema.rs、query.rs(web)、WORK_LOG.md）。
 - 经用户确认，`git tag -f -a v0.5.86 -m "Release 0.5.86"` 强制移动到 HEAD（原指向 31c392b2c）。
 - 未提交文件保留：`App.vue`、`connectionStore.ts`（更早轮次修复，与联邦无关）、`.ohmyagent/settings.json`。
-
----
-
-## 项目操作约束
-
-- 默认使用中文回复。
-- 只允许操作当前项目文件夹。
-- 禁止删除任何文件。
-- 需要确认的操作先问用户。
-- 无法判断的文件放入「待确认清单」，不强行处理。
-- 每次实际修改后更新本文件。
-- 每轮只读取 AGENTS.md、本文件最新状态和本轮相关文件。
-- 不重复扫描整个项目，不重复读取无关文档。
-- 只修改当前任务必要文件，不顺手重构、格式化、升级依赖或扩展功能。
-- 已明确的低风险任务一次完成，减少重复确认和拆轮次。
-- 测试只做本轮必要范围，未受影响模块不重复全量测试。
-- 出错先定位原因，再做最小修改，不盲目重写。
 
 ---
 

@@ -2704,6 +2704,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!connectionIds.length) return;
 
     const removedIds = new Set(connectionIds);
+    const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     let nextLayout = sidebarLayout.value;
     for (const id of removedIds) nextLayout = removeConnectionFromSidebarLayout(nextLayout, id);

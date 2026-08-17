@@ -11,6 +11,7 @@ export type DatabaseType =
   | "cloudflare-d1"
   | "redis"
   | "duckdb"
+  | "opentenbase"
   | "clickhouse"
   | "sqlserver"
   | "mongodb"
