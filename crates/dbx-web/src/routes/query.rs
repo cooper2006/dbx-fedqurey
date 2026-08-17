@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::state::WebState;
+use dbx_core::federated::{analyze_federation, rewrite_federated_sql};
 use dbx_core::query_cancel::RunningTaskMetadata;
 
 #[derive(Deserialize)]
@@ -360,11 +361,13 @@ pub async fn execute_query(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_query");
 
+    let sql = preprocess_federated_sql(&state, &req.sql).await?;
+
     let result = dbx_core::query::execute_sql_statement_with_options_typed(
         &state.app,
         &req.connection_id,
         &req.database,
-        &req.sql,
+        &sql,
         req.schema.as_deref(),
         Some(cancel_token),
         dbx_core::query::QueryExecutionOptions {
@@ -410,12 +413,14 @@ pub async fn execute_multi(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_multi");
 
+    let sql = preprocess_federated_sql(&state, &req.sql).await?;
+
     let core_started_at = std::time::Instant::now();
     let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
         &state.app,
         &req.connection_id,
         &req.database,
-        &req.sql,
+        &sql,
         req.schema.as_deref(),
         Some(cancel_token),
         dbx_core::query::QueryExecutionOptions {
@@ -971,6 +976,22 @@ pub async fn build_database_sql_export(
         }
     }
     dbx_core::database_export::build_database_sql_export(options).map(Json).map_err(AppError::from)
+}
+
+/// Preprocess SQL for federated query support.
+///
+/// Loads all connections, analyzes the SQL for federation patterns, and
+/// rewrites single-connection federated SQL by stripping connection name prefixes.
+async fn preprocess_federated_sql(state: &WebState, sql: &str) -> Result<String, AppError> {
+    let connections = state.app.storage.load_connections().await.map_err(|e| AppError::internal(e))?;
+    let analysis = analyze_federation(sql, &connections);
+    if analysis.uses_federation_syntax && analysis.connections.len() == 1 {
+        if let Some(rewritten) = rewrite_federated_sql(sql, &analysis) {
+            tracing::debug!(original_sql = %sql, rewritten_sql = %rewritten, "rewrote federated SQL");
+            return Ok(rewritten);
+        }
+    }
+    Ok(sql.to_string())
 }
 
 #[cfg(test)]

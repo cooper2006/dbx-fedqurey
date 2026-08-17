@@ -208,6 +208,8 @@ pub struct AppState {
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub agent_manager: crate::agent_manager::AgentManager,
+    /// Lazily-created Calcite Agent manager for multi-connection federated queries.
+    pub calcite_agent: std::sync::Mutex<Option<crate::calcite_agent::CalciteAgentManager>>,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
     duckdb_worker_process_isolation: AtomicBool,
     duckdb_worker_max_processes: AtomicUsize,
@@ -1080,6 +1082,7 @@ impl AppState {
                 agent_dir,
                 app_version,
             ),
+            calcite_agent: std::sync::Mutex::new(None),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
@@ -5375,6 +5378,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         }
     }
 

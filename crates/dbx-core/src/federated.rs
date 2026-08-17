@@ -124,6 +124,22 @@ fn preprocess_federated_sql(sql: &str, connection_names: &[&str]) -> String {
     result
 }
 
+/// Fix malformed table references that start with a leading dot (e.g., ".store_sales" -> "store_sales").
+/// This handles cases where the frontend generates SQL with an extra leading dot before the table name.
+fn fix_leading_dot_table_refs(sql: &str) -> String {
+    // Match a dot followed by an identifier where the dot is preceded by whitespace, comma, FROM, JOIN, ON, etc.
+    // Replace ".table_name" with "table_name" (strip the leading dot).
+    let pattern = regex::Regex::new(r"(?i)([\s,(])(\.[A-Za-z_]\w*)").unwrap();
+    pattern
+        .replace_all(sql, |caps: &regex::Captures| {
+            let prefix = &caps[1];
+            let dotted = &caps[2];
+            // Strip the leading dot: ".store_sales" -> "store_sales"
+            format!("{}{}", prefix, &dotted[1..])
+        })
+        .to_string()
+}
+
 /// Parse SQL and detect federation patterns
 pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> FederatedAnalysis {
     let mut table_refs = Vec::new();
@@ -134,6 +150,8 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
     // (e.g., hyphens) so the parser can correctly identify them as identifiers.
     let connection_names: Vec<&str> = connections.iter().map(|c| c.name.as_str()).collect();
     let preprocessed_sql = preprocess_federated_sql(sql, &connection_names);
+    // Fix malformed table references with leading dots (e.g., ".store_sales" -> "store_sales")
+    let fixed_sql = fix_leading_dot_table_refs(&preprocessed_sql);
 
     log::debug!(
         "[federated] analyze_federation: sql_len={}, connection_count={}, connections=[{}], sql={}",
@@ -145,7 +163,7 @@ pub fn analyze_federation(sql: &str, connections: &[ConnectionConfig]) -> Federa
 
     // Parse the SQL
     let dialect = GenericDialect {};
-    let statements = match Parser::parse_sql(&dialect, &preprocessed_sql) {
+    let statements = match Parser::parse_sql(&dialect, &fixed_sql) {
         Ok(stmts) => stmts,
         Err(e) => {
             log::debug!("[federated] SQL parse failed: {e}, sql={}", sql);
@@ -369,8 +387,9 @@ pub fn rewrite_federated_sql(sql: &str, analysis: &FederatedAnalysis) -> Option<
     // matching the preprocessing done in analyze_federation.
     let connection_names: Vec<&str> = analysis.connections.iter().map(|s| s.as_str()).collect();
     let preprocessed_sql = preprocess_federated_sql(sql, &connection_names);
+    let fixed_sql = fix_leading_dot_table_refs(&preprocessed_sql);
     let dialect = GenericDialect {};
-    let mut statements = match Parser::parse_sql(&dialect, &preprocessed_sql) {
+    let mut statements = match Parser::parse_sql(&dialect, &fixed_sql) {
         Ok(stmts) => stmts,
         Err(_) => return None,
     };
@@ -760,5 +779,32 @@ mod tests {
 
         let rewritten = rewrite_federated_sql(sql, &analysis).expect("rewrite should succeed");
         assert_eq!(rewritten, "SELECT * FROM public.users WHERE id = 1");
+    }
+
+    #[test]
+    fn test_fix_leading_dot_table_ref() {
+        // Test that malformed table references with leading dots are fixed.
+        let sql = "SELECT * FROM .store_sales s JOIN mySQLocal.tpcds.item i ON s.ss_item_sk = i.i_item_sk";
+        let fixed = fix_leading_dot_table_refs(sql);
+        assert_eq!(fixed, "SELECT * FROM store_sales s JOIN mySQLocal.tpcds.item i ON s.ss_item_sk = i.i_item_sk");
+    }
+
+    #[test]
+    fn test_federation_with_leading_dot_table_ref() {
+        // Test that federation analysis works even when one table has a leading dot.
+        let conn = make_test_connection("mySQLocal", DatabaseType::Mysql, "tpcds");
+        let sql = "SELECT * FROM .store_sales s JOIN mySQLocal.tpcds.item i ON s.ss_item_sk = i.i_item_sk";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        // Should detect the federation pattern from mySQLocal.tpcds.item
+        assert!(analysis.uses_federation_syntax, "should detect federation from 3-part reference");
+
+        let rewritten = rewrite_federated_sql(sql, &analysis);
+        assert!(rewritten.is_some(), "rewrite should succeed");
+        let result = rewritten.unwrap();
+        // The leading dot should be stripped
+        assert!(!result.contains(".store_sales"), "leading dot should be stripped, got: {result}");
+        // The federation prefix should be stripped
+        assert!(!result.contains("mySQLocal."), "connection prefix should be stripped, got: {result}");
     }
 }
