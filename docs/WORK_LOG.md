@@ -2,6 +2,78 @@
 
 ## 2026-08-17
 
+### 刷新文档并提交推送（v0.5.86）
+
+**操作**：
+- 从 upstream/main 同步最新代码（`4dd34b9a0 Merge upstream/main`），保留本地联邦查询修改
+- 补全前端 `DatabaseType` 中的 `opentenbase` 类型（`f64a60225`）
+- 刷新联邦查询相关文档至最新版本
+- 将标签 `v0.5.86` 更新指向新 HEAD（`b60cf08c8`）
+- 推送到 origin/main
+
+**修改文件**：
+- `docs/FEDERATED_QUERY_SUMMARY.md`：更新至最新版本，反映上游合并和 opentenbase 支持
+- `docs/FEDERATED_QUERY_IMPLEMENTATION.md`：同上
+- `docs/federated-query-design/federated-query-design.html`：版本更新至 2.6
+- `docs/federated-query-guide/federated-query-guide.html`：版本更新至 1.6
+- `docs/WORK_LOG.md`：记录本次操作
+
+**验证**：
+- 编译通过
+- 前后端服务正常运行（后端 :4224，前端 :5173）
+- 7 个数据库类型全部支持：opentenbase、meilisearch、elasticsearch、qdrant、milvus、weaviate、chromadb
+
+---
+
+## 2026-08-17
+
+### 启动 web 版前后端服务
+
+**后端**：`dbx-web` 已在运行（PID 13858，端口 4224），验证 HTTP 响应正常（`/` 返回 404 属正常，服务在监听）。
+- **前端**：`pnpm dev:web`（vite，端口 5173）后台启动，命令见 `package.json` 的 `dev:web` 脚本；日志写入 `.reasonix/dev-web.log`。
+  - 首次启动时 corepack 下载 pnpm 及依赖元数据较慢，等待后 vite 正常就绪。
+  - 验证：`http://localhost:5173/` 返回 HTTP 200。
+- **备注**：未改动任何源代码；发现一个遗留进程 `pnpm tauri build`（PID 32560，3:36PM 起），与本轮无关，未处理。
+
+### 修复：联邦查询 SQL 语法错误（ERROR 1064 `near '.store_sales'`）
+
+**现象**：多连接联邦查询报 `ERROR 1064 (42000)`，SQL 片段 `FROM pgLocal.tpcds.store_sales s JOIN mySQLocal.tpcds.item i ...` 原样发送给 MySQL，MySQL 把三段表名解析为 `pgLocal.tpcds` + 多余 `.store_sales` 报错。
+
+**根因**（通过 `~/.dbx-web/dbx.db` history 拿到用户实际 SQL + `git log -S` 比对确认）：
+- 提交 `21ccd9ead`（fix: resolve merge conflicts）在合并冲突解决时**丢失了 dbx-core 执行层（`crates/dbx-core/src/query.rs`）的联邦处理逻辑**（原版本含：联邦分析、`validate_federation`、单连接 SQL 重写、多连接转发 Calcite Agent）。`git show HEAD:...query.rs | grep -c federat` 结果为 0。
+- 上轮修复只在 dbx-web 层做了**单连接**联邦重写（`preprocess_federated_sql`），多连接联邦 SQL 不重写、原样传给 MySQL → 1064。
+- 附带问题：`federation_enabled` 字段加入 `ConnectionConfig` 后，dbx-core 多处测试初始化未补字段，导致 `cargo test` 编译失败。
+
+**修改文件**：
+1. `crates/dbx-core/src/connection.rs`：`AppState` 增加 `calcite_agent: Mutex<Option<CalciteAgentManager>>` 字段并初始化（惰性创建 Calcite Agent）；测试 `ConnectionConfig` 初始化补 `federation_enabled`。
+2. `crates/dbx-core/src/query.rs`：恢复执行层联邦处理——imports、`execute_sql_statement_with_options_typed` 中插入联邦分析/校验/单连接重写/多连接转 Calcite 块（用 `effective_sql` 执行）；新增 `execute_multi_connection_federated_query` 函数（Calcite Agent 惰性启动 + 连接注册 + 联邦查询 + 结果转换）；3 处测试 `ConnectionConfig` 补 `federation_enabled`。
+3. `crates/dbx-core/src/schema.rs`：测试 `ConnectionConfig` 补 `federation_enabled`。
+
+**验证**：
+- `cargo check -p dbx-web` 编译通过。
+- `cargo test -p dbx-core federated`：15 个单元测试 + 5 个 e2e 测试全部通过。
+- Calcite Agent JAR 已就位：`agents/drivers/calcite/build/libs/dbx-agent-calcite.jar`（150MB）。
+
+**待办（用户操作）**：重新编译并重启 web 后端（`pnpm dev:backend`，端口 4224）后，多连接联邦查询才会走 Calcite Agent；当前 4224 后端进程已停止。
+
+**更新（重启后端完成）**：
+- 后台启动 `pnpm dev:backend`（cargo-watch 模式），dbx-core + dbx-web 重新编译，dbx-web 监听 `http://0.0.0.0:4224`，恢复 11 个会话，HTTP 验证 404（服务正常）。
+- 日志：`.reasonix/dev-backend.log`。
+- 请在前端重试原 SQL（`FROM pgLocal.tpcds.store_sales s JOIN mySQLocal.tpcds.item i ...`），预期走 Calcite Agent（后端日志出现 `Multi-connection federated query detected, delegating to Calcite`）。
+
+**更新（重启前端完成）**：前端 `pnpm dev:web`（vite, :5173）已重启，`http://localhost:5173/` 返回 200，日志 `.reasonix/dev-web.log`。
+
+**更新（提交 + 打标 v0.5.86）**：
+- 提交联邦修复：`56ba379e1`（6 个文件：connection.rs、federated.rs、query.rs(core)、schema.rs、query.rs(web)、WORK_LOG.md）。
+- 经用户确认，`git tag -f -a v0.5.86 -m "Release 0.5.86"` 强制移动到 HEAD（原指向 31c392b2c）。
+- 未提交文件保留：`App.vue`、`connectionStore.ts`（更早轮次修复，与联邦无关）、`.ohmyagent/settings.json`。
+
+---
+
+## 2026-08-17
+
+### 修复前端缺少 opentenbase DatabaseType
+
 ### 从 upstream/main 同步代码（排除联邦查询）
 
 **背景**：用户要求从 https://github.com/t8y2/dbx 更新代码，以远端为准，但保留本地联邦查询相关修改。
