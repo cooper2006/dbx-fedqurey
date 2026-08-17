@@ -3385,7 +3385,7 @@ async function provideMongoCompletions(currentState: import("@codemirror/state")
   return {
     from: completionContext.from,
     options: items.map((item) => completionOptionForItem(item)),
-    validFor: getMongoCompletionResultValidFor(),
+    validFor: getMongoCompletionResultValidFor(completionContext),
   };
 }
 

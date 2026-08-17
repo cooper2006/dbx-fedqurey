@@ -4147,7 +4147,14 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                ELSE CASE a.attgenerated \
                  WHEN 's' THEN 'generated always as (' || pg_get_expr(ad.adbin, ad.adrelid) || ') stored' \
                  WHEN 'v' THEN 'generated always as (' || pg_get_expr(ad.adbin, ad.adrelid) || ') virtual' \
-                 ELSE NULL \
+                 ELSE CASE WHEN a.atttypid IN (20, 21, 23) AND dep.deptype = 'a' \
+                   AND pseq.seqrelid IS NOT NULL AND default_dep.objid IS NOT NULL \
+                   AND pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', dep.objid::regclass::text) \
+                 THEN CASE a.atttypid \
+                   WHEN 21 THEN 'smallserial' \
+                   WHEN 23 THEN 'serial' \
+                   WHEN 20 THEN 'bigserial' \
+                 END ELSE NULL END \
                END \
              END AS column_extra, \
              CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
@@ -4163,8 +4170,18 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
-             LEFT JOIN pg_depend dep ON dep.refobjid = a.attrelid AND dep.refobjsubid = a.attnum AND dep.deptype = 'i' \
+             LEFT JOIN pg_depend dep ON dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+               AND dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+               AND dep.refobjid = a.attrelid AND dep.refobjsubid = a.attnum AND dep.deptype IN ('a', 'i') \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
+             LEFT JOIN pg_catalog.pg_depend default_dep \
+               ON default_dep.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass \
+              AND default_dep.objid = ad.oid \
+              AND default_dep.objsubid = 0 \
+              AND default_dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+              AND default_dep.refobjid = dep.objid \
+              AND default_dep.refobjsubid = 0 \
+              AND default_dep.deptype = 'n' \
              LEFT JOIN information_schema.columns c \
                ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
              WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
@@ -4182,7 +4199,14 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                AND a.attnum = ANY(i.indkey) \
              ) AS is_pk, \
              col_description(a.attrelid, a.attnum) AS column_comment, \
-             NULL::text AS column_extra, \
+             CASE WHEN a.atttypid IN (20, 21, 23) AND serial_seq.oid IS NOT NULL \
+               AND serial_default_dep.objid IS NOT NULL \
+               AND pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', serial_seq.oid::regclass::text) \
+             THEN CASE a.atttypid \
+               WHEN 21 THEN 'smallserial' \
+               WHEN 23 THEN 'serial' \
+               WHEN 20 THEN 'bigserial' \
+             END ELSE NULL END AS column_extra, \
              CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
                THEN ((a.atttypmod - 4) >> 16) & 65535 ELSE NULL END AS numeric_precision, \
              CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
@@ -4193,6 +4217,20 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+             LEFT JOIN pg_catalog.pg_depend serial_dep \
+               ON serial_dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+              AND serial_dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+              AND serial_dep.refobjid = a.attrelid AND serial_dep.refobjsubid = a.attnum \
+              AND serial_dep.deptype = 'a' \
+             LEFT JOIN pg_catalog.pg_class serial_seq ON serial_seq.oid = serial_dep.objid AND serial_seq.relkind = 'S' \
+             LEFT JOIN pg_catalog.pg_depend serial_default_dep \
+               ON serial_default_dep.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass \
+              AND serial_default_dep.objid = ad.oid \
+              AND serial_default_dep.objsubid = 0 \
+              AND serial_default_dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+              AND serial_default_dep.refobjid = serial_seq.oid \
+              AND serial_default_dep.refobjsubid = 0 \
+              AND serial_default_dep.deptype = 'n' \
              LEFT JOIN information_schema.columns c \
                ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
              WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
@@ -5433,6 +5471,30 @@ pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<
             }
         },
     }
+}
+
+/// Names of same-table indexes whose `pg_index.indisvalid` is `false`.
+///
+/// A cancelled `CREATE INDEX CONCURRENTLY` leaves an INVALID index behind with
+/// the requested name; until it is dropped, any retry of the same build fails
+/// with `relation already exists`. The structure editor consults this before
+/// applying a concurrent build so it can surface the leftover explicitly
+/// instead of failing silently.
+const POSTGRES_INVALID_INDEXES_SQL: &str = "SELECT idx.relname \
+     FROM pg_catalog.pg_index ix \
+     JOIN pg_catalog.pg_class idx ON idx.oid = ix.indexrelid \
+     JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+     WHERE n.nspname = $1 AND t.relname = $2 AND ix.indisvalid = false \
+     ORDER BY idx.relname";
+
+pub async fn list_invalid_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<String>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, POSTGRES_INVALID_INDEXES_SQL, &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).collect())
 }
 
 fn postgres_foreign_keys_sql() -> &'static str {
@@ -8052,10 +8114,37 @@ mod tests {
     }
 
     #[test]
+    fn postgres_column_metadata_marks_only_owned_integer_sequence_defaults_as_serial() {
+        for sql in [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL] {
+            assert!(sql.contains("a.atttypid IN (20, 21, 23)"));
+            assert!(sql.contains("WHEN 21 THEN 'smallserial'"));
+            assert!(sql.contains("WHEN 23 THEN 'serial'"));
+            assert!(sql.contains("WHEN 20 THEN 'bigserial'"));
+        }
+        assert!(POSTGRES_COLUMNS_SQL.contains("dep.deptype IN ('a', 'i')"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("pseq.seqrelid IS NOT NULL"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("default_dep.objid = ad.oid"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("default_dep.refobjid = dep.objid"));
+        assert!(POSTGRES_COLUMNS_SQL.contains(
+            "pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', dep.objid::regclass::text)"
+        ));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("serial_dep.deptype = 'a'"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("serial_seq.relkind = 'S'"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("serial_default_dep.objid = ad.oid"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("serial_default_dep.refobjid = serial_seq.oid"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains(
+            "pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', serial_seq.oid::regclass::text)"
+        ));
+
+        assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("serial_dep"));
+        assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("NULL::text AS column_extra"));
+    }
+
+    #[test]
     fn postgres_column_metadata_has_opengauss_compatible_fallback() {
         assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("a.attidentity"));
         assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("pg_sequence"));
-        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("NULL::text AS column_extra"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("AS column_extra"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("col_description"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("LEFT JOIN information_schema.columns"));
@@ -8178,6 +8267,97 @@ mod tests {
         assert!(info.is_nullable);
         // int4 1 should be interpreted as true for is_primary_key
         assert!(info.is_primary_key);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_owned_serial_table_ddl_round_trips_without_external_sequences() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let schema = format!("dbx 6405 \"{suffix}");
+        let schema_ident = pg_quote_ident(&schema);
+        let table_name = "order\"items";
+        let table_ident = pg_quote_ident(table_name);
+        let table = format!("{schema_ident}.{table_ident}");
+        let custom_sequence_name = "custom\"source";
+        let custom_sequence = format!("{schema_ident}.{}", pg_quote_ident(custom_sequence_name));
+        let custom_table_name = "custom defaults";
+        let custom_table = format!("{schema_ident}.{}", pg_quote_ident(custom_table_name));
+        let owned_custom_sequence_name = "owned custom source";
+        let owned_custom_sequence = format!("{schema_ident}.{}", pg_quote_ident(owned_custom_sequence_name));
+        let owned_custom_table_name = "owned custom defaults";
+        let owned_custom_table = format!("{schema_ident}.{}", pg_quote_ident(owned_custom_table_name));
+        let dropped_default_table_name = "dropped default";
+        let dropped_default_table = format!("{schema_ident}.{}", pg_quote_ident(dropped_default_table_name));
+        let client = pool.get().await.expect("get postgres client");
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_ident}; \
+                 CREATE TABLE {table} (\
+                   \"small\"\"id\" smallserial, \
+                   \"regular id\" serial, \
+                   \"large\"\"id\" bigserial, \
+                   identity_id bigint GENERATED BY DEFAULT AS IDENTITY, \
+                   base bigint DEFAULT 2, \
+                   generated bigint GENERATED ALWAYS AS (base * 2) STORED\
+                 ); \
+                 CREATE SEQUENCE {custom_sequence}; \
+                 CREATE TABLE {custom_table} (id bigint DEFAULT nextval({}::regclass)); \
+                 CREATE TABLE {owned_custom_table} (id bigint NOT NULL); \
+                 CREATE SEQUENCE {owned_custom_sequence} OWNED BY {owned_custom_table}.id; \
+                 ALTER TABLE {owned_custom_table} ALTER COLUMN id \
+                   SET DEFAULT nextval({}::regclass) + 7; \
+                 CREATE TABLE {dropped_default_table} (id serial); \
+                 ALTER TABLE {dropped_default_table} ALTER COLUMN id DROP DEFAULT",
+                pg_quote_literal(&custom_sequence),
+                pg_quote_literal(&owned_custom_sequence),
+            ))
+            .await
+            .expect("create serial probe objects");
+
+        let ddl = crate::schema::pg_ddl(&pool, &schema, table_name).await.expect("read serial table ddl");
+        let custom_ddl =
+            crate::schema::pg_ddl(&pool, &schema, custom_table_name).await.expect("read custom-default table ddl");
+        let owned_custom_ddl = crate::schema::pg_ddl(&pool, &schema, owned_custom_table_name)
+            .await
+            .expect("read owned custom-default table ddl");
+        let dropped_default_ddl = crate::schema::pg_ddl(&pool, &schema, dropped_default_table_name)
+            .await
+            .expect("read dropped-default table ddl");
+
+        assert!(ddl.contains("\"small\"\"id\" smallserial NOT NULL"), "ddl: {ddl}");
+        assert!(ddl.contains("\"regular id\" serial NOT NULL"), "ddl: {ddl}");
+        assert!(ddl.contains("\"large\"\"id\" bigserial NOT NULL"), "ddl: {ddl}");
+        assert!(ddl.contains("\"identity_id\" bigint generated by default as identity"), "ddl: {ddl}");
+        assert!(ddl.contains("\"generated\" bigint generated always as ((base * 2)) stored"), "ddl: {ddl}");
+        assert!(!ddl.contains("nextval("), "ddl: {ddl}");
+        assert!(custom_ddl.contains("bigint DEFAULT nextval("), "ddl: {custom_ddl}");
+        assert!(!custom_ddl.contains("bigserial"), "ddl: {custom_ddl}");
+        assert!(owned_custom_ddl.contains("bigint NOT NULL DEFAULT (nextval("), "ddl: {owned_custom_ddl}");
+        assert!(owned_custom_ddl.contains(" + 7)"), "ddl: {owned_custom_ddl}");
+        assert!(!owned_custom_ddl.contains("bigserial"), "ddl: {owned_custom_ddl}");
+        assert!(dropped_default_ddl.contains("\"id\" integer NOT NULL"), "ddl: {dropped_default_ddl}");
+        assert!(!dropped_default_ddl.contains("serial"), "ddl: {dropped_default_ddl}");
+        assert!(!dropped_default_ddl.contains("DEFAULT"), "ddl: {dropped_default_ddl}");
+
+        client.batch_execute(&format!("DROP TABLE {table} CASCADE; {ddl}")).await.expect("replay copied table ddl");
+        let inserted = client
+            .query_one(
+                &format!(
+                    "INSERT INTO {table} DEFAULT VALUES RETURNING \"small\"\"id\", \"regular id\", \"large\"\"id\", identity_id, generated"
+                ),
+                &[],
+            )
+            .await
+            .expect("insert with replayed sequence defaults");
+        assert_eq!(inserted.get::<_, i16>(0), 1);
+        assert_eq!(inserted.get::<_, i32>(1), 1);
+        assert_eq!(inserted.get::<_, i64>(2), 1);
+        assert_eq!(inserted.get::<_, i64>(3), 1);
+        assert_eq!(inserted.get::<_, i64>(4), 4);
+
+        client.batch_execute(&format!("DROP SCHEMA {schema_ident} CASCADE")).await.expect("drop serial probe schema");
     }
 
     #[tokio::test]

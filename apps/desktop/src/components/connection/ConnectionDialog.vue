@@ -101,8 +101,31 @@ import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
-import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
-import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
+import {
+  buildElasticsearchExternalConfig,
+  elasticsearchConnectionModeFromConfig,
+  elasticsearchConnectivityCheckDisabledFromConfig,
+  elasticsearchConnectivityCheckPathFromConfig,
+  elasticsearchIndexGroupingPatternFromConfig,
+  elasticsearchKibanaBasePathFromConfig,
+  type ElasticsearchConnectionMode,
+} from "@/lib/connection/elasticsearchKibanaProxy";
+import {
+  GAUSSDB_M_JDBC_DRIVER_CLASS,
+  gaussdbConnectionMode,
+  gaussdbCountQueryDop,
+  gaussdbIdentifierQuoteStyle,
+  gaussdbTargetServerType,
+  setGaussdbConnectionMode,
+  setGaussdbCountQueryDop,
+  setGaussdbIdentifierQuoteStyle,
+  setGaussdbTargetServerType,
+  supportsGaussdbIdentifierQuoteStyle,
+  type GaussdbConnectionMode,
+  type GaussdbCountQueryDop,
+  type GaussdbIdentifierQuoteStyle,
+  type GaussdbTargetServerType,
+} from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
   createJdbcProductConnectionFieldsByMode,
@@ -518,6 +541,52 @@ const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
     resetTestState();
   },
 });
+
+const gaussdbTargetServerTypeComputed = computed<GaussdbTargetServerType>({
+  get: () => gaussdbTargetServerType(form.value),
+  set: (value) => {
+    setGaussdbTargetServerType(form.value, value);
+    resetTestState();
+  },
+});
+
+const gaussdbCountQueryDopComputed = computed<GaussdbCountQueryDop>({
+  get: () => gaussdbCountQueryDop(form.value),
+  set: (value) => {
+    setGaussdbCountQueryDop(form.value, value);
+    resetTestState();
+  },
+});
+
+const gaussdbHostEntries = ref<GaussdbHostEntry[]>(parseGaussdbHosts(form.value.host, form.value.port));
+
+watch(
+  () => form.value.db_type,
+  (dbType) => {
+    if (dbType === "gaussdb") {
+      gaussdbHostEntries.value = parseGaussdbHosts(form.value.host, form.value.port);
+    }
+  },
+);
+
+watch(
+  () => [form.value.host, form.value.port] as const,
+  ([host, port]) => {
+    if (form.value.db_type === "gaussdb") {
+      gaussdbHostEntries.value = parseGaussdbHosts(host, port);
+    }
+  },
+);
+
+function addGaussdbHostEntry() {
+  const lastPort = gaussdbHostEntries.value.length > 0 ? gaussdbHostEntries.value[gaussdbHostEntries.value.length - 1].port : 5432;
+  gaussdbHostEntries.value.push({ host: "", port: lastPort });
+}
+
+function removeGaussdbHostEntry(idx: number) {
+  if (gaussdbHostEntries.value.length <= 1) return;
+  gaussdbHostEntries.value.splice(idx, 1);
+}
 
 function resizeNoteTextarea() {
   const textarea = noteTextareaRef.value;
@@ -7119,6 +7188,44 @@ function openExternalUrl(url: string) {
                       </SelectContent>
                     </Select>
                     <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbIdentifierQuoteHint") }}</p>
+                  </div>
+                </div>
+                <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbTargetServerType") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbTargetServerTypeComputed">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="master">{{ t("connection.gaussdbTargetServerTypeMaster") }}</SelectItem>
+                        <SelectItem value="slave">{{ t("connection.gaussdbTargetServerTypeSlave") }}</SelectItem>
+                        <SelectItem value="any">{{ t("connection.gaussdbTargetServerTypeAny") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ t("connection.gaussdbTargetServerTypeHint") }}
+                    </p>
+                  </div>
+                </div>
+                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbCountQueryDop") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbCountQueryDopComputed">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem :value="1">1 ({{ t("common.disabled") }})</SelectItem>
+                        <SelectItem :value="2">2</SelectItem>
+                        <SelectItem :value="4">4</SelectItem>
+                        <SelectItem :value="8">8</SelectItem>
+                        <SelectItem :value="16">16</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ t("connection.gaussdbCountQueryDopHint") }}
+                    </p>
                   </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">

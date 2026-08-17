@@ -1644,6 +1644,29 @@ export async function listPartitions(connectionId: string, database: string, sch
   });
 }
 
+export interface TablePartitionStatus {
+  isPartitionedParent: boolean;
+  isPartition: boolean;
+}
+
+export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
+  return invoke("get_table_partition_status", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
+export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
+  return invoke("list_invalid_indexes", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
 export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
   return invoke("list_subpartitions", {
     connectionId,
@@ -1654,7 +1677,7 @@ export async function listSubpartitions(connectionId: string, database: string, 
   });
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false): Promise<string> {
   return invoke("get_table_ddl", {
     connectionId,
     database,
@@ -1662,6 +1685,7 @@ export async function getTableDdl(connectionId: string, database: string, schema
     table,
     objectType,
     catalog,
+    portable,
   });
 }
 
@@ -1674,6 +1698,7 @@ export async function getTableDisplayDdl(connectionId: string, database: string,
     objectType,
     catalog,
     includePostgresAccess: true,
+    portable: false,
   });
 }
 
@@ -4403,6 +4428,10 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await invoke("cancel_database_export", { exportId });
+}
+
+export async function recordDatabaseExportDestination(directory: string): Promise<void> {
+  await invoke("record_database_export_destination", { directory });
 }
 
 export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
