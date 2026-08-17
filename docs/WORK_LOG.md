@@ -8,7 +8,7 @@
 - 从 upstream/main 同步最新代码（`4dd34b9a0 Merge upstream/main`），保留本地联邦查询修改
 - 补全前端 `DatabaseType` 中的 `opentenbase` 类型（`f64a60225`）
 - 刷新联邦查询相关文档至最新版本
-- 将标签 `v0.5.86` 更新指向新 HEAD（`efce99010`）
+- 将标签 `v0.5.86` 更新指向新 HEAD（`ed9626abc`）
 - **推送失败**：网络无法访问 github.com（port 443 连接超时）
 
 **修改文件**：
