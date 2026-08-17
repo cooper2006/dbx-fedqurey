@@ -38,6 +38,11 @@
 
 **更新（重启前端完成）**：前端 `pnpm dev:web`（vite, :5173）已重启，`http://localhost:5173/` 返回 200，日志 `.reasonix/dev-web.log`。
 
+**更新（提交 + 打标 v0.5.86）**：
+- 提交联邦修复：`56ba379e1`（6 个文件：connection.rs、federated.rs、query.rs(core)、schema.rs、query.rs(web)、WORK_LOG.md）。
+- 经用户确认，`git tag -f -a v0.5.86 -m "Release 0.5.86"` 强制移动到 HEAD（原指向 31c392b2c）。
+- 未提交文件保留：`App.vue`、`connectionStore.ts`（更早轮次修复，与联邦无关）、`.ohmyagent/settings.json`。
+
 ---
 
 ## 项目操作约束

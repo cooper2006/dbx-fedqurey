@@ -310,6 +310,8 @@ type MetadataListPageResult = TableInfo[] | ObjectInfo[];
 type BeforeConnectHandler = (config: ConnectionConfig) => Promise<void>;
 
 export const CONNECTION_ATTEMPT_CANCELLED_MESSAGE = "Connection attempt was cancelled";
+/** Thrown when a no-save-password connection is connected without a typed password. */
+export const CONNECTION_PASSWORD_REQUIRED_MESSAGE = "Password is required for this connection";
 
 function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
   return config?.driver_profile || config?.db_type;
@@ -3020,12 +3022,54 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function ensureConnectionPassword(config: ConnectionConfig, force = false): Promise<{ config: ConnectionConfig; rememberPassword: boolean }> {
+    if (!force && (config.save_password !== false || config.password)) return { config, rememberPassword: false };
+    const { useConnectionPasswordPromptStore } = await import("@/stores/connectionPasswordPromptStore");
+    const result = await useConnectionPasswordPromptStore().requestPassword({
+      connectionId: config.id,
+      connectionName: config.name,
+    });
+    if (!result) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+    return { config: { ...config, password: result.password }, rememberPassword: result.rememberPassword };
+  }
+
+  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string): Promise<void> {
+    if (!rememberPassword) return;
+    const index = connections.value.findIndex((connection) => connection.id === config.id);
+    if (index < 0) return;
+    if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) return;
+    const nextConnections = [...connections.value];
+    nextConnections[index] = { ...nextConnections[index], password: config.password, save_password: true };
+    await persistConnections(nextConnections);
+    if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) {
+      await persistConnections();
+      return;
+    }
+    connections.value = nextConnections;
+    rebuildTreeNodes();
+  }
+
+  async function connectDbWithMissingPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
+    try {
+      const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
+      return { config, id, rememberPassword: false };
+    } catch (error) {
+      if (!isMysqlMissingPasswordFailure(config, connectionErrorMessage(error))) throw error;
+      const prompted = await ensureConnectionPassword(config, true);
+      config = prompted.config;
+      ensureLocalConnectionAttemptActive(config.id, localAttempt);
+      const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
+      return { config, id, rememberPassword: prompted.rememberPassword };
+    }
+  }
+
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
     const expectedConfigFingerprint = connectionConfigFingerprint(getConfig(config.id) ?? config);
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
+      let rememberPassword = false;
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
@@ -3216,6 +3260,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const connectPromise = (async () => {
+      let rememberPassword = false;
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
