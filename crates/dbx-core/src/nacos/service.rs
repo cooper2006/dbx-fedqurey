@@ -688,6 +688,8 @@ mod tests {
             is_production: false,
             production_databases: Vec::new(),
             database_info: None,
+            federation_enabled: false,
+            ..Default::default()
         };
         cfg.read_only = true;
         state.configs.write().await.insert(cfg.id.clone(), cfg);
@@ -763,6 +765,8 @@ mod tests {
             is_production: false,
             production_databases: Vec::new(),
             database_info: None,
+            federation_enabled: false,
+            ..Default::default()
         };
         state.configs.write().await.insert(cfg.id.clone(), cfg);
         let err = nacos_rollback_config_core(

@@ -187,5 +187,6 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         production_databases: vec![],
         show_system_schemas: false,
         database_info: None,
+        ..Default::default()
     }
 }

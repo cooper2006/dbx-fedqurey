@@ -68,6 +68,7 @@ fn live_postgres_config(
         production_databases: vec![],
         show_system_schemas: false,
         database_info: None,
+        ..Default::default()
     }
 }
 
