@@ -1,0 +1,75 @@
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.gradleup.shadow:shadow-gradle-plugin:9.0.0-beta12'
+    }
+}
+
+plugins {
+    id 'java'
+}
+
+apply plugin: 'com.gradleup.shadow'
+
+group = 'com.dbx.agent'
+version = '1.0.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+    mavenLocal()
+}
+
+ext.engine = project.findProperty('engine') ?: 'enumerable'
+ext.calciteVersion = '1.39.0'
+ext.sparkVersion = '4.0.0'
+ext.scalaVersion = '2.13'
+
+dependencies {
+    implementation "org.apache.calcite:calcite-core:${calciteVersion}"
+    implementation "org.apache.calcite:calcite-linq4j:${calciteVersion}"
+    implementation 'com.h2database:h2:2.2.224'
+    implementation 'org.postgresql:postgresql:42.7.1'
+    implementation 'mysql:mysql-connector-java:8.0.33'
+    implementation 'com.microsoft.sqlserver:mssql-jdbc:12.6.1.jre11'
+    implementation 'com.oracle.database.jdbc:ojdbc11:23.3.0.23.09'
+    implementation 'com.clickhouse:clickhouse-jdbc:0.6.0'
+    implementation 'com.ibm.db2:jcc:11.5.9.0'
+    implementation 'io.trino:trino-jdbc:435'
+    implementation 'net.snowflake:snowflake-jdbc:3.14.5'
+    implementation 'org.firebirdsql.jdbc:jaybird:5.0.4.java11'
+    implementation 'com.ibm.informix:jdbc:4.50.10.1'
+    implementation 'com.exasol:exasol-jdbc:7.1.20'
+    implementation 'org.apache.kylin:kylin-jdbc:4.0.3'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.16.1'
+    implementation 'org.slf4j:slf4j-simple:2.0.13'
+}
+
+shadowJar {
+    archiveBaseName.set('dbx-agent-calcite')
+    archiveClassifier.set('')
+    archiveVersion.set('')
+    manifest {
+        attributes 'Main-Class': 'com.dbx.agent.calcite.CalciteAgent'
+    }
+    mergeServiceFiles()
+    zip64 = true
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs = ['src/main/java']
+        }
+        resources {
+            srcDirs = ['src/main/resources']
+        }
+    }
+}
