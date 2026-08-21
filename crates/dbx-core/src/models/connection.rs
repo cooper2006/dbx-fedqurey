@@ -189,6 +189,9 @@ pub struct ConnectionConfig {
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
+    /// Enable federated query support for this connection (auto-detected from URL prefix in SQL).
+    #[serde(default)]
+    pub federation_enabled: bool,
 }
 
 impl fmt::Debug for ConnectionConfig {
@@ -719,6 +722,8 @@ struct ConnectionConfigData {
     pub production_databases: Vec<String>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
+    #[serde(default)]
+    pub federation_enabled: bool,
 }
 
 impl From<ConnectionConfigData> for ConnectionConfig {
@@ -779,6 +784,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             is_production: data.is_production,
             production_databases: data.production_databases,
             database_info: data.database_info,
+            federation_enabled: data.federation_enabled,
         }
     }
 }
@@ -2637,6 +2643,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
+            federation_enabled: false,
         }
     }
 
