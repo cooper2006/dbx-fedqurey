@@ -3,6 +3,8 @@ mod data_dir;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
+#[cfg(target_os = "macos")]
+mod macos_escape_guard;
 mod models;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
@@ -1488,6 +1490,8 @@ pub fn run() {
             commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
+            #[cfg(target_os = "macos")]
+            macos_escape_guard::install_escape_fullscreen_guard();
             #[cfg(target_os = "windows")]
             webview2_recovery::install(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
@@ -1726,6 +1730,8 @@ pub fn run() {
             commands::query::build_database_search_sql,
             commands::query::build_search_result_where,
             commands::query::build_rename_object_sql,
+            commands::query::build_rename_database_sql,
+            commands::query::build_rename_database_preflight_sql,
             commands::query::build_create_database_sql,
             #[cfg(feature = "duckdb-sidecar")]
             commands::query::build_duckdb_attach_database_sql,
@@ -2012,12 +2018,13 @@ pub fn run() {
             commands::sqlite_backup::backup_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
-            commands::mongo_cmd::vector_collection_detail,
+            commands::vector_cmd::vector_collection_detail,
             commands::mongo_cmd::mongo_create_database,
             commands::mongo_cmd::mongo_drop_database,
             commands::mongo_cmd::mongo_drop_collection,
-            commands::mongo_cmd::vector_drop_database,
-            commands::mongo_cmd::vector_drop_collection,
+            commands::vector_cmd::vector_drop_database,
+            commands::vector_cmd::vector_drop_collection,
+            commands::vector_cmd::vector_rename_collection,
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,
@@ -2301,6 +2308,8 @@ pub fn run() {
             commands::agents::reinstall_jre,
             commands::agents::invalidate_agent_registry_cache,
             commands::agents::import_agents_from_zip,
+            commands::agents::preview_agent_offline_export,
+            commands::agents::export_agents_offline,
             commands::agents::import_agent_driver_cmd,
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
