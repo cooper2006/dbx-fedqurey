@@ -53,3 +53,9 @@
   - JDBC 插件版本升级
   - 连接配置：可选明文导出、OceanBase JDBC URL 解析
   - 其他多项 bug 修复（Phoenix、Iris、GBase、RocketMQ、Databricks 等）
+
+### 合并到 main 并推送 origin
+
+- **操作**：将 `freebuff/task-3ac34aa5` 分支合并到 `main`（fast-forward），再拉取 origin/main 解决冲突后推送
+- **冲突**：`docs/data/contributors.json`（`generatedAt` 时间戳冲突，取 origin 版本）
+- **结果**：`origin/main` 已更新至 `759d93bc9`（213 文件，+13589/-932）
