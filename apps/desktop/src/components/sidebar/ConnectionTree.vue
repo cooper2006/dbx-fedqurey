@@ -46,7 +46,7 @@ import {
   type SidebarNodeScrollAlign,
 } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
-import { createFlatTreeIndex, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
+import { createFlatTreeIndex, flatTreeRowsChanged, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHostInstance } from "@/lib/sidebar/sidebarTreeRuntime";
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
@@ -980,15 +980,15 @@ watch(flatNodes, (nodes, previousNodes) => {
   stickyScrollTop.value = 0;
   void nextTick(scheduleSidebarScrollMetricsUpdate);
   // After a structural change (list grew/shrunk, e.g. a Dameng connection
-  // expands or collapses) reconcile the virtual scroller with the browser's
-  // scroll position. The recycle pool is rebuilt from the live scrollTop, but
-  // scrollTop is only clamped on the next layout, so right after a shrink the
-  // pool can still target a window beyond the new content — the viewport then
-  // lands inside the end spacer and shows a blank region until the next scroll
-  // event. Reading scrollHeight forces that layout (applying the clamp), then
-  // one explicit pool refresh keeps the rendered window aligned. Only needed
-  // when the item count changed; reorders are already rebuilt by the library.
-  if (nodes.length === (previousNodes?.length ?? -1)) return;
+  // expands or collapses) or a same-length search projection replacement,
+  // reconcile the virtual scroller with the browser's scroll position. The
+  // recycle pool is rebuilt from the live scrollTop, but scrollTop is only
+  // clamped on the next layout, so right after a shrink the pool can still
+  // target a window beyond the new content — the viewport then lands inside
+  // the end spacer and shows a blank region until the next scroll event.
+  // Reading scrollHeight forces that layout (applying the clamp), then one
+  // explicit pool refresh keeps the rendered window aligned.
+  if (!flatTreeRowsChanged(nodes, previousNodes)) return;
   void nextTick(() => {
     const scroller = treeScrollerRef.value;
     if (!scroller || !useVirtualTree.value) return;
