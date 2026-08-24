@@ -163,3 +163,30 @@
 ### P2: federation_schema_visibility.rs 死代码标记
 
 整个  类无调用方（lib.rs 仅  声明）。已添加 TODO 标记待后续清理。
+
+
+---
+
+## 2026-08-24 (续)
+
+### 待手动处理：重新编译 Calcite Agent JAR
+
+**原因**：Gradle wrapper 下载 Gradle 9.5.0 时 SSL 证书验证失败。
+
+**解决步骤**：
+1. 确保 SSL 证书已导入（上次会话已执行）：
+   gradle, 2026年8月24日, trustedCertEntry, 
+
+2. 重建 JAR：
+   
+
+3. 如果仍失败，可尝试使用系统 Gradle：
+   
+[Incubating] Problems report is available at: file:///Users/cooper/GitHub/dbx/agents/build/reports/problems/problems-report.html
+
+**已修改的 Java 源码**：
+- ：5 处  添加  包装
+
+**已修改的 Rust 源码**（已提交）：
+- ：get_default_schema、validate_federation、extract_table_refs
+- ：多连接路径添加 SQL 预处理
