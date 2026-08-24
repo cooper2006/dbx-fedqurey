@@ -95,3 +95,35 @@
 - 冲突：无冲突，自动合并完成
 - 联邦查询核心文件完整保留（federated.rs、calcite_agent.rs、Calcite Agent JAR、前端 federated/）
 - 上游主要变更：Oracle/PostgreSQL/SQL 编辑器修复、data grid 增强、structure editor 多选列等
+
+
+---
+
+## 2026-08-24 (续)
+
+### P0 联邦查询框架代码修复
+
+**问题根因**：
+- 多连接联邦查询 `pgLocal.tpcds.public.item` 超时 60s
+- 3 段式 `pgLocal.tpcds.item` 正常执行
+- 根因：`get_default_schema` 对多种数据库类型的默认 schema 映射错误，且 `validate_federation` 使用连接主库名而非引用中的实际库名做白名单校验
+
+**修复内容**：
+1. `get_default_schema` 修正：
+   - Snowflake: 库名 → `PUBLIC`
+   - Hive/Spark/Trino/Presto: `default` → 库名（保留真实库名）
+   - Dameng: 硬编码 `SYSDBA` → 库名
+   - Sqlite: `public` → `main`
+   - Kylin/Sundb: `default` → `PUBLIC`
+   - Db2: 从 `is_oracle_like` 移除（不再添加库名前缀）
+
+2. `validate_federation` 修复：
+   - 白名单校验使用 `ref_.database_name`（SQL 引用中的库名）而非连接主库名
+
+3. 新增 4 个测试用例：
+   - `test_4part_pg_public_schema_rewrite`: PostgreSQL 4 段式 `conn.db.public.table` → `public.table`
+   - `test_4part_named_schema_retained`: PostgreSQL 4 段式非默认 schema 保留
+   - `test_dameng_default_schema`: 达梦默认 schema 使用库名
+   - `test_db2_not_oracle_like`: DB2 不再被当 Oracle 类处理
+
+**验证**：全部 22 个联邦查询测试通过（18 原有 + 4 新增）

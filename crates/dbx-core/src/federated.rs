@@ -301,7 +301,6 @@ fn extract_table_refs(
 }
 
 /// Get the default schema for a database type
-#[allow(dead_code)]
 fn get_default_schema(db_type: &crate::models::connection::DatabaseType, database: &str) -> String {
     use crate::models::connection::DatabaseType as DT;
     match db_type {
@@ -316,13 +315,9 @@ fn get_default_schema(db_type: &crate::models::connection::DatabaseType, databas
         | DT::OpenGauss
         | DT::Kwdb
         | DT::Oscar
-        | DT::Yashandb
-        | DT::Xugu
-        | DT::H2
         | DT::Vertica
-        | DT::Informix
         | DT::Questdb => "public".to_string(),
-        // MySQL 系 — schema 等同于 database 名（无 schema 概念）
+        // MySQL 系 + ClickHouse/Databend — schema 等同于 database 名
         DT::Mysql
         | DT::Doris
         | DT::StarRocks
@@ -331,35 +326,33 @@ fn get_default_schema(db_type: &crate::models::connection::DatabaseType, databas
         | DT::ManticoreSearch
         | DT::Databend
         | DT::ClickHouse
-        | DT::Snowflake
-        | DT::Teradata
-        | DT::Exasol
-        | DT::Firebird
         | DT::Tdengine
         | DT::InfluxDb
         | DT::VictoriaMetrics => database.to_string(),
+        // Snowflake/Teradata/Exasol/Firebird — 有独立 schema，默认 PUBLIC
+        DT::Snowflake => "PUBLIC".to_string(),
+        DT::Teradata | DT::Exasol | DT::Firebird => database.to_string(),
         // SQL Server — 默认 schema 为 "dbo"
         DT::SqlServer => "dbo".to_string(),
-        // Oracle 系 — 默认 schema 等同于用户名（此处用 database 代替）
+        // Oracle 系 — 默认 schema 为用户名，用 database 占位
         DT::Oracle | DT::OceanbaseOracle => database.to_string(),
-        // DB2 — 默认 schema 等同于用户名
+        // DB2 — 默认 schema 为用户名（授权 ID）
         DT::Db2 => database.to_string(),
-        // 达梦 — 默认 schema 为 "SYSDBA"
-        DT::Dameng => "SYSDBA".to_string(),
-        // Hive/Presto/Trino/Spark 系 — 默认 schema 为 "default"
-        DT::Hive
-        | DT::PrestoSql
-        | DT::Trino
-        | DT::Spark
-        | DT::Kyuubi
-        | DT::Impala
-        | DT::Databricks
-        | DT::Kylin
-        | DT::Sundb => "default".to_string(),
-        // Rqlite/Turso/Cloudflare D1 — 默认 schema 为 "main"
-        DT::Rqlite | DT::Turso | DT::CloudflareD1 => "main".to_string(),
-        // Neo4j/Cassandra/BigQuery — 使用 database 作为 namespace
+        // 达梦 — 默认 schema 为用户的默认模式
+        DT::Dameng => database.to_string(),
+        // Hive/Spark/Kyuubi/Impala/Databricks — catalog.schema.table，schema 段保留
+        DT::Hive | DT::PrestoSql | DT::Trino | DT::Spark | DT::Kyuubi | DT::Impala | DT::Databricks => {
+            database.to_string()
+        }
+        // Kylin/Sundb — 特殊国产库，默认 schema
+        DT::Kylin | DT::Sundb => "PUBLIC".to_string(),
+        // SQLite 系 — 默认 schema 为 "main"
+        DT::Sqlite | DT::Rqlite | DT::Turso | DT::CloudflareD1 => "main".to_string(),
+        // Neo4j/Cassandra/BigQuery — 无 schema 概念
         DT::Neo4j | DT::Cassandra | DT::Bigquery => database.to_string(),
+        // H2/Informix/Xugu/Yashandb — PG 兼容，默认 public
+        DT::H2 | DT::Informix | DT::Xugu | DT::Yashandb => "public".to_string(),
+        // 兜底
         _ => "public".to_string(),
     }
 }
@@ -414,7 +407,6 @@ pub fn rewrite_federated_sql(
                 let is_oracle_like = matches!(
                     db_type,
                     crate::models::connection::DatabaseType::Oracle
-                        | crate::models::connection::DatabaseType::Db2
                         | crate::models::connection::DatabaseType::OceanbaseOracle
                 );
                 if let Some(ref schema) = ref_.schema_name {
@@ -537,7 +529,8 @@ pub fn validate_federation(
 
         // Check schema visibility if configured
         if let Some(ref schema_name) = ref_.schema_name {
-            let database = config.database.as_deref().unwrap_or("");
+            // Use the actual database from the reference, not the connection's default database
+            let database = ref_.database_name.as_deref().unwrap_or(config.database.as_deref().unwrap_or(""));
             if let Some(visible) = get_visible_schemas_for_database(config, database) {
                 if !visible.iter().any(|s| s == schema_name) {
                     return Err(FederationValidationError::SchemaNotVisible {
@@ -907,18 +900,21 @@ mod tests {
         // DB2 → database name
         assert_eq!(get_default_schema(&DT::Db2, "mydb"), "mydb");
 
-        // Dameng → "SYSDBA"
-        assert_eq!(get_default_schema(&DT::Dameng, "mydb"), "SYSDBA");
+        // Dameng → database name (用户默认 schema)
+        assert_eq!(get_default_schema(&DT::Dameng, "mydb"), "mydb");
 
-        // Hive/Presto/Trino/Spark → "default"
-        assert_eq!(get_default_schema(&DT::Hive, "mydb"), "default");
-        assert_eq!(get_default_schema(&DT::Trino, "mydb"), "default");
-        assert_eq!(get_default_schema(&DT::Spark, "mydb"), "default");
-        assert_eq!(get_default_schema(&DT::Kylin, "mydb"), "default");
+        // Hive/Presto/Trino/Spark → database name（保留真实库名）
+        assert_eq!(get_default_schema(&DT::Hive, "mydb"), "mydb");
+        assert_eq!(get_default_schema(&DT::Trino, "mydb"), "mydb");
+        assert_eq!(get_default_schema(&DT::Spark, "mydb"), "mydb");
+        // Kylin/Sundb → PUBLIC
+        assert_eq!(get_default_schema(&DT::Kylin, "mydb"), "PUBLIC");
+        assert_eq!(get_default_schema(&DT::Sundb, "mydb"), "PUBLIC");
 
-        // Snowflake/Teradata/Exasol → database name
-        assert_eq!(get_default_schema(&DT::Snowflake, "mydb"), "mydb");
+        // Snowflake → PUBLIC, Teradata/Exasol → database name
+        assert_eq!(get_default_schema(&DT::Snowflake, "mydb"), "PUBLIC");
         assert_eq!(get_default_schema(&DT::Teradata, "mydb"), "mydb");
+        assert_eq!(get_default_schema(&DT::Exasol, "mydb"), "mydb");
 
         // Rqlite/Turso → "main"
         assert_eq!(get_default_schema(&DT::Rqlite, "mydb"), "main");
@@ -929,13 +925,13 @@ mod tests {
         assert_eq!(get_default_schema(&DT::Cassandra, "ks"), "ks");
         assert_eq!(get_default_schema(&DT::Bigquery, "project"), "project");
 
-        // Unknown/other → "public"
-        assert_eq!(get_default_schema(&DT::Sqlite, "test"), "public");
+        // Unknown/other → type-specific default
+        assert_eq!(get_default_schema(&DT::Sqlite, "test"), "main");
     }
 
     #[test]
     fn test_hive_single_connection_rewrite() {
-        // Hive: database 段匹配连接数据库名时，退化为 "default" schema
+        // Hive: database 段匹配连接数据库名时，保留库名
         let conn = make_test_connection("hiveLocal", DatabaseType::Hive, "mydb");
         let sql = "SELECT * FROM hiveLocal.mydb.events WHERE id = 1";
 
@@ -944,13 +940,13 @@ mod tests {
         assert!(analysis.is_single_connection);
 
         let rewritten = rewrite_federated_sql(sql, &analysis, &[conn.clone()]).expect("rewrite should succeed");
-        // database 段 "mydb" 匹配连接数据库名，丢弃后使用默认 schema "default"
-        assert_eq!(rewritten, "SELECT * FROM default.events WHERE id = 1");
+        // database 段 "mydb" 匹配连接数据库名，保留为 mydb.events（Hive 无 schema 概念）
+        assert_eq!(rewritten, "SELECT * FROM mydb.events WHERE id = 1");
     }
 
     #[test]
     fn test_snowflake_single_connection_rewrite() {
-        // Snowflake: database 段匹配连接数据库名时，退化为 database 名（无 schema 概念）
+        // Snowflake: database 段匹配连接数据库名时，退化为 PUBLIC schema
         let conn = make_test_connection("sfLocal", DatabaseType::Snowflake, "mydb");
         let sql = "SELECT * FROM sfLocal.mydb.users WHERE id = 1";
 
@@ -959,7 +955,67 @@ mod tests {
         assert!(analysis.is_single_connection);
 
         let rewritten = rewrite_federated_sql(sql, &analysis, &[conn.clone()]).expect("rewrite should succeed");
-        // database 段 "mydb" 匹配连接数据库名，退化为 database 名（Snowflake 无 schema）
-        assert_eq!(rewritten, "SELECT * FROM mydb.users WHERE id = 1");
+        // database 段 "mydb" 匹配连接数据库名，退化为默认 schema "PUBLIC"
+        assert_eq!(rewritten, "SELECT * FROM PUBLIC.users WHERE id = 1");
+    }
+
+    #[test]
+    fn test_4part_pg_public_schema_rewrite() {
+        // PostgreSQL 4-part: connection.database.public.table → connection.table
+        // 这是多连接联邦查询超时问题的根因修复验证
+        let pg_conn = make_test_connection("pgLocal", DatabaseType::Postgres, "tpcds");
+        let sql = "SELECT i.i_item_desc FROM pgLocal.tpcds.public.item i";
+
+        let analysis = analyze_federation(sql, &[pg_conn.clone()]);
+        assert!(analysis.uses_federation_syntax);
+        assert!(analysis.is_single_connection);
+
+        let rewritten = rewrite_federated_sql(sql, &analysis, &[pg_conn.clone()]).expect("rewrite should succeed");
+        // 3 段式，database_name=Some("tpcds"), schema_name=None
+        // 因为 database==config.database，应退化为 public.item
+        assert_eq!(rewritten, "SELECT i.i_item_desc FROM public.item i");
+    }
+
+    #[test]
+    fn test_4part_named_schema_retained() {
+        // PostgreSQL 4-part with non-default schema: should retain schema
+        let pg_conn = make_test_connection("pgLocal", DatabaseType::Postgres, "tpcds");
+        let sql = "SELECT * FROM pgLocal.tpcds.myschema.item i";
+
+        let analysis = analyze_federation(sql, &[pg_conn.clone()]);
+        assert!(analysis.uses_federation_syntax);
+        assert!(analysis.is_single_connection);
+
+        let rewritten = rewrite_federated_sql(sql, &analysis, &[pg_conn.clone()]).expect("rewrite should succeed");
+        // database==tpcds 匹配，schema==myschema 保留
+        assert_eq!(rewritten, "SELECT * FROM myschema.item i");
+    }
+
+    #[test]
+    fn test_dameng_default_schema() {
+        // Dameng: default schema should be user's default, not hardcoded SYSDBA
+        let conn = make_test_connection("dmLocal", DatabaseType::Dameng, "DMHR");
+        let sql = "SELECT * FROM dmLocal.DMHR.users WHERE id = 1";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax);
+
+        let rewritten = rewrite_federated_sql(sql, &analysis, &[conn.clone()]).expect("rewrite should succeed");
+        // database 段匹配，退化为 default schema = config.database = "DMHR"
+        assert_eq!(rewritten, "SELECT * FROM DMHR.users WHERE id = 1");
+    }
+
+    #[test]
+    fn test_db2_not_oracle_like() {
+        // DB2 should NOT be treated as oracle-like (no 3-segment prefix)
+        let conn = make_test_connection("db2Local", DatabaseType::Db2, "MYDB");
+        let sql = "SELECT * FROM db2Local.MYDB.MYSCHEMA.orders";
+
+        let analysis = analyze_federation(sql, &[conn.clone()]);
+        assert!(analysis.uses_federation_syntax);
+
+        let rewritten = rewrite_federated_sql(sql, &analysis, &[conn.clone()]).expect("rewrite should succeed");
+        // DB2 不应添加 default_schema 前缀，保留 schema.table
+        assert_eq!(rewritten, "SELECT * FROM MYSCHEMA.orders");
     }
 }
