@@ -84,3 +84,14 @@
   - DataGrid：手动引用显示值、条件补全增强
   - 多项 CI 修复（Windows Perl、Rust lint、格式检查等）
   - 其他多项 bug 修复（IoTDB、DuckDB、Dameng DDL、Nacos batch 等）
+---
+
+## 2026-08-24
+
+### 从 upstream/main 同步代码（保留联邦查询）
+
+- 上游基线：`68179d16f` → `c8dbeeaf7`（23 个新提交）
+- 备份分支：`backup/pre-upstream-merge-20260824-144652`
+- 冲突：无冲突，自动合并完成
+- 联邦查询核心文件完整保留（federated.rs、calcite_agent.rs、Calcite Agent JAR、前端 federated/）
+- 上游主要变更：Oracle/PostgreSQL/SQL 编辑器修复、data grid 增强、structure editor 多选列等
