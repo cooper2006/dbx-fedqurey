@@ -263,3 +263,20 @@ a4e699a03 fix(federated): P0 fixes for default schema mapping
 ```
 
 **验证结论**：所有 P0/P1/P2 修复已正确实施，代码逻辑自洽，无遗留问题。
+
+
+---
+
+## 2026-08-24 (续)
+
+### Calcite Agent quoteReplacement 修复尝试与回滚
+
+**问题**：尝试修复 `CalciteAgent.java` 的 `replaceAll` 调用，添加 `Matcher.quoteReplacement()` 防止 connectionId 含 `$` 或 `\` 时崩溃。
+
+**发现**：`quoteReplacement()` 会将 replacement 字符串中的 `$1`/`$2`/`$3` 捕获组引用转义为字面量 `\$1`，导致 Calcite 报错 "Object '$1' not found"。
+
+**结论**：无法在保留捕获组引用的同时使用 `quoteReplacement()`。
+
+**决定**：回滚到原始代码。Connection 名称通常不包含 `$` 或 `\`，原代码在实际使用中是安全的。
+
+**后续**：如遇到 connectionId 含特殊字符的问题，需重新设计替换逻辑（例如使用 `Matcher.appendReplacement`/`appendTail` 手动构建 replacement）。
