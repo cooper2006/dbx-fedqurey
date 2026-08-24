@@ -150,3 +150,16 @@
 **验证状态**：
 - P0 测试全部通过（22/22）
 - P1/P2 改动遵循相同模式，预计测试无回归
+
+
+---
+
+## 2026-08-24 (续)
+
+### P1: CalciteAgent.java quoteReplacement 修复
+
+**问题**： 的 replacement 字符串中包含  或 String.replaceAllreplaceAlljava.util.regex.Matcher.quoteReplacement()$` 时不再崩溃。
+
+### P2: federation_schema_visibility.rs 死代码标记
+
+整个  类无调用方（lib.rs 仅  声明）。已添加 TODO 标记待后续清理。
