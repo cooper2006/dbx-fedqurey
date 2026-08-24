@@ -610,15 +610,18 @@ public class CalciteAgent {
                     String dsEscaped = java.util.regex.Pattern.quote(defaultSchema);
                     String pattern4DropBoth = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
                         "\\." + dbEscaped + "\\." + dsEscaped + "\\.([a-zA-Z_][a-zA-Z0-9_]*)";
-                    result = result.replaceAll(pattern4DropBoth, java.util.regex.Matcher.quoteReplacement("\"" + connId + "\".\"$1\""));
+                    String qid = java.util.regex.Matcher.quoteReplacement("\"" + connId + "\"");
+                    result = result.replaceAll(pattern4DropBoth, qid + ".\"$1\""");
                 }
                 // Case B: database matches but schema!=defaultSchema → drop database only → "connId"."schema"."table"
                 String pattern4DropDbOnly = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
                     "\\." + dbEscaped + "\\.([a-zA-Z_][a-zA-Z0-9_]*)\\.([a-zA-Z_][a-zA-Z0-9_]*)";
-                result = result.replaceAll(pattern4DropDbOnly, java.util.regex.Matcher.quoteReplacement("\"" + connId + "\".\"$1\".\"$2\""));
+                String qid = java.util.regex.Matcher.quoteReplacement("\"" + connId + "\"");
+                result = result.replaceAll(pattern4DropDbOnly, qid + ".\"$1\""."\$2\""");
             }
             // Other 4-part: keep all segments
-            result = result.replaceAll(pattern4, java.util.regex.Matcher.quoteReplacement("\"" + connId + "\".\"$1\".\"$2\".\"$3\""));
+            String qid = java.util.regex.Matcher.quoteReplacement("\"" + connId + "\"");
+            result = result.replaceAll(pattern4, qid + ".\"$1\""."\$2\""."\$3\""");
 
             // Handle 3-part: connId.database.table
             String pattern3 = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
@@ -628,10 +631,12 @@ public class CalciteAgent {
                 String dbEscaped = java.util.regex.Pattern.quote(connDatabase);
                 String pattern3DropDb = "(?i)\\b" + java.util.regex.Pattern.quote(connId) +
                     "\\." + dbEscaped + "\\.([a-zA-Z_][a-zA-Z0-9_]*)";
-                result = result.replaceAll(pattern3DropDb, java.util.regex.Matcher.quoteReplacement("\"" + connId + "\".\"$1\""));
+                String qid = java.util.regex.Matcher.quoteReplacement("\"" + connId + "\"");
+                result = result.replaceAll(pattern3DropDb, qid + ".\"$1\""");
             }
             // Other 3-part: keep all segments
-            result = result.replaceAll(pattern3, java.util.regex.Matcher.quoteReplacement("\"" + connId + "\".\"$1\".\"$2\""));
+            String qid = java.util.regex.Matcher.quoteReplacement("\"" + connId + "\"");
+            result = result.replaceAll(pattern3, qid + ".\"$1\""."\$2\""");
         }
 
         return result;
