@@ -167,6 +167,34 @@ impl<'a> FromSql<'a> for PgAnyString {
     }
 }
 
+/// PostgreSQL `money` is sent in the binary protocol as a signed 64-bit
+/// integer scaled by 100 (the smallest unit of the currency). It is not
+/// decoded by `rust_decimal`, so attempting to read it as `Decimal` produces
+/// NULL in the result grid.
+struct PgMoney(i64);
+
+impl<'a> FromSql<'a> for PgMoney {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let bytes: [u8; 8] = raw.try_into().map_err(|_| "expected 8 bytes for PostgreSQL money")?;
+        Ok(Self(i64::from_be_bytes(bytes)))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::MONEY
+    }
+}
+
+fn format_pg_money(value: i64) -> String {
+    let negative = value < 0;
+    let absolute = (value as i128).abs();
+    let formatted = format!("{}.{:02}", absolute / 100, absolute % 100);
+    if negative {
+        format!("-{formatted}")
+    } else {
+        formatted
+    }
+}
+
 /// A `FromSql` adapter that accepts any PostgreSQL type and returns the raw
 /// bytes unchanged. Used to decode custom types like pgvector whose binary
 /// format we handle ourselves.
@@ -598,6 +626,7 @@ pub(crate) enum PgColType {
     DateRange,
     Temporal { fallback: PgTemporalFallback },
     Numeric,
+    Money,
     Uuid,
     Inet { cidr: bool },
     MacAddr,
@@ -702,7 +731,10 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
         };
         return PgColType::Temporal { fallback };
     }
-    if upper == "NUMERIC" || upper == "DECIMAL" || upper == "MONEY" {
+    if upper == "MONEY" {
+        return PgColType::Money;
+    }
+    if upper == "NUMERIC" || upper == "DECIMAL" {
         return PgColType::Numeric;
     }
     if upper == "UUID" {
@@ -789,6 +821,10 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
         PgColType::Numeric => row
             .try_get::<_, Decimal>(idx)
             .map(|v: Decimal| serde_json::Value::String(v.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+        PgColType::Money => row
+            .try_get::<_, PgMoney>(idx)
+            .map(|v| serde_json::Value::String(format_pg_money(v.0)))
             .unwrap_or(serde_json::Value::Null),
         PgColType::Uuid => row
             .try_get::<_, uuid::Uuid>(idx)
@@ -7335,6 +7371,16 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_postgres::types::FromSql;
 
+    #[test]
+    fn postgres_money_binary_values_are_decoded_with_two_decimal_places() {
+        assert_eq!(format_pg_money(12345), "123.45");
+        assert_eq!(format_pg_money(-5), "-0.05");
+        assert_eq!(format_pg_money(0), "0.00");
+
+        let decoded = PgMoney::from_sql(&Type::MONEY, &(-12345_i64).to_be_bytes()).unwrap();
+        assert_eq!(format_pg_money(decoded.0), "-123.45");
+    }
+
     fn postgres_error_response(message: &str) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"SERROR\0");
@@ -8220,7 +8266,7 @@ mod tests {
         // 同时命中时间关键字与 VECTOR( 前缀的类型名，原实现时间解码失败后走 vector 分支
         assert_eq!(classify_pg_type("vector(timestamp)"), PgColType::Temporal { fallback: PgTemporalFallback::Vector });
         assert_eq!(classify_pg_type("numeric"), PgColType::Numeric);
-        assert_eq!(classify_pg_type("money"), PgColType::Numeric);
+        assert_eq!(classify_pg_type("money"), PgColType::Money);
         assert_eq!(classify_pg_type("uuid"), PgColType::Uuid);
         assert_eq!(classify_pg_type("inet"), PgColType::Inet { cidr: false });
         assert_eq!(classify_pg_type("cidr"), PgColType::Inet { cidr: true });

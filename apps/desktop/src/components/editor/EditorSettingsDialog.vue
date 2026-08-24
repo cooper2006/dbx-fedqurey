@@ -1575,7 +1575,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "tunnels", label: t("settings.tunnelsTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
   { value: "snippets", label: t("settings.snippetsTab") },
-  ...(isWeb ? [] : [{ value: "sync" as const, label: t("settings.syncTab") }]),
+  { value: "sync", label: t("settings.syncTab") },
   { value: "ai", label: t("settings.aiTab") },
   { value: "mcp" as const, label: t("settings.mcpTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
@@ -5748,7 +5748,7 @@ onUnmounted(() => {
 
             <section v-else-if="activeSettingsTab === 'sync'" data-settings-search-id="sync" :class="['py-2', settingsSearchTargetClass('sync')]">
               <Tabs v-model="syncMethodTab" class="w-full">
-                <TabsList class="grid w-full grid-cols-2">
+                <TabsList v-if="!isWeb" class="grid w-full grid-cols-2">
                   <TabsTrigger value="webdav">WebDAV</TabsTrigger>
                   <TabsTrigger value="snippet">GitHub / Gitee</TabsTrigger>
                 </TabsList>
@@ -5761,6 +5761,9 @@ onUnmounted(() => {
                     </div>
                     <p class="text-xs text-muted-foreground">
                       {{ t("settings.syncWebDavDescription") }}
+                    </p>
+                    <p v-if="isWeb" class="text-xs text-muted-foreground">
+                      {{ t("settings.syncWebDavWebDescription") }}
                     </p>
                   </div>
 
@@ -5974,7 +5977,7 @@ onUnmounted(() => {
                   <div class="space-y-1">
                     <Label for="sync-secrets">{{ t("settings.syncSecrets") }}</Label>
                     <p class="text-xs text-muted-foreground">
-                      {{ t("settings.syncSecretsSharedDescription") }}
+                      {{ t(isWeb ? "settings.syncSecretsDescription" : "settings.syncSecretsSharedDescription") }}
                     </p>
                   </div>
                   <Switch id="sync-secrets" v-model="webdavSyncSecrets" />

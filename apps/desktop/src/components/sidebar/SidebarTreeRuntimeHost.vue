@@ -425,6 +425,9 @@ const {
   disconnectConnection,
   connectionDisconnectMenuLabel,
   canDisconnectConnection,
+  connectionGroupDisconnectMenuLabel,
+  canDisconnectConnectionGroup,
+  disconnectConnectionGroup,
   canForgetSessionCredential,
   disconnectAndForgetConnectionPassword,
   cancelConnectionAttempt,
@@ -4963,6 +4966,12 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     items.push({ label: "", separator: true });
     items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus });
     items.push({ label: t("connectionGroup.newGroup"), action: newSubgroup, icon: FolderPlus });
+    items.push({
+      label: connectionGroupDisconnectMenuLabel(),
+      action: disconnectConnectionGroup,
+      icon: Unplug,
+      disabled: !canDisconnectConnectionGroup(),
+    });
     items.push({ label: "", separator: true });
     items.push({
       label: t("connectionGroup.renameGroup"),

@@ -10,6 +10,11 @@ COPY packages/mongo-shell/ packages/mongo-shell/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY apps/desktop/ apps/desktop/
+# The vite connection-types plugin runs scripts/sync-connection-types.mjs during
+# `pnpm build`, which reads plugins/connection-types + plugins/dialects and
+# regenerates the manifest and generated TS types in place.
+COPY scripts/ scripts/
+COPY plugins/ plugins/
 COPY crates/dbx-core/assets/database-drivers.manifest.json crates/dbx-core/assets/database-drivers.manifest.json
 RUN pnpm build
 

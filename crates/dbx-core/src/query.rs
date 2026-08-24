@@ -35,6 +35,15 @@ pub const MAX_ROWS: usize = 10000;
 pub const AGENT_PROTOCOL_MAX_ROWS: usize = i32::MAX as usize;
 pub const QUERY_CANCELED: &str = "Query canceled";
 pub const METADATA_POOL_BUSY_ERROR: &str = "DBX metadata pool is busy; please retry";
+pub const MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS: u64 = 300;
+pub const MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR: &str =
+    "Transaction session not found or expired; it may have been auto-rolled back due to inactivity";
+pub const MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR: &str =
+    "Transaction was auto-rolled back due to 5 minutes of inactivity";
+
+pub fn is_manual_transaction_session_expired_error(error: &str) -> bool {
+    error.starts_with(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR) || error == MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR
+}
 
 /// Returns true when a metadata request failed because all pool/client slots
 /// were temporarily occupied. This is deliberately separate from
@@ -4742,9 +4751,8 @@ pub async fn keep_manual_transaction_alive(
 ) -> Result<ManualTransactionKeepAlive, String> {
     {
         let mut sessions = state.transaction_sessions.write().await;
-        let session = sessions.get_mut(txn_session_id).ok_or_else(|| {
-            "Transaction session not found or expired; it may have been auto-rolled back due to inactivity".to_string()
-        })?;
+        let session =
+            sessions.get_mut(txn_session_id).ok_or_else(|| MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string())?;
         if !session.busy {
             session.last_activity = std::time::Instant::now();
         }
@@ -4800,16 +4808,14 @@ pub async fn execute_in_manual_transaction_with_options(
     max_rows: Option<usize>,
     table_data_preview: bool,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
-    const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS);
 
     // Resolve statements and validate before taking the per-session connection
     // lock. The session stays visible in the map so close/disconnect cleanup can
     // remove it and roll back once the current DB operation releases the lock.
     let (pool_key, connection_id) = {
         let sessions = state.transaction_sessions.read().await;
-        let session = sessions
-            .get(txn_session_id)
-            .ok_or("Transaction session not found or expired; it may have been auto-rolled back due to inactivity")?;
+        let session = sessions.get(txn_session_id).ok_or(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR)?;
         (session.pool_key.clone(), session.connection_id.clone())
     };
 
@@ -4832,10 +4838,7 @@ pub async fn execute_in_manual_transaction_with_options(
     let connection = {
         let mut sessions = state.transaction_sessions.write().await;
         let Some(session) = sessions.get_mut(txn_session_id) else {
-            return Err(
-                "Transaction session not found or expired; it may have been auto-rolled back due to inactivity"
-                    .to_string(),
-            );
+            return Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string());
         };
         if session.busy {
             return Err("Transaction session is already executing".to_string());
@@ -4853,7 +4856,7 @@ pub async fn execute_in_manual_transaction_with_options(
         let mut conn = session.connection.lock().await;
         let _ = rollback_manual_txn_connection(&mut conn).await;
         release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
-        return Err("Transaction was auto-rolled back due to 5 minutes of inactivity".to_string());
+        return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
 
     let connection = {
@@ -4861,7 +4864,7 @@ pub async fn execute_in_manual_transaction_with_options(
         sessions
             .get(txn_session_id)
             .map(|session| Arc::clone(&session.connection))
-            .ok_or("Transaction session not found or expired; it may have been auto-rolled back due to inactivity")?
+            .ok_or(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR)?
     };
     let row_limit = max_rows.unwrap_or(MAX_ROWS).max(1);
     let mut results = Vec::with_capacity(statements.len());
@@ -4940,15 +4943,12 @@ pub async fn stream_rows_in_manual_transaction<F>(
 where
     F: FnMut(Vec<Vec<serde_json::Value>>) -> Result<(), String> + Send,
 {
-    const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS);
 
     let expired_connection = {
         let mut sessions = state.transaction_sessions.write().await;
         let Some(session) = sessions.get_mut(txn_session_id) else {
-            return Err(
-                "Transaction session not found or expired; it may have been auto-rolled back due to inactivity"
-                    .to_string(),
-            );
+            return Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string());
         };
         if session.busy {
             return Err("Transaction session is already executing".to_string());
@@ -4964,7 +4964,7 @@ where
     if let Some(connection) = expired_connection {
         let mut conn = connection.lock().await;
         let _ = rollback_manual_txn_connection(&mut conn).await;
-        return Err("Transaction was auto-rolled back due to 5 minutes of inactivity".to_string());
+        return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
 
     let connection = {
@@ -4972,7 +4972,7 @@ where
         sessions
             .get(txn_session_id)
             .map(|session| Arc::clone(&session.connection))
-            .ok_or("Transaction session not found or expired; it may have been auto-rolled back due to inactivity")?
+            .ok_or(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR)?
     };
     let batch_size = batch_size.max(1);
     let mut conn = connection.lock().await;
@@ -5148,7 +5148,8 @@ fn spawn_txn_idle_watcher_for_sessions(
     txn_session_id: String,
 ) {
     tokio::spawn(async move {
-        const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        const TXN_IDLE_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS);
         tokio::time::sleep(TXN_IDLE_TIMEOUT).await;
 
         let removed: Option<TransactionSession> = {
