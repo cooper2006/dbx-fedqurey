@@ -84,3 +84,9 @@
   - DataGrid：手动引用显示值、条件补全增强
   - 多项 CI 修复（Windows Perl、Rust lint、格式检查等）
   - 其他多项 bug 修复（IoTDB、DuckDB、Dameng DDL、Nacos batch 等）
+
+### 合并到 main 并推送 origin（第二次）
+
+- **操作**：将 `freebuff/task-3ac34aa5` 合并到 `main`，拉取 origin/main 解决冲突后推送
+- **冲突**：`docs/data/contributors.json`（`generatedAt` 时间戳冲突，取 origin 版本）
+- **结果**：`origin/main` 已更新至 `aafcd2ff4`
