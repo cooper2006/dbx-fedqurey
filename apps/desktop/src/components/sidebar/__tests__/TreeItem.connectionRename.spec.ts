@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TreeItem from "@/components/sidebar/TreeItem.vue";
+import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHost } from "@/lib/sidebar/sidebarTreeRuntime";
 import type { ConnectionConfig, SidebarLayout, TreeNode } from "@/types/database";
 
@@ -59,6 +60,7 @@ vi.mock("@/stores/settingsStore", () => ({
       sidebarAllowHorizontalScroll: false,
       sidebarHiddenTablePrefixes: [],
       sidebarObjectInfoMode: "none",
+      sidebarTableSearchLocal: false,
     },
   }),
 }));
@@ -188,5 +190,51 @@ describe("TreeItem connection quick rename", () => {
     press(input, "Enter");
 
     await vi.waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining("disk full"), 5000));
+  });
+
+  it("keeps Enter scoped to the table-search input without triggering a tree row action", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    let bubbledKeydowns = 0;
+    container.addEventListener("keydown", () => {
+      bubbledKeydowns += 1;
+    });
+    const host = runtimeHost();
+    const runtime = createSidebarTreeRuntime();
+    runtime.bindHost(host);
+    const setTableSearchQuery = vi.fn();
+    const node: TreeNode = {
+      id: "connection-1:app:__table_search",
+      label: "sidebar.searchTablesInCurrentScope",
+      type: "table-search-control",
+      connectionId: connection.id,
+      database: "app",
+      tableSearchParentId: "connection-1:app",
+    };
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(TreeItem, { node, depth: 2 }),
+      }),
+    );
+    app.use(i18n);
+    app.provide(sidebarTreeRuntimeKey, runtime);
+    app.provide(sidebarTreeContextKey, {
+      getVisibleNodes: () => [],
+      getVisibleNodeIndex: () => -1,
+      setTableSearchQuery,
+    });
+    app.mount(container);
+    mountedApps.push(app);
+    await nextTick();
+
+    const input = container.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
+    expect(input).toBeTruthy();
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input!.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(bubbledKeydowns).toBe(0);
+    expect(host.handleRowKeydown).not.toHaveBeenCalled();
+    expect(setTableSearchQuery).not.toHaveBeenCalled();
   });
 });

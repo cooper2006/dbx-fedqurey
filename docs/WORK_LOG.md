@@ -53,3 +53,34 @@
   - JDBC 插件版本升级
   - 连接配置：可选明文导出、OceanBase JDBC URL 解析
   - 其他多项 bug 修复（Phoenix、Iris、GBase、RocketMQ、Databricks 等）
+
+### 合并到 main 并推送 origin
+
+- **操作**：将 `freebuff/task-3ac34aa5` 分支合并到 `main`（fast-forward），再拉取 origin/main 解决冲突后推送
+- **冲突**：`docs/data/contributors.json`（`generatedAt` 时间戳冲突，取 origin 版本）
+- **结果**：`origin/main` 已更新至 `759d93bc9`（213 文件，+13589/-932）
+
+## 2026-08-24
+
+### 合并 upstream/main（t8y2/dbx）— 第二次同步
+
+- **来源**：`git fetch upstream main` → `git merge upstream/main`
+- **范围**：313 文件变更，+17131/-2400 行，37 个新提交
+- **合并冲突**：无
+- **主要变更摘要**：
+  - AI：添加通用 AI 配置深度链接、可调整大小的全屏聊天面板、连接选择器分组树
+  - Schema Diff：选择字段和索引进行同步、DDL 定位高亮
+  - MySQL：管理与编辑 MySQL Events
+  - Meilisearch：新增 workspace/key/task 管理页面
+  - Nacos：支持 DataId 映射配置同步
+  - PostgreSQL：支持编辑表 owner
+  - 导出：支持 XLSX 表头名称和注释
+  - 结果标签：支持固定标签和批量关闭
+  - 连接类型：集中化注册、新增 profiles/catalog
+  - SSH：Windows 本地账户支持 Pageant
+  - Oracle：优先使用物理行标识符
+  - SQL Formatter：增强格式化能力
+  - Sidebar：扩展过滤器到视图和存储过程
+  - DataGrid：手动引用显示值、条件补全增强
+  - 多项 CI 修复（Windows Perl、Rust lint、格式检查等）
+  - 其他多项 bug 修复（IoTDB、DuckDB、Dameng DDL、Nacos batch 等）
