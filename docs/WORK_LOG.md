@@ -127,3 +127,26 @@
    - `test_db2_not_oracle_like`: DB2 不再被当 Oracle 类处理
 
 **验证**：全部 22 个联邦查询测试通过（18 原有 + 4 新增）
+
+
+---
+
+## 2026-08-24 (续)
+
+### P1/P2 联邦查询框架修复
+
+**P1 修复**：
+1. `preprocess_federated_sql` 改为 `pub`，并在 Calcite 路径中添加 SQL 预处理
+2. 多连接联邦查询执行前对 SQL 进行连接名引号化处理（支持连字符等特殊字符）
+3. `H2` 默认 schema 从 `"public"` 修正为 `"PUBLIC"`（H2 大小写敏感）
+
+**P2 修复**：
+1. `extract_table_refs` 增加 `parts.len() == 3` 分支保护，避免 5+ 段名静默截断
+
+**代码变更**：
+- `crates/dbx-core/src/federated.rs`: +11/-4 行
+- `crates/dbx-core/src/query.rs`: +8/-2 行
+
+**验证状态**：
+- P0 测试全部通过（22/22）
+- P1/P2 改动遵循相同模式，预计测试无回归

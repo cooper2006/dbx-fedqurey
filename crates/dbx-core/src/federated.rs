@@ -104,7 +104,7 @@ pub fn validate_connection_name(name: &str) -> Result<(), String> {
 ///
 /// This is necessary because the SQL parser interprets `doris-Local` as the
 /// arithmetic expression `doris - Local`, not as a single identifier.
-fn preprocess_federated_sql(sql: &str, connection_names: &[&str]) -> String {
+pub fn preprocess_federated_sql(sql: &str, connection_names: &[&str]) -> String {
     let special_names: Vec<&str> = connection_names.iter().copied().filter(|n| needs_quoting(n)).collect();
     if special_names.is_empty() {
         return sql.to_string();
@@ -255,11 +255,14 @@ fn extract_table_refs(
             if let Some(config) = resolve_connection(exact_map, insensitive_map, conn_name) {
                 *uses_federation = true;
                 let (database_name, schema_name, table_name) = if parts.len() >= 4 {
-                    // connection.database.schema.table
+                    // connection.database.schema.table (or more - take first 4 segments)
                     (Some(parts[1].to_string()), Some(parts[2].to_string()), parts[3].to_string())
-                } else {
+                } else if parts.len() == 3 {
                     // connection.database.table (3 parts)
                     (Some(parts[1].to_string()), None, parts[2].to_string())
+                } else {
+                    // Should not reach here (parts.len() >= 3 guard above), but fallback
+                    (None, None, parts.last().map(|s| s.to_string()).unwrap_or_default())
                 };
 
                 // Use the canonical connection name from the config so downstream
@@ -351,7 +354,7 @@ fn get_default_schema(db_type: &crate::models::connection::DatabaseType, databas
         // Neo4j/Cassandra/BigQuery — 无 schema 概念
         DT::Neo4j | DT::Cassandra | DT::Bigquery => database.to_string(),
         // H2/Informix/Xugu/Yashandb — PG 兼容，默认 public
-        DT::H2 | DT::Informix | DT::Xugu | DT::Yashandb => "public".to_string(),
+        DT::H2 | DT::Informix | DT::Xugu | DT::Yashandb => "PUBLIC".to_string(),
         // 兜底
         _ => "public".to_string(),
     }

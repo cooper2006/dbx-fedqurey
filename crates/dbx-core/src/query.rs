@@ -23,7 +23,7 @@ use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
-use crate::federated::{analyze_federation, rewrite_federated_sql, validate_federation};
+use crate::federated::{analyze_federation, preprocess_federated_sql, rewrite_federated_sql, validate_federation};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::{is_write_sql, strip_sql_comments_and_literals};
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
@@ -1721,8 +1721,14 @@ async fn execute_multi_connection_federated_query(
 
     // Execute the federated query
     log::info!("Executing multi-connection federated query via Calcite Agent");
+    // Preprocess SQL to quote connection names with special characters (e.g., hyphens)
+    let processed_sql =
+        preprocess_federated_sql(sql, &analysis.connections.iter().map(|s| s.as_str()).collect::<Vec<&str>>());
+    if processed_sql != *sql {
+        log::info!("[federated] Pre-processed SQL for Calcite: {} -> {}", sql, processed_sql);
+    }
     let fed_result = manager
-        .execute_federated_query(sql, cancel_token)
+        .execute_federated_query(&processed_sql, cancel_token)
         .await
         .map_err(|e| QueryExecutionError::Sql(format!("Calcite Agent query failed: {e}")))?;
 
