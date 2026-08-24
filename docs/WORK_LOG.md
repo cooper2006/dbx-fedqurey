@@ -190,3 +190,76 @@
 **已修改的 Rust 源码**（已提交）：
 - ：get_default_schema、validate_federation、extract_table_refs
 - ：多连接路径添加 SQL 预处理
+
+
+---
+
+## 2026-08-24 (终)
+
+### P1: Calcite Agent JAR 重新编译完成
+
+**构建命令**：
+```bash
+export JAVA_HOME="/Applications/ServBay/package/openjdk/21/21.0.12/Contents/Home"
+export PATH="/Users/cooper/gradle-9.6.1/bin:$JAVA_HOME/bin:$PATH"
+cd /Users/cooper/GitHub/dbx/agents && gradle :calcite:shadowJar
+```
+
+**修复内容**：
+- 添加 `calcite` 到 `agents/settings.gradle`
+- `CalciteAgent.java`: 5 处 `replaceAll` 添加 `Matcher.quoteReplacement()` 包装
+- 重建 JAR: `agents/drivers/calcite/build/libs/dbx-agent-calcite.jar` (150MB)
+
+**提交**: `d4c1c1e27`
+
+
+---
+
+## 2026-08-24 (代码层验证)
+
+### 联邦查询框架代码层验证报告
+
+**验证范围**：Rust 重写器 + Calcite 侧对各 DatabaseType 的映射、dialect 识别与跨库能力
+
+#### P0 修复验证
+
+| 修复项 | 状态 | 行号 |
+|--------|------|------|
+| `get_default_schema`: Snowflake→"PUBLIC" | ✅ | F336 |
+| `get_default_schema`: Hive/Spark→database 名 | ✅ | F347-349 |
+| `get_default_schema`: Dameng→database 名 | ✅ | F345 |
+| `get_default_schema`: Sqlite→"main" | ✅ | F353 |
+| `get_default_schema`: Kylin/Sundb→"PUBLIC" | ✅ | F351 |
+| `get_default_schema`: H2→"PUBLIC" | ✅ | F357 |
+| `is_oracle_like`: 移除 Db2 | ✅ | F410-414 |
+| `validate_federation`: 白名单使用 ref_.database_name | ✅ | F536 |
+| 新增 6 个回归测试 | ✅ | F936-1023 |
+
+#### P1 修复验证
+
+| 修复项 | 状态 | 行号 |
+|--------|------|------|
+| Calcite 路径 SQL 预处理 | ✅ | query.rs:1726 |
+| CalciteAgent.java quoteReplacement (5处) | ✅ | CalciteAgent.java:613,618,621,631,634 |
+| H2 默认 schema → "PUBLIC" | ✅ | F357 |
+| JAR 重建 (150MB, 78370 class 文件) | ✅ | agents/drivers/calcite/build/libs/dbx-agent-calcite.jar |
+
+#### P2 修复验证
+
+| 修复项 | 状态 | 行号 |
+|--------|------|------|
+| extract_table_refs 边界保护 (3分支) | ✅ | F257-268 |
+| federation_schema_visibility.rs 死代码标记 | ✅ | federation_schema_visibility.rs 末尾 |
+
+#### Git 提交
+
+```
+d4c1c1e27 build(calcite): rebuild JAR with quoteReplacement fix
+d4a727cd7 fix(federated): restore missing assignment operators
+dfe93fe93 fix(federated): P0-P2 fixes for database type handling
+a2eddbf86 fix(federated): P1 CalciteAgent quoteReplacement + P2 dead code
+9975cf25f fix(federated): P1/P2 fixes for Calcite preprocessing
+a4e699a03 fix(federated): P0 fixes for default schema mapping
+```
+
+**验证结论**：所有 P0/P1/P2 修复已正确实施，代码逻辑自洽，无遗留问题。
