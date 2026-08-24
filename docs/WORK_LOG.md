@@ -90,3 +90,15 @@
 - **操作**：将 `freebuff/task-3ac34aa5` 合并到 `main`，拉取 origin/main 解决冲突后推送
 - **冲突**：`docs/data/contributors.json`（`generatedAt` 时间戳冲突，取 origin 版本）
 - **结果**：`origin/main` 已更新至 `aafcd2ff4`
+
+### 启动 Web 版本前后端
+
+- **前端**：Vite 8.2.1 + Vue 3，端口 5173，代理 `/api` 到后端
+- **后端**：Rust/Axum 0.8，端口 4224（`cargo run -p dbx-web`）
+- **屏幕会话**：`screen -r dbx-backend` / `screen -r dbx-frontend`
+
+### 修复：Calcite Agent Java 路径
+
+- **问题**：联邦查询执行 SQL 时报 `Failed to start Calcite Agent: Unable to locate a Java Runtime`
+- **根因**：Java 安装在 ServBay（`/Applications/ServBay/package/openjdk/21/`），screen 会话未继承 PATH
+- **修复**：重启后端 screen 会话时设置 `JAVA_HOME=/Applications/ServBay/package/openjdk/21/21.0.12/Contents/Home`
