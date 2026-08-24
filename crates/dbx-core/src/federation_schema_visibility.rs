@@ -300,3 +300,4 @@ mod tests {
         assert_eq!(deserialized.allowed_schemas, vec!["analytics"]);
     }
 }
+// TODO: FederationVisibilityManager is currently unused - see PR #XXXX
