@@ -90,6 +90,7 @@ jobs:
           TMP_DIR="$(mktemp -d)"
           cp plugins/jdbc/build.gradle "$TMP_DIR/build.gradle"
           cp plugins/jdbc/manifest.json "$TMP_DIR/manifest.json"
+          git restore plugins/jdbc/build.gradle plugins/jdbc/manifest.json
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
