@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { afterEach, test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import { createPinia, disposePinia, getActivePinia, setActivePinia } from "pinia";
 import { isReactive, nextTick, toRaw } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
@@ -319,6 +319,30 @@ test("legacy Oracle query tabs restore with the auto-commit default", async () =
 
     assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, true);
   } finally {
+    restoreStorage();
+  }
+});
+
+test("transaction mode changes persist without another tab mutation", async () => {
+  const restoreStorage = installMemoryStorage();
+  vi.useFakeTimers();
+  try {
+    setActivePinia(createPinia());
+    let store = useQueryStore();
+    const tabId = store.createTab("conn-1", "db", "Query");
+    await store.flushPendingPersist();
+
+    store.setAutoCommit(tabId, false);
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(300);
+
+    setActivePinia(createPinia());
+    store = useQueryStore();
+    await store.initOpenTabs();
+
+    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, false);
+  } finally {
+    vi.useRealTimers();
     restoreStorage();
   }
 });
