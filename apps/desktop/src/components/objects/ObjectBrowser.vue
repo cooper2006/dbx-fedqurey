@@ -2012,13 +2012,11 @@ async function exportDataXlsx(row: ObjectBrowserRow) {
 
   try {
     columnInfos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
-    const hasComments = hasXlsxHeaderComments(columnInfos.map((column) => column.comment));
-    const result = await showObjectBrowserXlsxHeaderDialog(hasComments);
+    const result = await showObjectBrowserXlsxHeaderDialog(hasXlsxHeaderComments(columnInfos.map((column) => column.comment)));
     if (result === null) return;
     headerMode = result;
   } catch {
-    // Column fetch failed, fallback to export without comments
-    columnInfos = undefined;
+    // Export still works with field-name headers when column metadata is unavailable.
   }
 
   await exportTableData(row, "xlsx", columnInfos, headerMode);
