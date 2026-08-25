@@ -537,8 +537,6 @@ jobs:
     environment: release-signing
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
       VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
       VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
@@ -563,35 +561,6 @@ jobs:
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
-
-      # sccache must be set up before the WebView2 loader/runtime scripts: they
-      # run `cargo fetch` under the job-wide RUSTC_WRAPPER=sccache, so installing
-      # sccache only after them made cargo abort with "program not found".
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        with:
-          version: "v0.10.0"
-
-      - name: Configure S3 sccache
-        if: env.SCCACHE_GHA_ENABLED != 'true'
-        shell: bash
-        env:
-          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
-          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
-          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
-          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
-          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
-        run: |
-          {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
-          } >> "$GITHUB_ENV"
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -669,12 +638,6 @@ jobs:
 
           Copy-Item $installer.FullName $offlineName -Force
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
-
-      - name: Show sccache stats
-        if: always()
-        continue-on-error: true
-        shell: bash
-        run: ${SCCACHE_PATH} --show-stats
 
       - name: Remove temporary VSign files
         if: always()
