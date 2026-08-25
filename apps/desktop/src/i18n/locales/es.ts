@@ -6143,6 +6143,8 @@ export default withEnglishFallback({
     prefillNewQueryWithSelectDescription: "Al crear una nueva consulta, rellena el editor con SELECT * FROM <tabla> según la pestaña de tabla activa o la tabla seleccionada en la barra lateral.",
     generateSqlIncludeDatabaseName: "Incluir el nombre de la base de datos en el SQL generado",
     generateSqlIncludeDatabaseNameDescription: "Cuando la base de datos lo admite, el SQL de tabla generado usa base_de_datos.tabla en lugar de solo el nombre de la tabla.",
+    formatSqlOnSqlFileSave: "Formatear SQL al guardar archivos SQL",
+    formatSqlOnSqlFileSaveDescription: "Formatea automáticamente el SQL al guardar un archivo SQL, incluidos los archivos guardados en la biblioteca SQL y las consultas guardadas como archivos .sql.",
     clickTableNavigationTarget: "Ctrl+Clic abre DDL de tabla",
     clickTableNavigationTargetDescription: "Cuando está activado, Ctrl/Cmd+clic en el nombre de la tabla abre el editor de estructura (DDL). Cuando está desactivado, abre la vista de datos.",
     sqlVariableSyntax: "Sustitución de variables y marcadores SQL",

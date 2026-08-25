@@ -68,6 +68,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "openDataTabsNextToActive",
   "prefillNewQueryWithSelect",
   "generateSqlIncludeDatabaseName",
+  "formatSqlOnSqlFileSave",
   "updateNotificationsEnabled",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
