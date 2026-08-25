@@ -437,7 +437,7 @@ export default withEnglishFallback({
     createDuckDbFile: "DuckDBファイルを作成",
     createSqliteFile: "SQLiteデータベースを作成",
     memoryDatabasePathHint: "インメモリのSQLiteまたはDuckDBデータベースを作成するには :memory: を使用してください。",
-    sqliteCipherKey: "SQLite暗号化キー",
+    sqliteCipherKey: "SQLCipherキー",
     sqliteCipherKeyPlaceholder: "暗号化されていないSQLiteでは空のままにします",
     sqliteExtensions: "SQLite拡張",
     sqliteExtensionsPlaceholder: "/path/to/regexp.dylib\n/path/to/text.dylib|sqlite3_text_init",

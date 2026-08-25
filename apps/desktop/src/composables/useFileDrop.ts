@@ -109,10 +109,10 @@ export function useFileDrop() {
           };
           try {
             await connectionStore.addConnection(config);
-            await connectionStore.connect(config);
+            void connectionStore.connect(config);
             toast(t("welcome.fileOpened", { name }));
           } catch (e: any) {
-            toast(t("welcome.fileOpenFailed", { name, message: e?.message || String(e) }), 5000);
+            toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
           }
         }
       });
