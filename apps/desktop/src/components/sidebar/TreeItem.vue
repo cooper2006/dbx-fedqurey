@@ -176,6 +176,10 @@ const props = defineProps<{
   pendingRename?: boolean;
   highlighted?: boolean;
   commentLabelWidth?: number;
+  /** Plain (non-virtualized) renderer: make database/schema container rows
+   * stick to the top of the tree scroller while their children scroll under
+   * them (mirrors the overlay sticky header of the virtual renderer). */
+  stickyHeader?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -290,7 +294,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "trigger":
       return { icon: Zap, colorClass: "text-orange-300" };
     case "event":
-      return { icon: Clock, colorClass: "text-orange-300" };
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "redis-db":
       return { icon: Database, colorClass: "text-red-400" };
     case "mq-tenant":
@@ -1395,6 +1399,7 @@ function onKeydown(event: KeyboardEvent) {
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,
             'tree-item-highlight': highlighted,
+            'sidebar-tree-item--sticky': stickyHeader,
           },
         ]"
         :tabindex="selectionVisual.selected || selectionVisual.multiSelected ? 0 : -1"
@@ -1618,6 +1623,19 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-connection-tint.tree-item-active,
 .tree-item-connection-tint.tree-item-active:focus {
   background-color: transparent !important;
+}
+
+/* Plain (non-virtualized) renderer: database/schema container rows stick to
+   the top of the tree scroller while their children scroll under them,
+   mirroring the overlay sticky header the virtual renderer uses. The row is
+   min-h-7, so a solid background guarantees no content shows through while
+   rows slide underneath. */
+.sidebar-tree-item--sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: var(--background);
+  border-bottom: 1px solid var(--border);
 }
 
 .tree-item-connection-tint:hover::before {

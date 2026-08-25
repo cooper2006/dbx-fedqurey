@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -205,13 +205,21 @@ const columns = ref<EditableStructureColumn[]>([]);
 const copyColumnsDialogOpen = ref(false);
 const copySourceTables = ref<TableInfo[]>([]);
 const copySourceTableName = ref("");
+const copySourceTableSearch = ref("");
 const copySourceColumns = ref<ColumnInfo[]>([]);
 const copySourceColumnSearch = ref("");
 const selectedCopySourceColumnNames = ref<string[]>([]);
 const copySourceTablesLoading = ref(false);
+const copySourceTablesOffset = ref(0);
+const copySourceTablesHasMore = ref(false);
 const copySourceColumnsLoading = ref(false);
 const copySourceError = ref("");
+const COPY_SOURCE_TABLE_PAGE_SIZE = 100;
+const COPY_SOURCE_TABLE_PAGE_PROBE_SIZE = COPY_SOURCE_TABLE_PAGE_SIZE + 2;
+const COPY_SOURCE_TABLE_SEARCH_DEBOUNCE_MS = 250;
+let copySourceTablesRequestId = 0;
 let copySourceColumnsRequestId = 0;
+let copySourceTableSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const indexes = ref<EditableStructureIndex[]>([]);
 /** PostgreSQL partitioned parent (`relkind = 'p'`): `CREATE INDEX CONCURRENTLY`
  * is rejected by the server on such tables, so the option is disabled here and
@@ -1907,11 +1915,75 @@ const selectedCopySourceColumns = computed(() => {
   return copyableSourceColumns.value.filter(({ column, alreadyExists }) => !alreadyExists && selected.has(column.name)).map(({ column }) => column);
 });
 const allCopyableSourceColumnsSelected = computed(() => copyableSourceColumnNames.value.length > 0 && copyableSourceColumnNames.value.every((name) => selectedCopySourceColumnNames.value.includes(name)));
+const copySourceTablesHasPreviousPage = computed(() => copySourceTablesOffset.value > 0);
+
+function clearCopySourceTableSearchTimer() {
+  if (copySourceTableSearchTimer === undefined) return;
+  clearTimeout(copySourceTableSearchTimer);
+  copySourceTableSearchTimer = undefined;
+}
+
+function isCopySourceTable(table: TableInfo): boolean {
+  const databaseInfo = connection.value?.database_info;
+  return isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
+}
+
+function clearCopySourceTableSelection() {
+  copySourceTableName.value = "";
+  copySourceColumns.value = [];
+  copySourceColumnSearch.value = "";
+  selectedCopySourceColumnNames.value = [];
+  copySourceColumnsRequestId++;
+  copySourceColumnsLoading.value = false;
+}
+
+async function loadCopySourceTables(offset = 0) {
+  if (!props.connectionId || !props.database) return;
+  clearCopySourceTableSelection();
+  const requestId = ++copySourceTablesRequestId;
+  copySourceTablesLoading.value = true;
+  copySourceError.value = "";
+  try {
+    await store.ensureConnected(props.connectionId);
+    const tables = await api.listTables(props.connectionId, props.database, metadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], props.catalog);
+    if (requestId !== copySourceTablesRequestId) return;
+    copySourceTables.value = tables.slice(0, COPY_SOURCE_TABLE_PAGE_SIZE).filter(isCopySourceTable);
+    copySourceTablesOffset.value = offset;
+    // The current table is excluded locally. Probe the next two rows so its
+    // presence immediately after a full page does not create an empty next page.
+    copySourceTablesHasMore.value = tables.slice(COPY_SOURCE_TABLE_PAGE_SIZE).some(isCopySourceTable);
+  } catch (error: any) {
+    if (requestId !== copySourceTablesRequestId) return;
+    copySourceTables.value = [];
+    copySourceTablesHasMore.value = false;
+    copySourceError.value = error?.message || String(error);
+  } finally {
+    if (requestId === copySourceTablesRequestId) copySourceTablesLoading.value = false;
+  }
+}
+
+function updateCopySourceTableSearch(value: string | number) {
+  copySourceTableSearch.value = String(value);
+  clearCopySourceTableSelection();
+  clearCopySourceTableSearchTimer();
+  copySourceTableSearchTimer = setTimeout(() => {
+    copySourceTableSearchTimer = undefined;
+    void loadCopySourceTables();
+  }, COPY_SOURCE_TABLE_SEARCH_DEBOUNCE_MS);
+}
+
+watch(copyColumnsDialogOpen, (open) => {
+  if (open) return;
+  clearCopySourceTableSearchTimer();
+  copySourceTablesRequestId++;
+  copySourceColumnsRequestId++;
+});
 
 async function openCopyColumnsDialog() {
   if (!canAddColumn.value || !props.connectionId || !props.database) return;
   copyColumnsDialogOpen.value = true;
   copySourceTableName.value = "";
+  copySourceTableSearch.value = "";
   copySourceColumns.value = [];
   copySourceColumnSearch.value = "";
   selectedCopySourceColumnNames.value = [];
@@ -1919,21 +1991,10 @@ async function openCopyColumnsDialog() {
   copySourceColumnsRequestId++;
   copySourceColumnsLoading.value = false;
   copySourceTables.value = [];
-  copySourceTablesLoading.value = true;
-  try {
-    await store.ensureConnected(props.connectionId);
-    const databaseInfo = connection.value?.database_info;
-    const currentTableIdentifierKey = tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
-    copySourceTables.value = (await api.listTables(props.connectionId, props.database, metadataSchema.value, undefined, undefined, undefined, undefined, props.catalog)).filter((table) => {
-      const tableType = table.table_type.toUpperCase();
-      return tableType !== "VIEW" && tableType !== "MATERIALIZED_VIEW" && (isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== currentTableIdentifierKey);
-    });
-  } catch (error: any) {
-    copySourceTables.value = [];
-    copySourceError.value = error?.message || String(error);
-  } finally {
-    copySourceTablesLoading.value = false;
-  }
+  copySourceTablesOffset.value = 0;
+  copySourceTablesHasMore.value = false;
+  clearCopySourceTableSearchTimer();
+  await loadCopySourceTables();
 }
 
 async function loadCopySourceColumns(tableName: string) {
@@ -3265,6 +3326,7 @@ onDeactivated(() => {
   stopStructureHorizontalScrollbarDrag();
 });
 onBeforeUnmount(() => {
+  clearCopySourceTableSearchTimer();
   stopColumnDragTracking();
   stopStructureHorizontalScrollbarDrag();
   structureHorizontalScrollbarObserverGeneration += 1;
@@ -4335,18 +4397,10 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
         </DialogHeader>
 
         <div class="space-y-3 overflow-hidden">
-          <label class="grid gap-1.5 text-sm font-medium">
-            {{ t("structureEditor.copyColumnsSourceTable") }}
-            <select
-              :value="copySourceTableName"
-              class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="copySourceTablesLoading || copySourceTables.length === 0"
-              @change="loadCopySourceColumns(($event.target as HTMLSelectElement).value)"
-            >
-              <option value="" disabled>{{ t("structureEditor.copyColumnsSelectSourceTable") }}</option>
-              <option v-for="table in copySourceTables" :key="table.name" :value="table.name">{{ table.name }}</option>
-            </select>
-          </label>
+          <div class="grid gap-1.5 text-sm font-medium">
+            <label for="copy-source-table-search">{{ t("structureEditor.copyColumnsSourceTable") }}</label>
+            <Input id="copy-source-table-search" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
+          </div>
 
           <div v-if="copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
             <Loader2 class="h-4 w-4 animate-spin" />
@@ -4356,9 +4410,47 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             {{ copySourceError }}
           </div>
           <div v-else-if="copySourceTables.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
-            {{ t("structureEditor.copyColumnsNoSourceTables") }}
+            {{ copySourceTableSearch ? t("structureEditor.copyColumnsNoMatchingSourceTables") : t("structureEditor.copyColumnsNoSourceTables") }}
           </div>
-          <template v-else-if="copySourceTableName">
+          <template v-else>
+            <div class="max-h-52 overflow-y-auto rounded-md border" :aria-label="t('structureEditor.copyColumnsSourceTable')">
+              <button
+                v-for="table in copySourceTables"
+                :key="table.name"
+                type="button"
+                :aria-pressed="table.name === copySourceTableName"
+                :class="['flex h-9 w-full items-center px-3 text-left font-mono text-sm hover:bg-muted/50 focus-visible:bg-muted focus-visible:outline-none', table.name === copySourceTableName ? 'bg-muted' : '']"
+                @click="loadCopySourceColumns(table.name)"
+              >
+                <span class="truncate" :title="table.name">{{ table.name }}</span>
+              </button>
+            </div>
+            <div v-if="copySourceTablesHasPreviousPage || copySourceTablesHasMore" class="flex items-center justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="copySourceTablesLoading || !copySourceTablesHasPreviousPage"
+                :title="t('structureEditor.copyColumnsPreviousSourceTablePage')"
+                :aria-label="t('structureEditor.copyColumnsPreviousSourceTablePage')"
+                @click="loadCopySourceTables(Math.max(0, copySourceTablesOffset - COPY_SOURCE_TABLE_PAGE_SIZE))"
+              >
+                <ChevronLeft class="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="copySourceTablesLoading || !copySourceTablesHasMore"
+                :title="t('structureEditor.copyColumnsNextSourceTablePage')"
+                :aria-label="t('structureEditor.copyColumnsNextSourceTablePage')"
+                @click="loadCopySourceTables(copySourceTablesOffset + COPY_SOURCE_TABLE_PAGE_SIZE)"
+              >
+                <ChevronRight class="h-4 w-4" />
+              </Button>
+            </div>
+          </template>
+          <template v-if="copySourceTableName">
             <div class="flex items-center justify-between gap-2">
               <span class="text-sm font-medium">{{ t("structureEditor.copyColumnsSelectFields") }}</span>
               <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="copySourceColumnsLoading || copyableSourceColumnNames.length === 0" @click="toggleCopySourceColumns">

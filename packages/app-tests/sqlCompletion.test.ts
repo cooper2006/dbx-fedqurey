@@ -1498,7 +1498,8 @@ test("keeps database-qualified FROM input in table suggestion mode", () => {
   assert.equal(context.exclusiveColumnSuggestions, false);
   assert.deepEqual(
     items.map((item) => [item.label, item.type, item.detail]),
-    [["orders", "table", "other_db.orders"]],
+    // 单一非同名表不再展示冗余 schema 详情（PR 只在跨 schema 同名表时保留区分信息）
+    [["orders", "table", undefined]],
   );
 });
 
@@ -1572,7 +1573,8 @@ test("includes views in exclusive FROM object suggestions", () => {
   const tableItems = items.filter((item) => item.type === "table");
   assert.deepEqual(
     tableItems.map((item) => [item.label, item.type, item.detail]),
-    [["ticket_summary", "table", "public.ticket_summary"]],
+    // 视图保留类型提示，替代旧的 schema 前缀详情
+    [["ticket_summary", "table", "view"]],
   );
 });
 
@@ -1835,7 +1837,8 @@ test("suggests matching table names for partial table input", () => {
   const tableItems = items.filter((item) => item.type === "table");
   assert.deepEqual(
     tableItems.map((item) => [item.label, item.type, item.detail]),
-    [["ihli_data", "table", "public.ihli_data"]],
+    // 单一非同名表不再展示冗余 schema 详情（PR 只在跨 schema 同名表时保留区分信息）
+    [["ihli_data", "table", undefined]],
   );
 });
 

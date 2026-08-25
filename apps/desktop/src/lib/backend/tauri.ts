@@ -484,6 +484,16 @@ export type AgentEvent =
       is_error: boolean;
     }
   | { type: "turn_end"; turn: number }
+  | {
+      /**
+       * The reply stream is fully consumed but the run is NOT yet confirmed
+       * successful — the CLI process may still exit non-zero or hang after
+       * closing stdout. Non-terminal: the UI may stop the reply animation on
+       * it, but must keep listening for the real `agent_end` (success) /
+       * `error` (failure).
+       */
+      type: "response_complete";
+    }
   | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
   | {
       type: "context_compacted";
@@ -1428,7 +1438,7 @@ export async function beginManualTransaction(connectionId: string, database: str
   return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean): Promise<QueryResult[]> {
+export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string): Promise<QueryResult[]> {
   return invoke("execute_in_manual_transaction", {
     txnSessionId,
     sql,
@@ -1436,6 +1446,8 @@ export async function executeInManualTransaction(txnSessionId: string, sql: stri
     schema,
     maxRows,
     tableDataPreview,
+    pageSize,
+    resultSessionId,
   });
 }
 

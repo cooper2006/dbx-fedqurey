@@ -325,6 +325,7 @@ const executeModeLabel = computed(() => translateWithExecuteShortcut("settings.e
 const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
+const editShowLineNumbers = ref(settingsStore.editorSettings.showLineNumbers);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
@@ -368,6 +369,7 @@ const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEnt
 const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
+const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
 const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
 const editQueryResultMaxRowsEnabled = ref(settingsStore.editorSettings.queryResultMaxRowsEnabled);
@@ -526,6 +528,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
+    showLineNumbers: editShowLineNumbers.value,
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
     showInsertValueHints: editShowInsertValueHints.value,
     autoAliasTables: editAutoAliasTables.value,
@@ -555,6 +558,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridFilterEditorView: editDataGridFilterEditorView.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
+    dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
     flatteningMultiLineText: editFlatteningMultiLineText.value,
     pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
@@ -812,6 +816,7 @@ function syncEditorSettingsDraftFromStore() {
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
+  editShowLineNumbers.value = settingsStore.editorSettings.showLineNumbers;
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
@@ -842,6 +847,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
+  editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
   editFlatteningMultiLineText.value = settingsStore.editorSettings.flatteningMultiLineText;
   editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
@@ -1063,6 +1069,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
+    editShowLineNumbers.value = DEFAULT_EDITOR_SETTINGS.showLineNumbers;
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
@@ -1135,6 +1142,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
+    editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
     editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
@@ -1175,6 +1183,7 @@ function resetAllDefaults() {
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
+  editShowLineNumbers.value = DEFAULT_EDITOR_SETTINGS.showLineNumbers;
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
@@ -1213,6 +1222,7 @@ function resetAllDefaults() {
   editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
+  editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
   editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
@@ -3892,6 +3902,14 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <!-- Live Preview -->
+              <div class="space-y-2">
+                <Label>{{ t("settings.preview") }}</Label>
+                <div class="rounded-md border overflow-auto max-w-full" :class="editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode' ? 'border-border' : 'border-border/50'">
+                  <div ref="previewRef" style="min-width: 100%" />
+                </div>
+              </div>
+
               <Separator />
 
               <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -3936,6 +3954,16 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-show-line-numbers">{{ t("settings.showLineNumbers") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showLineNumbersDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-show-line-numbers" v-model="editShowLineNumbers" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -4207,16 +4235,6 @@ onUnmounted(() => {
                     </div>
                     <Switch :id="`sql-var-syntax-${key}`" :model-value="sqlVariableSyntaxToggle(key)" :disabled="!editSqlVariableSubstitutionEnabled" class="mt-0.5 shrink-0" @update:model-value="(value) => setSqlVariableSyntaxToggle(key, value as boolean)" />
                   </div>
-                </div>
-              </div>
-
-              <Separator />
-
-              <!-- Live Preview -->
-              <div class="space-y-2">
-                <Label>{{ t("settings.preview") }}</Label>
-                <div class="rounded-md border overflow-auto max-w-full" :class="editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode' ? 'border-border' : 'border-border/50'">
-                  <div ref="previewRef" style="min-width: 100%" />
                 </div>
               </div>
             </section>
@@ -5289,6 +5307,17 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="data-grid-auto-transpose-single-row" v-model="editDataGridAutoTransposeSingleRow" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-cell-detail-button-visible">
+                      {{ t("settings.dataGridCellDetailButtonVisible") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridCellDetailButtonVisibleDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-cell-detail-button-visible" v-model="editDataGridCellDetailButtonVisible" />
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

@@ -46,6 +46,15 @@ const props = defineProps<{
   prefillTargetSchema?: string;
 }>();
 
+const transferDialogStyle = {
+  width: "min(1120px, calc(100vw - 2rem))",
+  height: "min(80vh, calc(var(--dbx-viewport-height) - 2rem))",
+  minWidth: "min(780px, calc(100vw - 2rem))",
+  minHeight: "min(480px, calc(var(--dbx-viewport-height) - 2rem))",
+  maxWidth: "calc(100vw - 2rem)",
+  maxHeight: "calc(var(--dbx-viewport-height) - 2rem)",
+} as const;
+
 const store = useConnectionStore();
 
 const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(c.db_type)));
@@ -919,7 +928,7 @@ async function saveConfigTask() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
+    <DialogContent class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden resize" :style="transferDialogStyle" @interact-outside.prevent>
       <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <ArrowRightLeft class="w-4 h-4" />
@@ -1234,8 +1243,8 @@ async function saveConfigTask() {
 <style>
 @media (min-width: 640px) {
   html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"] {
-    width: calc(100vw - 2rem) !important;
-    max-width: 1120px !important;
+    /* Override the legacy default cap without pinning width, so native resize remains effective. */
+    max-width: calc(100vw - 2rem) !important;
   }
 }
 </style>

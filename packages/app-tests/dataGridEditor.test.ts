@@ -113,6 +113,7 @@ function createQuickEntryEditor(options: {
   filterRowsInGetRowItem?: boolean;
   supportsInsert?: boolean;
   save?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: Array<{ sourceIndex?: number; editedColumns?: number[] }> }) => Promise<void>;
+  onCellValueChanged?: (rowId: number, columnIndex: number) => void;
 }) {
   const result = computed(() => ({
     columns: ["id", "name"],
@@ -143,6 +144,7 @@ function createQuickEntryEditor(options: {
     currentWhereInput: computed(() => undefined),
     rowStatusFilter,
     dataGridQuickEntryEnabled: computed(() => options.quickEntryEnabled),
+    onCellValueChanged: options.onCellValueChanged,
     pageSize: ref(50),
     currentPage: ref(1),
     cacheKey: options.cacheKey ? computed(() => options.cacheKey) : undefined,
@@ -1661,6 +1663,88 @@ test("quick entry off keeps blur edits pending without saving", async () => {
   assert.equal(saveCalls, 0);
   assert.equal(editor.dirtyRows.value.size, 1);
   assert.equal(editor.dirtyRows.value.get(0)?.get(1), "Ada Lovelace");
+});
+
+test("unchanged cell blur commits do not create pending changes", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  let callbackCount = 0;
+  const editor = createQuickEntryEditor({
+    quickEntryEnabled: false,
+    onCellValueChanged: () => {
+      callbackCount += 1;
+    },
+  });
+  const version = editor.pendingChangesVersion.value;
+  const transactionActive = editor.transactionActive.value;
+
+  editor.startEdit(0, 1);
+  await editor.commitEditFromBlur();
+
+  assert.equal(editor.dirtyRows.value.size, 0);
+  assert.equal(editor.hasPendingChanges.value, false);
+  assert.equal(editor.transactionActive.value, transactionActive);
+  assert.equal(editor.pendingChangesVersion.value, version);
+  assert.equal(callbackCount, 0);
+  assert.equal(editor.rowDataWithChanges([1, "Ada"], 0)[1], "Ada");
+});
+
+test("restoring the original cell value before blur is a no-op", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const editor = createQuickEntryEditor({ quickEntryEnabled: false });
+
+  editor.startEdit(0, 1);
+  editor.editValue.value = "Bob";
+  editor.editValue.value = "Ada";
+  await editor.commitEditFromBlur();
+
+  assert.equal(editor.dirtyRows.value.size, 0);
+  assert.equal(editor.hasPendingChanges.value, false);
+  assert.equal(editor.canUndoPendingChange.value, false);
+  assert.equal(editor.pendingChangesVersion.value, 0);
+  assert.equal(editor.rowDataWithChanges([1, "Ada"], 0)[1], "Ada");
+});
+
+test("unchanged cell blur commits preserve other dirty cells", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const editor = createQuickEntryEditor({ quickEntryEnabled: false });
+
+  editor.applyCellValue(0, 0, "2");
+  editor.startEdit(0, 1);
+  await editor.commitEditFromBlur();
+
+  assert.deepEqual([...(editor.dirtyRows.value.get(0)?.entries() ?? [])], [[0, 2]]);
+  assert.equal(editor.hasPendingChanges.value, true);
+  assert.equal(editor.rowDataWithChanges([1, "Ada"], 0)[1], "Ada");
+});
+
+test("changed cell blur commits remain pending", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const editor = createQuickEntryEditor({ quickEntryEnabled: false });
+
+  editor.startEdit(0, 1);
+  editor.editValue.value = "Bob";
+  await editor.commitEditFromBlur();
+
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), "Bob");
+  assert.equal(editor.hasPendingChanges.value, true);
+  assert.equal(editor.rowDataWithChanges([1, "Ada"], 0)[1], "Bob");
+});
+
+test("unchanged numeric cell blur commits keep the numeric baseline", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const editor = createPeopleGridEditor();
+
+  editor.startEdit(0, 0);
+  await editor.commitEditFromBlur();
+
+  assert.equal(editor.dirtyRows.value.size, 0);
+  assert.equal(editor.hasPendingChanges.value, false);
+  assert.equal(editor.rowDataWithChanges([1, "Ada"], 0)[0], 1);
 });
 
 test("explicit enum commits distinguish NULL, empty string, and the literal NULL", async () => {

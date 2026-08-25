@@ -25,6 +25,7 @@ import {
   isSwitchToPreviousTabShortcut,
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
+  isToggleResultsPaneShortcut,
   isToggleTransposeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
@@ -313,6 +314,23 @@ test("matches Cmd+F for focusing search", () => {
 
 test("matches F5 for refreshing data", () => {
   assert.equal(isRefreshDataShortcut({ key: "F5" }), true);
+});
+
+test("keeps the results pane shortcut unbound until the user configures it", () => {
+  const configured = { toggleResultsPane: "Mod+G" } as any;
+
+  assert.equal(DEFAULT_SHORTCUT_SETTINGS.toggleResultsPane, "");
+  assert.equal(normalizeShortcutSettings({}).toggleResultsPane, "");
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true }), false);
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true }, configured), true);
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true, isComposing: true }, configured), false);
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true }, { toggleResultsPane: "" } as any), false);
+});
+
+test("reports conflicts for a configured global results pane shortcut", () => {
+  const shortcuts = { ...DEFAULT_SHORTCUT_SETTINGS, toggleResultsPane: "Mod+F" };
+
+  assert.equal(findShortcutConflict("toggleResultsPane", "Mod+F", shortcuts), "focusSearch");
 });
 
 test("matches configurable shortcut for toggling transpose view", () => {

@@ -35,7 +35,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { defaultAutoCommitForDbType, supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
+import { defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -2429,7 +2429,7 @@ export const useQueryStore = defineStore("query", () => {
     if (pendingBatchCloseTabIds.value) {
       return pendingBatchCloseTabIds.value
         .map((id) => tabs.value.find((tab) => tab.id === id))
-        .filter((tab): tab is QueryTab => !!tab && isTabDirty(tab))
+        .filter((tab): tab is QueryTab => !!tab && shouldConfirmTabClose(tab))
         .map((tab) => tab.id);
     }
     const pendingTab = pendingCloseTabId.value ? tabs.value.find((tab) => tab.id === pendingCloseTabId.value) : undefined;
@@ -2579,9 +2579,31 @@ export const useQueryStore = defineStore("query", () => {
       onComplete?.();
       return;
     }
-    pendingBatchCloseTabIds.value = uniqueIds;
-    pendingBatchCloseFinalActiveTabId.value = finalActiveTabId;
-    pendingBatchCloseComplete = onComplete ?? null;
+
+    const existingIds = pendingBatchCloseTabIds.value;
+    if (existingIds) {
+      // Sidebar bulk disconnects settle independently, so later scopes must join the open dialog instead of replacing it.
+      const combinedIds = [...new Set([...existingIds, ...uniqueIds])];
+      const preferredFinalActiveTabId = finalActiveTabId !== undefined ? finalActiveTabId : pendingBatchCloseFinalActiveTabId.value;
+      pendingBatchCloseTabIds.value = combinedIds;
+      pendingBatchCloseFinalActiveTabId.value = preferredFinalActiveTabId && combinedIds.includes(preferredFinalActiveTabId) ? activeTabAfterClosing(combinedIds, preferredFinalActiveTabId) : preferredFinalActiveTabId;
+      if (onComplete) {
+        const previousComplete = pendingBatchCloseComplete;
+        pendingBatchCloseComplete = previousComplete
+          ? () => {
+              try {
+                previousComplete();
+              } finally {
+                onComplete();
+              }
+            }
+          : onComplete;
+      }
+    } else {
+      pendingBatchCloseTabIds.value = uniqueIds;
+      pendingBatchCloseFinalActiveTabId.value = finalActiveTabId;
+      pendingBatchCloseComplete = onComplete ?? null;
+    }
     continuePendingBatchClose();
   }
 
@@ -2757,6 +2779,17 @@ export const useQueryStore = defineStore("query", () => {
     return tabs.value.find((tab) => !closingIds.has(tab.id))?.id ?? null;
   }
 
+  function activeTabAfterClosing(ids: string[], preferredActiveTabId = activeTabId.value) {
+    const closingIds = new Set(ids);
+    if (preferredActiveTabId && !closingIds.has(preferredActiveTabId) && tabs.value.some((tab) => tab.id === preferredActiveTabId)) {
+      return preferredActiveTabId;
+    }
+    const preferredIndex = preferredActiveTabId ? tabs.value.findIndex((tab) => tab.id === preferredActiveTabId) : -1;
+    const remainingTabs = tabs.value.filter((tab) => !closingIds.has(tab.id));
+    if (preferredIndex < 0) return remainingTabs[0]?.id ?? null;
+    return remainingTabs[Math.min(preferredIndex, remainingTabs.length - 1)]?.id ?? null;
+  }
+
   function closeOtherRegularTabs(id: string) {
     const tab = tabs.value.find((item) => item.id === id);
     if (!tab || tab.pinned) return;
@@ -2905,12 +2938,21 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function closeConnectionTabs(connectionId: string) {
-    closeTabsWhere((tab) => tab.connectionId === connectionId);
+  function closeScopedTabsWhere(predicate: (tab: QueryTab) => boolean, options: { force?: boolean } = {}) {
+    const ids = tabs.value.filter((tab) => predicate(tab)).map((tab) => tab.id);
+    if (options.force) {
+      closeTabsWhere(predicate);
+      return;
+    }
+    beginBatchClose(ids, activeTabAfterClosing(ids));
+  }
+
+  function closeConnectionTabs(connectionId: string, options?: { force?: boolean }) {
+    closeScopedTabsWhere((tab) => tab.connectionId === connectionId, options);
   }
 
   function closeDatabaseTabs(connectionId: string, database: string) {
-    closeTabsWhere((tab) => tab.connectionId === connectionId && tab.database === database);
+    closeScopedTabsWhere((tab) => tab.connectionId === connectionId && tab.database === database);
   }
 
   function tabMatchesDroppedTableObject(tab: QueryTab, target: DroppedTableObjectTarget): boolean {
@@ -4496,6 +4538,9 @@ export const useQueryStore = defineStore("query", () => {
         mongoCommands = splitMongoCommandRanges(sql);
       }
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+      if (tab.autoCommit === false && !supportsTransaction(conn?.db_type)) {
+        tab.autoCommit = true;
+      }
       const targetContext = options?.targetContext;
       if (targetContext?.scope === "namespace") {
         throw new Error("Namespace execution targets require a registered execution adapter.");
@@ -5139,10 +5184,14 @@ export const useQueryStore = defineStore("query", () => {
         executionPromise = (async () => {
           const txnSessionId = tab.txnSessionId;
           if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+          const executeInTransaction = (sessionId: string) =>
+            useAgentResultSession
+              ? api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, pageLimit, options?.pagination?.sessionId)
+              : api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
           try {
-            return await api.executeInManualTransaction(txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+            return await executeInTransaction(txnSessionId);
           } catch (error) {
-            if (manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
+            if (options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
             manualTransactionRecoveryAttempted = true;
             tab.txnSessionId = undefined;
             tab.txnAutoRolledBack = true;
@@ -5150,7 +5199,7 @@ export const useQueryStore = defineStore("query", () => {
             const refreshedSessionId = await api.beginManualTransaction(executionConnectionId, executionDatabase, executionSchema, executionCatalog);
             tab.txnSessionId = refreshedSessionId;
             queryExecutionLog("info", "manual-txn:restarted", { traceId, txnSessionId: refreshedSessionId, elapsed: elapsed() });
-            return api.executeInManualTransaction(refreshedSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+            return executeInTransaction(refreshedSessionId);
           }
         })();
       } else {

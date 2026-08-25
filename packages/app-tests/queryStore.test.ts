@@ -296,7 +296,7 @@ test("external SQL file paths persist with open query tabs", async () => {
   }
 });
 
-test("legacy Oracle query tabs restore with the manual transaction default", async () => {
+test("legacy Oracle query tabs restore with the auto-commit default", async () => {
   const restoreStorage = installMemoryStorage();
   try {
     setActivePinia(createPinia());
@@ -317,7 +317,7 @@ test("legacy Oracle query tabs restore with the manual transaction default", asy
     store = useQueryStore();
     await store.initOpenTabs();
 
-    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, false);
+    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, true);
   } finally {
     restoreStorage();
   }
@@ -693,6 +693,163 @@ test("close all tabs pauses on unsaved query tabs", () => {
   assert.equal(store.showCloseConfirm, false);
   assert.deepEqual(store.tabs, []);
   assert.equal(store.activeTabId, null);
+});
+
+test("connection-scoped close pauses before dropping unsaved query tabs", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const queryId = store.createTab("conn-1", "db", "draft query");
+  store.updateSql(queryId, "select 1;");
+  const dataId = store.createTab("conn-1", "db", "users", "data");
+  const outsideId = store.createTab("conn-2", "db", "outside");
+  store.activeTabId = dataId;
+
+  store.closeConnectionTabs("conn-1");
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.equal(store.pendingCloseTabId, queryId);
+  assert.equal(store.closeConfirmContext, "batch");
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [queryId]);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [queryId, dataId, outsideId],
+  );
+
+  store.cancelClosePendingTab();
+
+  assert.equal(store.showCloseConfirm, false);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [queryId, dataId, outsideId],
+  );
+});
+
+test("database-scoped close completes the pending batch after all dirty tabs are saved", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstId = store.createTab("conn-1", "db", "first query");
+  store.updateSql(firstId, "select 1;");
+  const secondId = store.createTab("conn-1", "db", "second query");
+  store.updateSql(secondId, "select 2;");
+  const otherDatabaseId = store.createTab("conn-1", "analytics", "outside");
+
+  store.closeDatabaseTabs("conn-1", "db");
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [firstId, secondId]);
+  store.markTabClean(store.tabs.find((tab) => tab.id === firstId));
+  store.markTabClean(store.tabs.find((tab) => tab.id === secondId));
+
+  assert.equal(store.completePendingCloseAfterSaveAll(), "tabs");
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [otherDatabaseId],
+  );
+});
+
+test("connection-scoped close resumes after a saved tab and restores its prompt after save failure", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstId = store.createTab("conn-1", "db", "first query");
+  store.updateSql(firstId, "select 1;");
+  const secondId = store.createTab("conn-1", "db", "second query");
+  store.updateSql(secondId, "select 2;");
+  const outsideId = store.createTab("conn-2", "db", "outside");
+
+  store.closeConnectionTabs("conn-1");
+
+  assert.equal(store.saveAndClosePendingTab(), firstId);
+  store.markTabClean(store.tabs.find((tab) => tab.id === firstId));
+  store.closeTab(firstId, { force: true });
+  assert.equal(store.showCloseConfirm, true);
+  assert.equal(store.pendingCloseTabId, secondId);
+
+  assert.equal(store.saveAndClosePendingTab(), secondId);
+  assert.equal(store.resumeCloseConfirm(), true);
+  assert.equal(store.pendingCloseTabId, secondId);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [secondId, outsideId],
+  );
+
+  assert.equal(store.saveAndClosePendingTab(), secondId);
+  store.markTabClean(store.tabs.find((tab) => tab.id === secondId));
+  store.closeTab(secondId, { force: true });
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [outsideId],
+  );
+  assert.equal(store.activeTabId, outsideId);
+});
+
+test("connection-scoped close honors disabled unsaved SQL confirmation", () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    useSettingsStore().updateEditorSettings({ confirmUnsavedSqlClose: false });
+    const store = useQueryStore();
+    const queryId = store.createTab("conn-1", "db", "draft query");
+    store.updateSql(queryId, "select 1;");
+    const outsideId = store.createTab("conn-2", "db", "outside");
+
+    store.closeConnectionTabs("conn-1");
+
+    assert.equal(store.showCloseConfirm, false);
+    assert.deepEqual(
+      store.tabs.map((tab) => tab.id),
+      [outsideId],
+    );
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("concurrent connection-scoped closes coalesce every pending scope", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstConnectionId = store.createTab("conn-1", "db", "first draft");
+  store.updateSql(firstConnectionId, "select 1;");
+  const secondConnectionId = store.createTab("conn-2", "db", "second draft");
+  store.updateSql(secondConnectionId, "select 2;");
+  const keepId = store.createTab("conn-3", "db", "keep");
+
+  store.closeConnectionTabs("conn-1");
+  store.closeConnectionTabs("conn-2");
+
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [firstConnectionId, secondConnectionId]);
+  store.forceCloseAllPendingTabs();
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [keepId],
+  );
+  assert.equal(store.activeTabId, keepId);
+});
+
+test("scoped close coalesces with pending completion state", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstConnectionId = store.createTab("conn-1", "db", "first draft");
+  store.updateSql(firstConnectionId, "select 1;");
+  const keepId = store.createTab("conn-3", "db", "keep");
+  const secondConnectionId = store.createTab("conn-2", "db", "second draft");
+  store.updateSql(secondConnectionId, "select 2;");
+  let completions = 0;
+
+  store.closeRightTabs(keepId, () => {
+    completions += 1;
+  });
+  store.closeConnectionTabs("conn-1");
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [secondConnectionId, firstConnectionId]);
+  store.forceCloseAllPendingTabs();
+
+  assert.equal(completions, 1);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [keepId],
+  );
+  assert.equal(store.activeTabId, keepId);
 });
 
 test("disabled unsaved SQL close confirmation closes dirty tabs directly", () => {

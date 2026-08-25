@@ -131,6 +131,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarConnectionSortMode: "invalid" as any }).sidebarConnectionSortMode).toBe("manual");
   });
 
+  it("shows line numbers by default and preserves an explicit opt-out", () => {
+    expect(normalizeEditorSettings({}).showLineNumbers).toBe(true);
+    expect(normalizeEditorSettings({ showLineNumbers: false }).showLineNumbers).toBe(false);
+    expect(normalizeEditorSettings({ showLineNumbers: "false" } as any).showLineNumbers).toBe(true);
+  });
+
   it("shows the current statement frame by default", () => {
     expect(normalizeEditorSettings({}).showCurrentStatementFrame).toBe(true);
   });
@@ -271,6 +277,16 @@ describe("normalizeEditorSettings", () => {
     expect(invalid.dataGridMultiRowTranspose).toBe(false);
     expect(invalid.dataGridHideNullColumns).toBe(false);
     expect(invalid.dataGridBooleanDisplayMode).toBe("dropdown");
+  });
+
+  it("defaults the cell detail hover button on and preserves only boolean values", () => {
+    expect(normalizeEditorSettings({}).dataGridCellDetailButtonVisible).toBe(true);
+    expect(normalizeEditorSettings({ dataGridCellDetailButtonVisible: true }).dataGridCellDetailButtonVisible).toBe(true);
+    expect(normalizeEditorSettings({ dataGridCellDetailButtonVisible: false }).dataGridCellDetailButtonVisible).toBe(false);
+
+    for (const invalidValue of [0, 1, "false", null]) {
+      expect(normalizeEditorSettings({ dataGridCellDetailButtonVisible: invalidValue as never }).dataGridCellDetailButtonVisible).toBe(true);
+    }
   });
 
   it("defaults the data grid font and preserves a custom font family", () => {
@@ -724,6 +740,51 @@ describe("settingsStore persisted settings initialization", () => {
 
     expect(store.editorSettings.openDataTabsNextToActive).toBe(false);
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ openDataTabsNextToActive: false }));
+  });
+
+  it("loads, persists, and reloads the cell detail button visibility", async () => {
+    let persistedSettings: Record<string, unknown> = { dataGridCellDetailButtonVisible: false };
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.dataGridCellDetailButtonVisible).toBe(false);
+    await store.updateEditorSettingsAndPersist({ dataGridCellDetailButtonVisible: true });
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridCellDetailButtonVisible: true }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridCellDetailButtonVisible).toBe(true);
+  });
+
+  it("loads, persists, and reloads hidden query editor line numbers", async () => {
+    let persistedSettings: Record<string, unknown> = { showLineNumbers: true };
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    await store.updateEditorSettingsAndPersist({ showLineNumbers: false });
+
+    expect(store.editorSettings.showLineNumbers).toBe(false);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ showLineNumbers: false }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+
+    expect(restartedStore.editorSettings.showLineNumbers).toBe(false);
   });
 
   it("shares concurrent initialization and applies startup changes after saved settings load", async () => {

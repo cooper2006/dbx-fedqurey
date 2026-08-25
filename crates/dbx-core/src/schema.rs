@@ -2186,7 +2186,8 @@ async fn list_tables_once(
 
     {
         let connections = state.connections.read().await;
-        if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
+        if let Some(PoolKind::ExternalDriver { driver_id, config, session }) = connections.get(&pool_key) {
+            let driver_id = driver_id.clone();
             let config = config.clone();
             let session = session.clone();
             drop(connections);
@@ -2212,6 +2213,12 @@ async fn list_tables_once(
             if let Some(object_types) = object_types {
                 params["object_types"] = serde_json::json!(object_types);
             }
+            if let Some(limit) = limit {
+                params["limit"] = serde_json::json!(limit);
+            }
+            if let Some(offset) = offset {
+                params["offset"] = serde_json::json!(offset);
+            }
             return session
                 .invoke_with_timeout::<Vec<db::TableInfo>>(
                     "listTables",
@@ -2219,7 +2226,14 @@ async fn list_tables_once(
                     agent_metadata_timeout(Some(config.as_ref())),
                 )
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
+                .map(|tables| {
+                    let final_offset = if external_driver_paging_likely_applied(&driver_id, limit, tables.len()) {
+                        Some(0)
+                    } else {
+                        offset
+                    };
+                    filter_table_infos(tables, filter, limit, final_offset, object_types, table_name_filter)
+                });
         }
         #[cfg(feature = "duckdb-sidecar")]
         if let Some(client) = extract_pool!(&connections, &pool_key, DuckDbWorker) {
@@ -2233,6 +2247,17 @@ async fn list_tables_once(
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, ClickHouse) {
             drop(connections);
+            if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+                return db::clickhouse_driver::list_table_objects_filtered(
+                    &client,
+                    clickhouse_metadata_database(database, schema),
+                    filter,
+                    limit,
+                    offset,
+                )
+                .await
+                .map(|tables| filter_table_infos(tables, None, None, None, object_types, None));
+            }
             return db::clickhouse_driver::list_tables(&client, clickhouse_metadata_database(database, schema))
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
@@ -2264,6 +2289,13 @@ async fn list_tables_once(
                 )
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
+            }
+        }
+        if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+            if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
+                drop(connections);
+                let mut client = lock_sqlserver_metadata_client(&client).await?;
+                return db::sqlserver::list_table_objects(&mut client, schema, filter, limit, offset).await;
             }
         }
         if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
@@ -2513,7 +2545,9 @@ async fn list_tables_once(
             }
         }
         PoolKind::Postgres(p) => {
-            if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
+            if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+                db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+            } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::postgres::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
@@ -2692,6 +2726,10 @@ fn normalize_table_info_object_type(value: &str) -> String {
         return "INDEX".to_string();
     }
     "TABLE".to_string()
+}
+
+fn requests_table_objects_only(object_types: Option<&[String]>) -> bool {
+    object_types.is_some_and(|types| types.len() == 1 && normalize_table_info_object_type(&types[0]) == "TABLE")
 }
 
 fn uses_presto_like_information_schema_tables(db_type: &DatabaseType) -> bool {
@@ -3993,6 +4031,15 @@ for line in sys.stdin:
         assert!(!super::agent_paging_likely_applied(true, Some(500), 501));
         assert!(!super::agent_paging_likely_applied(false, Some(500), 120));
         assert!(!super::agent_paging_likely_applied(true, None, 120));
+    }
+
+    #[test]
+    fn external_driver_paging_detection_avoids_double_offset_for_jdbc_only() {
+        assert!(super::external_driver_paging_likely_applied("jdbc", Some(500), 500));
+        assert!(super::external_driver_paging_likely_applied("jdbc", Some(500), 120));
+        assert!(!super::external_driver_paging_likely_applied("jdbc", Some(500), 501));
+        assert!(!super::external_driver_paging_likely_applied("jdbc", None, 120));
+        assert!(!super::external_driver_paging_likely_applied("other", Some(500), 120));
     }
 
     #[test]
@@ -6755,6 +6802,21 @@ async fn list_indexes_core_for_session(
                     drop(connections);
                     return external_driver_gaussdb_m_indexes(session, config.as_ref(), database, schema, table).await;
                 }
+                let config = config.clone();
+                let session = session.clone();
+                drop(connections);
+                return session
+                    .invoke_with_timeout::<Vec<db::IndexInfo>>(
+                        "listIndexes",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "database": database,
+                            "schema": schema,
+                            "table": table,
+                        }),
+                        agent_metadata_timeout(Some(config.as_ref())),
+                    )
+                    .await;
             }
             if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
                 drop(connections);
@@ -7592,6 +7654,10 @@ fn supports_agent_table_paging(config: &ConnectionConfig) -> bool {
 
 fn agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len: usize) -> bool {
     enabled && limit.is_some_and(|limit| returned_len <= limit)
+}
+
+fn external_driver_paging_likely_applied(driver_id: &str, limit: Option<usize>, returned_len: usize) -> bool {
+    driver_id == "jdbc" && limit.is_some_and(|limit| returned_len <= limit)
 }
 
 fn mysql_show_metadata_database_for_config<'a>(config: Option<&ConnectionConfig>, database: &'a str) -> &'a str {

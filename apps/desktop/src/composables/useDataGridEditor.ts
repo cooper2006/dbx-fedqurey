@@ -5,7 +5,7 @@ import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
-import { type GridNewRowMeta, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
+import type { GridNewRowMeta, GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
@@ -119,9 +119,7 @@ export interface UseDataGridEditorOptions {
   onResultPayloadMutated?: () => void;
   onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
-  emit: {
-    (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
-  };
+  emit: (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => void;
 }
 
 interface PendingChangesSnapshot {
@@ -601,6 +599,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }) as CellValue;
   }
 
+  function coerceCommittedCellValue(value: string, currentValue: CellValue | undefined, oldValue: CellValue | undefined, columnIndex: number): CellValue {
+    const editorText = dataGridCellEditorText({
+      value: currentValue,
+      databaseType: resolvedDatabaseType.value,
+      columnInfo: tableColumnForGridColumn(columnIndex),
+    });
+    // Keep the original CellValue when the editor text was not changed. This
+    // avoids turning a displayed value such as number 1 into string "1" when
+    // result and table metadata use different representations.
+    if (value === editorText) return currentValue ?? null;
+    return coerceCellValue(value, oldValue, columnIndex);
+  }
+
   let isBatching = false;
   let batchUndoSnapshotPushed = false;
   let batchMutated = false;
@@ -833,8 +844,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
 
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
-    const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
-    const changed = newVal !== item.data[col];
+    const currentVal = item.data[col] ?? null;
+    const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCommittedCellValue(editValue.value, currentVal, oldVal, col);
+    const changed = newVal !== currentVal;
+    if (!changed) {
+      editingCell.value = null;
+      isCommitting = false;
+      return { changed: false, rowKind: "existing" };
+    }
     if (newVal !== oldVal) {
       if (changed) pushUndoSnapshot();
       if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());

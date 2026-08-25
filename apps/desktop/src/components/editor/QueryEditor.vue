@@ -24,7 +24,7 @@ import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText, type
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
-import { createQueryEditorExecutionViewportOwnership } from "@/lib/editor/queryEditorExecutionViewport";
+import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 import { insertQueryEditorNewline } from "@/lib/editor/queryEditorNewline";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
@@ -107,6 +107,7 @@ import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
@@ -127,6 +128,7 @@ import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCare
 import { queryEditorCommentTokens, queryEditorLineCommentToken } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
+import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
@@ -188,6 +190,11 @@ const props = defineProps<{
 
 function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
   return props.syntaxDialect === "clickhouse" ? props.dialect : (props.syntaxDialect ?? props.dialect);
+}
+
+function queryEditorSelectionLanguage(): "sql" | "text" {
+  const databaseType = props.databaseType;
+  return databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" ? "text" : "sql";
 }
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
@@ -512,12 +519,14 @@ interface EditorGestureEvent extends Event {
 }
 
 let editorViewModule: typeof import("@codemirror/view") | null = null;
+let codeMirrorLineNumbers: typeof import("@codemirror/view").lineNumbers | null = null;
 let codeMirrorPrec: typeof import("@codemirror/state").Prec | null = null;
 let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelection | null = null;
 let hoverCloseEffect: StateEffect<unknown> | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
+let lineNumbersComp: import("@codemirror/state").Compartment | null = null;
 let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let closeBracketsComp: import("@codemirror/state").Compartment | null = null;
 let sqlLanguageComp: import("@codemirror/state").Compartment | null = null;
@@ -694,6 +703,7 @@ const queryEditorAppearanceSettings = computed(() => {
     autoCloseBrackets: settings.autoCloseBrackets,
     showCurrentStatementFrame: settings.showCurrentStatementFrame,
     showInsertValueHints: settings.showInsertValueHints,
+    showLineNumbers: settings.showLineNumbers,
     shortcuts: settings.shortcuts,
     showStatementRunButtons: settings.showStatementRunButtons,
   };
@@ -1994,11 +2004,10 @@ function insertNewlineWithoutCompletion(view: EditorViewType): boolean {
 
 function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
   const databaseType = props.databaseType;
-  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" ? "text" : "sql";
   return extendQueryEditorSelection(currentView, {
     databaseType,
     dialect: sqlBehaviorDialect(),
-    language,
+    language: queryEditorSelectionLanguage(),
   });
 }
 
@@ -2051,6 +2060,14 @@ function waitForCompletionTab(view: EditorViewType): boolean {
 function wordWrapExtension() {
   if (!editorViewModule) return [];
   return props.forceWordWrap || settingsStore.editorSettings.wordWrap ? editorViewModule.EditorView.lineWrapping : [];
+}
+
+function lineNumbersExtension(enabled = settingsStore.editorSettings.showLineNumbers) {
+  return buildQueryEditorLineNumbersExtension(codeMirrorLineNumbers, enabled, {
+    domEventHandlers: {
+      mousedown: selectSqlLineFromGutter,
+    },
+  });
 }
 
 function closeBracketsExtension(enabled = settingsStore.editorSettings.autoCloseBrackets) {
@@ -4649,12 +4666,14 @@ onMounted(async () => {
     rectangularSelection,
   } as typeof import("@codemirror/view");
   hoverCloseEffect = closeHoverTooltips;
+  codeMirrorLineNumbers = lineNumbers;
   codeMirrorPrec = Prec;
   codeMirrorEditorSelection = EditorSelection;
   codeMirrorSnippetCompletion = snippetCompletion;
   fontThemeComp = new Compartment();
   codeMirrorTheme = new Compartment();
   wordWrapComp = new Compartment();
+  lineNumbersComp = new Compartment();
   vimModeComp = new Compartment();
   closeBracketsComp = new Compartment();
   sqlLanguageComp = new Compartment();
@@ -5115,11 +5134,7 @@ onMounted(async () => {
         scrollToMatch: (range) => EditorView.scrollIntoView(range, { y: "center" }),
       }),
       runGutterComp.of(runStatementGutterExtension()),
-      lineNumbers({
-        domEventHandlers: {
-          mousedown: selectSqlLineFromGutter,
-        },
-      }),
+      lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
       currentStatementFrameExtension,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
@@ -5141,6 +5156,16 @@ onMounted(async () => {
       dropCursor(),
       props.readOnly ? [] : scrollPastEnd(),
       EditorView.dragMovesSelection.of((event) => !event.ctrlKey && !event.metaKey),
+      Prec.highest(
+        EditorView.mouseSelectionStyle.of((currentView, event) =>
+          createQueryEditorStringMouseSelection(currentView, event, {
+            databaseType: props.databaseType,
+            dialect: sqlBehaviorDialect(),
+            language: queryEditorSelectionLanguage(),
+            composing: isEditorComposing(currentView),
+          }),
+        ),
+      ),
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
@@ -5763,7 +5788,7 @@ function getCurrentCustomThemeColors() {
 watch(
   [queryEditorAppearanceSettings, () => isDark.value, () => themePalette.value, editorThemeAppearance],
   async ([ss]) => {
-    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     if (!isGestureZooming.value && !zoomCommitScheduler.hasPendingCommit() && liveFontSize.value !== ss.fontSize) {
@@ -5773,13 +5798,14 @@ watch(
     syncEditorDiagnosticCssVars();
     const themeColors = getCurrentCustomThemeColors();
     const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors, themePalette.value), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
-    if (!view.value || !codeMirrorTheme || !wordWrapComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     view.value.dispatch({
       effects: [
         codeMirrorTheme.reconfigure(themeExt),
         wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
+        lineNumbersComp.reconfigure(lineNumbersExtension(ss.showLineNumbers)),
         vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
         closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
         runGutterComp.reconfigure(runStatementGutterExtension()),
@@ -6007,15 +6033,17 @@ function openReplace(): boolean {
 
 function scrollCursorIntoView() {
   const preserveViewport = executionViewportOwnership.consumeCompletionPreservation();
-  if (!view.value || !editorViewModule || !editorIsActive || preserveViewport) return;
-  const pos = view.value.state.selection.main.head;
+  const currentView = view.value;
+  if (!currentView || !editorViewModule || !editorIsActive || preserveViewport) return;
+  const pos = currentView.state.selection.main.head;
+  if (isQueryEditorPositionVisible(pos, currentView.visibleRanges, currentView.viewport)) return;
   // Use "center" rather than "nearest": by the time this runs, the results pane has already
   // opened/resized and shrunk the editor viewport, so the cursor's old position is often no
   // longer visible. "nearest" then pins it right at the new viewport's edge (Fixes #5281: in a
   // long multi-statement file, the just-executed statement lands flush against the results pane
   // divider), which is exactly where it's hardest to see and re-click. Centering keeps it
   // comfortably visible so the user doesn't have to scroll to find/re-run it.
-  view.value.dispatch({
+  currentView.dispatch({
     effects: editorViewModule.EditorView.scrollIntoView(pos, { y: "center" }),
   });
 }

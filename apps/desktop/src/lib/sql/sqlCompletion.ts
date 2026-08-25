@@ -3372,10 +3372,12 @@ function buildTableItems(
       const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
       const applyName = qualifiedByContext ? quoteCompletionApplyIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
+      const schemaDetail = ambiguousTableName && table.schema ? `${table.schema}.${table.name}` : undefined;
+      const detail = table.detail && schemaDetail ? `${schemaDetail}  ${table.detail}` : (table.detail ?? schemaDetail ?? (table.type === "table" ? undefined : table.type));
       return {
         label: table.name,
         type: "table" as const,
-        detail: table.detail ?? (table.schema ? `${table.schema}.${table.name}` : table.type),
+        detail,
         apply: formatTableAliasApply(applyName, alias, databaseType, keywordCase),
         boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
         dedupeKey: table.applyName || ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,

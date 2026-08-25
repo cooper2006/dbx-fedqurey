@@ -4620,6 +4620,7 @@ async fn begin_transaction_session(
         Postgres(deadpool_postgres::Pool),
         Mysql(db::mysql::MySqlPool),
         Agent,
+        ExternalDriver,
     }
     let pool_handle = {
         let connections = state.connections.read().await;
@@ -4627,6 +4628,7 @@ async fn begin_transaction_session(
             PoolKind::Postgres(pg) => TxnPoolHandle::Postgres(pg.clone()),
             PoolKind::Mysql(mp, _) => TxnPoolHandle::Mysql(mp.clone()),
             PoolKind::Agent(_) if !consistent_snapshot => TxnPoolHandle::Agent,
+            PoolKind::ExternalDriver { .. } if !consistent_snapshot => TxnPoolHandle::ExternalDriver,
             _ => return Err("Manual transaction is not supported for this database type".to_string()),
         }
     }; // connections lock released here
@@ -4708,6 +4710,53 @@ async fn begin_transaction_session(
                     cleanup_guard,
                 },
                 agent_pool_key,
+            )
+        }
+        TxnPoolHandle::ExternalDriver => {
+            let client_session_id = format!("manual-txn-{}", uuid::Uuid::new_v4());
+            let external_pool_key =
+                state.get_or_create_pool_for_session(connection_id, pool_database, Some(&client_session_id)).await?;
+            let (config, session) = {
+                let connections = state.connections.read().await;
+                match connections.get(&external_pool_key) {
+                    Some(PoolKind::ExternalDriver { config, session, .. }) => (config.clone(), session.clone()),
+                    _ => {
+                        let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
+                        return Err("External driver connection not found for manual transaction".to_string());
+                    }
+                }
+            };
+            let begin_params = serde_json::json!({
+                "connection": config.as_ref(),
+                "database": database,
+                "schema": schema,
+            });
+            if let Err(error) = session
+                .invoke_with_timeout::<serde_json::Value>(
+                    "beginManualTransaction",
+                    begin_params,
+                    query_timeout_duration(Some(config.effective_query_timeout_secs())),
+                )
+                .await
+            {
+                let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
+                return Err(format!("BEGIN manual transaction failed: {error}"));
+            }
+            let Some(cleanup_guard) =
+                state.workload_session_pool_cleanup_guard(connection_id, pool_database, &client_session_id).await
+            else {
+                let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
+                return Err("Manual transaction requires a dedicated external driver session".to_string());
+            };
+            (
+                TxnConnection::ExternalDriver {
+                    session,
+                    config,
+                    client_session_id,
+                    database: pool_database.map(str::to_string),
+                    cleanup_guard,
+                },
+                external_pool_key,
             )
         }
     };
@@ -4800,9 +4849,24 @@ pub async fn execute_in_manual_transaction(
     schema: Option<&str>,
     max_rows: Option<usize>,
 ) -> Result<Vec<db::QueryResult>, String> {
-    execute_in_manual_transaction_with_options(state, txn_session_id, sql, database, schema, max_rows, false)
-        .await
-        .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+    execute_in_manual_transaction_with_options(
+        state,
+        txn_session_id,
+        sql,
+        database,
+        schema,
+        ManualTransactionExecutionOptions { max_rows, ..Default::default() },
+    )
+    .await
+    .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ManualTransactionExecutionOptions {
+    pub max_rows: Option<usize>,
+    pub table_data_preview: bool,
+    pub page_size: Option<usize>,
+    pub result_session_id: Option<String>,
 }
 
 pub async fn execute_in_manual_transaction_with_options(
@@ -4811,8 +4875,7 @@ pub async fn execute_in_manual_transaction_with_options(
     sql: &str,
     database: &str,
     schema: Option<&str>,
-    max_rows: Option<usize>,
-    table_data_preview: bool,
+    options: ManualTransactionExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
     const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS);
 
@@ -4833,8 +4896,20 @@ pub async fn execute_in_manual_transaction_with_options(
     if statements.is_empty() {
         return Ok(vec![ExecuteMultiResult::success_with_optional_server_large_values(
             empty_query_result(0),
-            table_data_preview,
+            options.table_data_preview,
         )]);
+    }
+    // A result-session cursor can only track one result set, so pagination is
+    // single-statement only. Multi-statement scripts predate pagination: keep
+    // the legacy sequential execution and ignore the pagination options rather
+    // than failing the whole script.
+    let options = if statements.len() != 1 && (options.page_size.is_some() || options.result_session_id.is_some()) {
+        ManualTransactionExecutionOptions { page_size: None, result_session_id: None, ..options }
+    } else {
+        options
+    };
+    if options.result_session_id.is_some() && options.page_size.is_none() {
+        return Err("Manual transaction result pagination requires a page size".to_string());
     }
 
     // Read-only check while the session is still in the map. If this fails the
@@ -4861,7 +4936,7 @@ pub async fn execute_in_manual_transaction_with_options(
     if let Some(session) = connection {
         let mut conn = session.connection.lock().await;
         let _ = rollback_manual_txn_connection(&mut conn).await;
-        release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
+        release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
         return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
 
@@ -4872,7 +4947,7 @@ pub async fn execute_in_manual_transaction_with_options(
             .map(|session| Arc::clone(&session.connection))
             .ok_or(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR)?
     };
-    let row_limit = max_rows.unwrap_or(MAX_ROWS).max(1);
+    let row_limit = options.max_rows.unwrap_or(MAX_ROWS).max(1);
     let mut results = Vec::with_capacity(statements.len());
 
     let mut conn = connection.lock().await;
@@ -4890,16 +4965,22 @@ pub async fn execute_in_manual_transaction_with_options(
                     database,
                     schema,
                     row_limit,
-                    table_data_preview,
+                    options.table_data_preview,
+                    options.page_size,
+                    options.result_session_id.as_deref(),
                 )
                 .await
+            }
+            TxnConnection::ExternalDriver { session, config, .. } => {
+                execute_manual_txn_external_driver_statement(session, config, statement, database, schema, row_limit)
+                    .await
             }
         };
         match result {
             Ok(query_result) => {
                 results.push(ExecuteMultiResult::success_with_optional_server_large_values(
                     query_result,
-                    table_data_preview,
+                    options.table_data_preview,
                 ));
             }
             Err(e) => {
@@ -4911,7 +4992,7 @@ pub async fn execute_in_manual_transaction_with_options(
                 };
                 if should_rollback {
                     let _ = rollback_manual_txn_connection(&mut conn).await;
-                    release_manual_txn_agent_pool(state, &connection_id, &mut conn).await;
+                    release_manual_txn_session_pool(state, &connection_id, &mut conn).await;
                 }
                 return Err(format!("Statement {} failed: {}. The manual transaction was rolled back.", i + 1, e));
             }
@@ -4944,6 +5025,20 @@ pub async fn stream_rows_in_manual_transaction<F>(
     txn_session_id: &str,
     sql: &str,
     batch_size: usize,
+    on_batch: F,
+) -> Result<u64, String>
+where
+    F: FnMut(Vec<Vec<serde_json::Value>>) -> Result<(), String> + Send,
+{
+    stream_rows_in_manual_transaction_with_cancel(state, txn_session_id, sql, batch_size, None, on_batch).await
+}
+
+pub(crate) async fn stream_rows_in_manual_transaction_with_cancel<F>(
+    state: &AppState,
+    txn_session_id: &str,
+    sql: &str,
+    batch_size: usize,
+    cancel_token: Option<CancellationToken>,
     mut on_batch: F,
 ) -> Result<u64, String>
 where
@@ -4973,30 +5068,46 @@ where
         return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
 
-    let connection = {
+    let (connection, pool_key, connection_id) = {
         let sessions = state.transaction_sessions.read().await;
         sessions
             .get(txn_session_id)
-            .map(|session| Arc::clone(&session.connection))
+            .map(|session| (Arc::clone(&session.connection), session.pool_key.clone(), session.connection_id.clone()))
             .ok_or(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR)?
     };
+    let operation_budget = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&connection_id)
+            .map(DbOperationBudget::from_connection_config)
+            .unwrap_or_else(DbOperationBudget::with_defaults)
+    };
+    let postgres_cancel_context = state.get_postgres_cancel_context(&pool_key).await;
     let batch_size = batch_size.max(1);
     let mut conn = connection.lock().await;
     let stream_result = match &mut *conn {
         TxnConnection::Postgres(conn) => {
             let mut batch = Vec::with_capacity(batch_size);
             let mut total_rows = 0_u64;
-            let result = db::postgres::stream_select_query_inner_unnamed(conn, sql, None, &mut |item| {
-                if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
-                    batch.push(row);
-                    total_rows += 1;
-                    if batch.len() >= batch_size {
-                        on_batch(std::mem::take(&mut batch))?;
-                        batch = Vec::with_capacity(batch_size);
+            let result = db::postgres::stream_select_query_inner_unnamed_with_cancel(
+                conn,
+                sql,
+                None,
+                &mut |item| {
+                    if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
+                        batch.push(row);
+                        total_rows += 1;
+                        if batch.len() >= batch_size {
+                            on_batch(std::mem::take(&mut batch))?;
+                            batch = Vec::with_capacity(batch_size);
+                        }
                     }
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+                cancel_token.as_ref(),
+                &operation_budget,
+                postgres_cancel_context.as_ref(),
+            )
             .await;
             match result {
                 Ok(_) if !batch.is_empty() => on_batch(batch).map(|_| total_rows),
@@ -5046,6 +5157,9 @@ where
         TxnConnection::Agent { .. } => {
             Err("Streaming rows inside an agent manual transaction is not supported".to_string())
         }
+        TxnConnection::ExternalDriver { .. } => {
+            Err("Streaming rows inside an external driver manual transaction is not supported".to_string())
+        }
     };
 
     if let Err(err) = &stream_result {
@@ -5054,8 +5168,13 @@ where
             sessions.remove(txn_session_id)
         };
         if let Some(session) = removed {
-            let _ = rollback_manual_txn_connection(&mut conn).await;
-            release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
+            let rollback_result =
+                rollback_manual_txn_connection_with_postgres_timeout(&mut conn, Some(operation_budget.cleanup_timeout))
+                    .await;
+            release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
+            if let Err(rollback_error) = rollback_result {
+                return Err(format!("{err}. Transaction cleanup failed: {rollback_error}"));
+            }
         }
         return Err(format!("{err}. Transaction was auto-rolled back."));
     }
@@ -5078,9 +5197,22 @@ where
 }
 
 async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), String> {
+    rollback_manual_txn_connection_with_postgres_timeout(conn, None).await
+}
+
+async fn rollback_manual_txn_connection_with_postgres_timeout(
+    conn: &mut TxnConnection,
+    postgres_timeout: Option<Duration>,
+) -> Result<(), String> {
     match conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            if let Some(timeout) = postgres_timeout {
+                db::postgres::execute_postgres_infra_statement(conn, "ROLLBACK", timeout, "manual_txn.rollback")
+                    .await
+                    .map_err(|error| format!("ROLLBACK failed: {error}"))?;
+            } else {
+                conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            }
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
@@ -5096,21 +5228,77 @@ async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), 
             // the pool map entry is cleaned up later.
             let _ = locked.disconnect().await;
         }
+        TxnConnection::ExternalDriver { session, config, .. } => {
+            match session
+                .invoke_with_timeout::<serde_json::Value>(
+                    "rollbackManualTransaction",
+                    serde_json::json!({ "connection": config.as_ref() }),
+                    query_timeout_duration(Some(config.effective_query_timeout_secs())),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if error.to_ascii_lowercase().contains("no manual transaction") => {}
+                Err(error) => return Err(format!("ROLLBACK failed: {error}")),
+            }
+        }
     }
     Ok(())
 }
 
-async fn release_manual_txn_agent_pool(state: &AppState, connection_id: &str, conn: &mut TxnConnection) {
-    let TxnConnection::Agent { client_session_id, database, cleanup_guard, .. } = conn else {
-        return;
+async fn release_manual_txn_session_pool(state: &AppState, connection_id: &str, conn: &mut TxnConnection) {
+    let (client_session_id, database, cleanup_guard) = match conn {
+        TxnConnection::Agent { client_session_id, database, cleanup_guard, .. }
+        | TxnConnection::ExternalDriver { client_session_id, database, cleanup_guard, .. } => {
+            (client_session_id, database, cleanup_guard)
+        }
+        _ => return,
     };
     if state.detach_client_session_pool(connection_id, database.as_deref(), client_session_id).await.unwrap_or(false) {
         cleanup_guard.disarm();
     }
 }
 
-fn manual_txn_agent_query_options(row_limit: usize, table_data_preview: bool) -> QueryExecutionOptions {
-    QueryExecutionOptions { max_rows: Some(row_limit.max(1)), table_data_preview, ..QueryExecutionOptions::default() }
+fn manual_txn_agent_query_options(
+    row_limit: usize,
+    table_data_preview: bool,
+    page_size: Option<usize>,
+    result_session_id: Option<&str>,
+) -> QueryExecutionOptions {
+    QueryExecutionOptions {
+        max_rows: Some(row_limit.max(1)),
+        table_data_preview,
+        page_size,
+        result_session_id: result_session_id.map(str::to_owned),
+        ..QueryExecutionOptions::default()
+    }
+}
+
+#[derive(Debug)]
+enum ManualTxnAgentQueryRequest {
+    Execute(serde_json::Value),
+    ExecutePage(serde_json::Value),
+    FetchPage(serde_json::Value),
+}
+
+fn manual_txn_agent_query_request(
+    sql: &str,
+    database: Option<&str>,
+    schema: Option<&str>,
+    options: QueryExecutionOptions,
+) -> ManualTxnAgentQueryRequest {
+    if let Some(session_id) = options.result_session_id.as_deref() {
+        return ManualTxnAgentQueryRequest::FetchPage(agent_fetch_query_page_params(
+            session_id,
+            options.page_size.unwrap_or(MAX_ROWS),
+        ));
+    }
+    if options.page_size.is_some() {
+        return ManualTxnAgentQueryRequest::ExecutePage(agent_execute_query_page_params(
+            sql, database, schema, options,
+        ));
+    }
+    ManualTxnAgentQueryRequest::Execute(agent_execute_query_params(sql, database, schema, options))
 }
 
 async fn execute_manual_txn_agent_statement(
@@ -5121,18 +5309,58 @@ async fn execute_manual_txn_agent_statement(
     schema: Option<&str>,
     row_limit: usize,
     table_data_preview: bool,
+    page_size: Option<usize>,
+    result_session_id: Option<&str>,
 ) -> Result<db::QueryResult, String> {
     let sql = sql_for_execution_context(db_type, statement, schema);
     let execution_schema = schema_for_execution_context(db_type, schema);
-    let options = manual_txn_agent_query_options(row_limit, table_data_preview);
-    let params =
-        agent_execute_query_params(&sql, Some(database).filter(|value| !value.is_empty()), execution_schema, options);
+    let options = manual_txn_agent_query_options(row_limit, table_data_preview, page_size, result_session_id);
+    let request = manual_txn_agent_query_request(
+        &sql,
+        Some(database).filter(|value| !value.is_empty()),
+        execution_schema,
+        options,
+    );
     let mut locked = client.lock().await;
-    locked
-        .execute_query_typed_with_timeout::<db::QueryResult>(params, None)
-        .await
+    let result = match request {
+        ManualTxnAgentQueryRequest::Execute(params) => {
+            locked.execute_query_typed_with_timeout::<db::QueryResult>(params, None).await
+        }
+        ManualTxnAgentQueryRequest::ExecutePage(params) => {
+            locked.execute_query_page_typed_with_timeout_and_cancel::<db::QueryResult>(params, None, None).await
+        }
+        ManualTxnAgentQueryRequest::FetchPage(params) => {
+            locked.fetch_query_page_typed_with_timeout_and_cancel::<db::QueryResult>(params, None, None).await
+        }
+    };
+    result
         .map(|result| truncate_result_with_max_rows(result, Some(row_limit.max(1))))
         .map_err(|error| error.into_legacy_string())
+}
+
+async fn execute_manual_txn_external_driver_statement(
+    session: &Arc<crate::plugins::PluginDriverSession>,
+    config: &Arc<crate::models::connection::ConnectionConfig>,
+    statement: &str,
+    database: &str,
+    schema: Option<&str>,
+    row_limit: usize,
+) -> Result<db::QueryResult, String> {
+    let timeout_secs = config.effective_query_timeout_secs();
+    let options = QueryExecutionOptions {
+        max_rows: Some(row_limit.max(1)),
+        timeout_secs: Some(timeout_secs),
+        ..QueryExecutionOptions::default()
+    };
+    let params = external_driver_query_params(config.as_ref(), statement, database, schema, &options);
+    session
+        .invoke_with_timeout::<db::QueryResult>(
+            "executeInManualTransaction",
+            params,
+            query_timeout_duration(Some(timeout_secs)),
+        )
+        .await
+        .map(|result| truncate_result_with_max_rows(result, Some(row_limit.max(1))))
 }
 
 /// Spawn a background task that removes and rolls back a transaction session
@@ -5291,8 +5519,18 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
                 .map_err(|error| format!("COMMIT failed: {error}"))?;
             let _ = locked.disconnect().await;
         }
+        TxnConnection::ExternalDriver { session, config, .. } => {
+            session
+                .invoke_with_timeout::<serde_json::Value>(
+                    "commitManualTransaction",
+                    serde_json::json!({ "connection": config.as_ref() }),
+                    query_timeout_duration(Some(config.effective_query_timeout_secs())),
+                )
+                .await
+                .map_err(|error| format!("COMMIT failed: {error}"))?;
+        }
     }
-    release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
+    release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
 
     log::info!("[query][manual_txn:commit] session_id={}", txn_session_id);
     Ok(db::QueryResult {
@@ -5321,7 +5559,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 
     let mut conn = session.connection.lock().await;
     rollback_manual_txn_connection(&mut conn).await?;
-    release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
+    release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
 
     log::info!("[query][manual_txn:rollback] session_id={}", txn_session_id);
     Ok(db::QueryResult {
@@ -7032,6 +7270,113 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn external_driver_manual_transaction_executes_commits_and_releases_session_pool() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-manual-txn-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeInManualTransaction\"'*)\n      echo executeInManualTransaction >> '{}'\n      printf '{{\"id\":%s,\"result\":{{\"columns\":[\"value\"],\"column_types\":[],\"column_sortables\":[],\"rows\":[[42]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false,\"session_id\":null,\"has_more\":false}}}}\\n' \"$id\"\n      ;;\n    *'\"method\":\"beginManualTransaction\"'*)\n      echo beginManualTransaction >> '{}'\n      printf '{{\"id\":%s,\"result\":{{\"ok\":true}}}}\\n' \"$id\"\n      ;;\n    *'\"method\":\"commitManualTransaction\"'*)\n      echo commitManualTransaction >> '{}'\n      printf '{{\"id\":%s,\"result\":{{\"ok\":true}}}}\\n' \"$id\"\n      ;;\n  esac\ndone\n",
+                calls.display(),
+                calls.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+                .await
+                .expect("plugin should start"),
+        );
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-conn".to_string();
+        config.database = Some("dbx_test".to_string());
+        config.connection_string = Some("jdbc:test".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+
+        session
+            .invoke::<serde_json::Value>(
+                "beginManualTransaction",
+                serde_json::json!({ "connection": &config, "database": "dbx_test" }),
+            )
+            .await
+            .unwrap();
+
+        let client_session_id = "manual-txn-test";
+        let pool_key = "jdbc-conn:session:manual-txn-test";
+        let config = Arc::new(config);
+        state.connections.write().await.insert(
+            pool_key.to_string(),
+            PoolKind::ExternalDriver {
+                driver_id: "jdbc".to_string(),
+                config: config.clone(),
+                session: session.clone(),
+            },
+        );
+        let cleanup_guard =
+            state.workload_session_pool_cleanup_guard("jdbc-conn", Some("dbx_test"), client_session_id).await.unwrap();
+        state.transaction_sessions.write().await.insert(
+            "txn-test".to_string(),
+            TransactionSession {
+                connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::ExternalDriver {
+                    session,
+                    config,
+                    client_session_id: client_session_id.to_string(),
+                    database: Some("dbx_test".to_string()),
+                    cleanup_guard,
+                })),
+                pool_key: pool_key.to_string(),
+                last_activity: std::time::Instant::now(),
+                busy: false,
+                connection_id: "jdbc-conn".to_string(),
+                database: "dbx_test".to_string(),
+                schema: None,
+            },
+        );
+
+        let results =
+            execute_in_manual_transaction(&state, "txn-test", "SELECT 42", "dbx_test", None, Some(10)).await.unwrap();
+        assert_eq!(results[0].rows, vec![vec![serde_json::json!(42)]]);
+        commit_manual_transaction(&state, "txn-test").await.unwrap();
+        assert!(!state.connections.read().await.contains_key(pool_key));
+        assert_eq!(
+            std::fs::read_to_string(&calls).unwrap(),
+            "beginManualTransaction\nexecuteInManualTransaction\ncommitManualTransaction\n"
+        );
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn external_driver_query_page_falls_back_to_legacy_execute_query() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -7647,7 +7992,7 @@ for line in sys.stdin:
             "SELECT * FROM documents",
             Some("ORCL"),
             Some("APP"),
-            manual_txn_agent_query_options(250, true),
+            manual_txn_agent_query_options(250, true, None, None),
         );
 
         assert_eq!(params["maxRows"], 250);
@@ -7866,6 +8211,148 @@ for line in sys.stdin:
 
         assert_eq!(params["sessionId"], "session-1");
         assert_eq!(params["pageSize"], 500);
+    }
+
+    #[test]
+    fn manual_transaction_agent_query_uses_cursor_for_later_pages() {
+        let first_page = manual_txn_agent_query_request(
+            "SELECT ID FROM APP.EVENTS ORDER BY ID",
+            Some("ORCL"),
+            Some("APP"),
+            manual_txn_agent_query_options(10_000, false, Some(100), None),
+        );
+        let ManualTxnAgentQueryRequest::ExecutePage(first_params) = first_page else {
+            panic!("first page must start an Agent query cursor");
+        };
+        assert_eq!(first_params["pageSize"], 100);
+        assert_eq!(first_params["maxRows"], 10_000);
+
+        let second_page = manual_txn_agent_query_request(
+            "SELECT ID FROM APP.EVENTS ORDER BY ID",
+            Some("ORCL"),
+            Some("APP"),
+            manual_txn_agent_query_options(10_000, false, Some(100), Some("oracle-go-1")),
+        );
+        let ManualTxnAgentQueryRequest::FetchPage(second_params) = second_page else {
+            panic!("later pages must continue the existing Agent query cursor");
+        };
+        assert_eq!(second_params["sessionId"], "oracle-go-1");
+        assert_eq!(second_params["pageSize"], 100);
+        assert!(second_params.get("sql").is_none());
+    }
+
+    /// Spawns a fake Python agent and registers a manual transaction session in
+    /// the app state so `execute_in_manual_transaction_with_options` can run
+    /// end to end without a live database.
+    #[cfg(unix)]
+    async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
+        use std::io::Write;
+
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            script,
+            r#"import json
+import sys
+
+print(json.dumps({{"ready": True}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "execute_query":
+        sql = request.get("params", {{}}).get("sql", "")
+        row = [sql]
+    else:
+        # commit_manual_transaction / rollback_manual_transaction / disconnect
+        row = []
+    result = {{
+        "columns": ["stmt"],
+        "column_types": [],
+        "column_sortables": [],
+        "rows": [row],
+        "affected_rows": 0,
+        "execution_time_ms": 1,
+        "truncated": False,
+        "session_id": None,
+        "has_more": False
+    }}
+    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+"#
+        )
+        .unwrap();
+        script.flush().unwrap();
+
+        let client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new("python3").with_args([script.path().to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("dbx-manual-txn-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(db_type);
+        config.id = "agent-conn".to_string();
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let txn_session_id = uuid::Uuid::new_v4().to_string();
+        let client_session_id = format!("manual-txn-{}", uuid::Uuid::new_v4());
+        // The session pool is not registered in the state map; on commit or
+        // rollback the detach reports "not found" and the cleanup guard is
+        // disarmed, matching production flows where the pool was already gone.
+        let cleanup_guard = state
+            .workload_session_pool_cleanup_guard("agent-conn", None, &client_session_id)
+            .await
+            .expect("agent connections get a session-scoped cleanup guard");
+        state.transaction_sessions.write().await.insert(
+            txn_session_id.clone(),
+            TransactionSession {
+                connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::Agent {
+                    client: Arc::new(crate::db::agent_driver::PooledAgentClient::new(client)),
+                    client_session_id,
+                    database: None,
+                    cleanup_guard,
+                })),
+                pool_key: "agent-conn".to_string(),
+                last_activity: std::time::Instant::now(),
+                busy: false,
+                connection_id: "agent-conn".to_string(),
+                database: "ORCL".to_string(),
+                schema: None,
+            },
+        );
+        (state, txn_session_id, dir)
+    }
+
+    /// Regression: multi-statement scripts under a manual transaction must keep
+    /// executing sequentially even when pagination options are set — they are
+    /// ignored instead of failing the script (single-statement pagination stays
+    /// cursor-based).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manual_transaction_multi_statement_script_ignores_pagination_options() {
+        let (state, txn_session_id, dir) = manual_transaction_test_state(DatabaseType::Oracle).await;
+
+        let results = execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            "SELECT 1 FROM DUAL; SELECT 2 FROM DUAL",
+            "ORCL",
+            None,
+            ManualTransactionExecutionOptions { max_rows: Some(100), page_size: Some(100), ..Default::default() },
+        )
+        .await
+        .expect("multi-statement script executes sequentially");
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].result.rows[0][0], serde_json::json!("SELECT 1 FROM DUAL"));
+        assert_eq!(results[1].result.rows[0][0], serde_json::json!("SELECT 2 FROM DUAL"));
+        // Both statements ran on the plain execute path — no cursor session was
+        // opened, so nothing leaks a query cursor on the agent.
+        assert!(results.iter().all(|result| result.result.session_id.is_none()));
+
+        assert!(rollback_manual_transaction(&state, &txn_session_id).await.is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
