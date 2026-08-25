@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const releaseScript = join(repoRoot, "scripts/release.mjs");
 const packagesWorkflow = join(repoRoot, ".github/workflows/mcp-release.yml");
+const vsignConfigPath = join(repoRoot, "src-tauri/tauri.vsign.conf.json");
 
 function runRelease(args, env = {}) {
   return spawnSync(process.execPath, [releaseScript, ...args], {
@@ -110,4 +111,15 @@ test("launcher packages bypass filtered publishing for provenance", () => {
   assert.match(workflow, /pnpm publish "\.\/packages\/cli" --access public --provenance --no-git-checks/);
   assert.match(workflow, /pnpm publish "\.\/packages\/mcp-server" --access public --provenance --no-git-checks/);
   assert.doesNotMatch(workflow, /pnpm --filter "@dbx-app\/(?:cli|mcp-server)" publish/);
+});
+
+test("Tauri VSign script resolves from the src-tauri working directory", () => {
+  const config = JSON.parse(readFileSync(vsignConfigPath, "utf8"));
+  const args = config.bundle.windows.signCommand.args;
+  const fileArgumentIndex = args.indexOf("-File");
+
+  assert.notEqual(fileArgumentIndex, -1);
+  const scriptPath = args[fileArgumentIndex + 1];
+  assert.equal(typeof scriptPath, "string");
+  assert.equal(existsSync(resolve(repoRoot, "src-tauri", scriptPath)), true);
 });

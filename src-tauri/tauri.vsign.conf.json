@@ -10,7 +10,7 @@
           "-ExecutionPolicy",
           "Bypass",
           "-File",
-          ".github/scripts/vsign-sign.ps1",
+          "../.github/scripts/vsign-sign.ps1",
           "%1"
         ]
       }
