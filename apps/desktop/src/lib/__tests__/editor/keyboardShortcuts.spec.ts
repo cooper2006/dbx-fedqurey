@@ -97,9 +97,9 @@ describe("keyboard shortcut matching", () => {
   });
 
   it("matches only the configured go-to-column shortcut", () => {
-    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true }, { goToColumn: "Mod+G" })).toBe(true);
-    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true, shiftKey: true }, { goToColumn: "Mod+G" })).toBe(false);
-    expect(isGoToColumnShortcut({ key: "j", ctrlKey: true }, { goToColumn: "Mod+G" })).toBe(false);
+    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(true);
+    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true, shiftKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(false);
+    expect(isGoToColumnShortcut({ key: "j", ctrlKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(false);
   });
 
   it("does not match an empty or composing go-to-column shortcut", () => {

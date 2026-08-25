@@ -211,8 +211,8 @@ export function isDeleteCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?:
   return matchesShortcut(event, actionShortcut("deleteCurrentRow", shortcuts));
 }
 
-export function isGoToColumnShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
-  return matchesShortcut(event, actionShortcut("goToColumn", shortcuts));
+export function isGoToColumnShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("goToColumn", shortcuts, platform), platform);
 }
 
 export function isGoToFirstPageShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
