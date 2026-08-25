@@ -85,6 +85,8 @@ jobs:
       - name: Commit JDBC plugin version bump
         if: steps.bump.outputs.changed == 'true'
         shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
         run: |
           TMP_DIR="$(mktemp -d)"
           cp plugins/jdbc/build.gradle "$TMP_DIR/build.gradle"
@@ -92,6 +94,9 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "${RELEASE_TOKEN}" ]; then
+            git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
           git fetch origin main
           git switch -C jdbc-plugin-version-bump origin/main
           cp "$TMP_DIR/build.gradle" plugins/jdbc/build.gradle
