@@ -91,10 +91,15 @@ jobs:
 
       - name: Apply and push agent version bump
         shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "${RELEASE_TOKEN}" ]; then
+            git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
           git fetch origin main --no-tags
           git switch --detach origin/main
 
