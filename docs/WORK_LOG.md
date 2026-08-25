@@ -280,3 +280,16 @@ a4e699a03 fix(federated): P0 fixes for default schema mapping
 **决定**：回滚到原始代码。Connection 名称通常不包含 `$` 或 `\`，原代码在实际使用中是安全的。
 
 **后续**：如遇到 connectionId 含特殊字符的问题，需重新设计替换逻辑（例如使用 `Matcher.appendReplacement`/`appendTail` 手动构建 replacement）。
+
+
+---
+
+## 2026-08-25
+
+### 从 upstream/main 同步代码（保留联邦查询）
+
+- 上游基线：`dfe93fe93` → `44dc2a88f`（57 个新提交）
+- 备份分支：`backup/pre-merge-20260825-092553`
+- 冲突：无冲突，自动合并完成
+- 联邦查询核心文件完整保留（federated.rs、calcite_agent.rs、Calcite Agent JAR、前端 federated/）
+- 上游主要变更：data grid 增强（编辑快捷键、JSON 值对比、分页快捷键等）、编辑器改进、迁移支持
