@@ -390,6 +390,9 @@ fn format_export_sql_literal_typed(
     column_type: Option<&str>,
     sqlserver_unicode_string: bool,
 ) -> String {
+    if is_postgres_bytea_export_column(database_type, column_type) {
+        return format_postgres_bytea_export_literal(value);
+    }
     if is_postgres_json_export_column(database_type, column_type) {
         return format_postgres_json_export_literal(value);
     }
@@ -434,6 +437,21 @@ fn format_export_sql_literal_typed(
         }
     }
     format_export_sql_literal_for_database(value, database_type)
+}
+
+fn format_postgres_bytea_export_literal(value: &Value) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    if let Some(text) = value.as_str() {
+        if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            if hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return format!("decode('{hex}','hex')");
+            }
+        }
+    }
+    let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    quote_postgres_string_literal(&text)
 }
 
 fn format_postgres_json_export_literal(value: &Value) -> String {
@@ -1197,6 +1215,16 @@ fn is_postgres_json_export_column(database_type: Option<DatabaseType>, column_ty
                 matches!(normalized.as_str(), "json" | "jsonb")
                     || normalized.ends_with(".json")
                     || normalized.ends_with(".jsonb")
+            })
+            .unwrap_or(false)
+}
+
+fn is_postgres_bytea_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+        && column_type
+            .map(|column_type| {
+                let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
+                normalized == "bytea" || normalized.ends_with(".bytea")
             })
             .unwrap_or(false)
 }
@@ -3894,6 +3922,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(statements, vec!["INSERT INTO \"public\".\"notes\" (\"body\") VALUES (E'line1\\nline2\\tend');"]);
+    }
+
+    #[test]
+    fn postgres_bytea_export_decodes_valid_dbx_hex_values() {
+        const ZIP_HEX: &str = "504b03041400080008007496195d00000000000000000000000009000900746573742e6a736f6e5554050001bd738d6a013100ceff7b0a2020227469746c65223a202254657374222c0a20202274657874223a202248656c6c6f2c20776f726c6421220a7d0a504b07083f90bb503600000031000000504b010214031400080008007496195d3f90bb503600000031000000090009000000000000000000b48100000000746573742e6a736f6e5554050001bd738d6a504b0506000000000100010040000000760000000000";
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("attachments".to_string()),
+            qualified_table_name: None,
+            columns: vec![
+                "zip_content".to_string(),
+                "empty_content".to_string(),
+                "uppercase_content".to_string(),
+                "nullable_content".to_string(),
+                "plain_text".to_string(),
+            ],
+            column_types: vec![
+                Some("bytea".to_string()),
+                Some("bytea".to_string()),
+                Some("bytea".to_string()),
+                Some("bytea".to_string()),
+                Some("text".to_string()),
+            ],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(format!("0x{ZIP_HEX}")), json!("0x"), json!("0XABcd"), Value::Null, json!("0xABcd")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![format!(
+                "INSERT INTO \"public\".\"attachments\" (\"zip_content\", \"empty_content\", \"uppercase_content\", \"nullable_content\", \"plain_text\") VALUES (decode('{ZIP_HEX}','hex'), decode('','hex'), decode('ABcd','hex'), NULL, '0xABcd');"
+            )]
+        );
+    }
+
+    #[test]
+    fn postgres_bytea_export_quotes_invalid_or_non_string_values() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("attachments".to_string()),
+            qualified_table_name: None,
+            columns: vec!["odd_hex".to_string(), "invalid_hex".to_string(), "unexpected_number".to_string()],
+            column_types: vec![Some("bytea".to_string()), Some("bytea".to_string()), Some("bytea".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("0xabc"), json!("0xgg"), json!(7)]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO \"public\".\"attachments\" (\"odd_hex\", \"invalid_hex\", \"unexpected_number\") VALUES ('0xabc', '0xgg', '7');"
+            ]
+        );
     }
 
     #[test]
