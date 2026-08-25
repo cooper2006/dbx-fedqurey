@@ -28,4 +28,14 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(dialogSource).toContain("watch(previewRef, async (el) => {");
     expect(dialogSource).toContain("cleanupPreviewEditor();");
   });
+
+  it("updates preview line-number visibility from the unsaved editor draft", () => {
+    expect(dialogSource).toContain("showLineNumbers: editShowLineNumbers.value");
+    expect(dialogSource).toContain('import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";');
+    expect(dialogSource).toContain('let previewLineNumbersComp: import("@codemirror/state").Compartment | null = null;');
+    expect(dialogSource).toContain('const previewBasicSetup = (basicSetup as readonly import("@codemirror/state").Extension[]).slice(2);');
+    expect(dialogSource).toContain("previewLineNumbersComp.of(buildPreviewLineNumbersExtension(ss.showLineNumbers))");
+    expect(dialogSource).toContain("previewLineNumbersComp.reconfigure(buildPreviewLineNumbersExtension(ss.showLineNumbers))");
+    expect(dialogSource).toContain("return buildQueryEditorLineNumbersExtension(previewLineNumbersFactory, enabled");
+  });
 });
