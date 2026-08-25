@@ -194,10 +194,11 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: true } as any).openTabsRestoreMode).toBe("all");
   });
 
-  it("prompts for unsaved SQL on quit by default and preserves explicit modes", () => {
-    expect(normalizeEditorSettings({}).appCloseUnsavedTabsMode).toBe("prompt");
+  it("keeps unsaved SQL drafts on quit by default and preserves explicit modes", () => {
+    expect(normalizeEditorSettings({}).appCloseUnsavedTabsMode).toBe("keep-drafts");
+    expect(normalizeEditorSettings({ appCloseUnsavedTabsMode: "prompt" }).appCloseUnsavedTabsMode).toBe("prompt");
     expect(normalizeEditorSettings({ appCloseUnsavedTabsMode: "keep-drafts" }).appCloseUnsavedTabsMode).toBe("keep-drafts");
-    expect(normalizeEditorSettings({ appCloseUnsavedTabsMode: "invalid" as any }).appCloseUnsavedTabsMode).toBe("prompt");
+    expect(normalizeEditorSettings({ appCloseUnsavedTabsMode: "invalid" as any }).appCloseUnsavedTabsMode).toBe("keep-drafts");
   });
 
   it("preserves CNB, migrates AtomGit to CNB, and rejects invalid values", () => {

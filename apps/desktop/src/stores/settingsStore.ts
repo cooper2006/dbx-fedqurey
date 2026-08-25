@@ -749,7 +749,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sqlSemanticDiagnosticsEnabled: SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED,
   confirmDangerousSqlExecution: true,
   confirmUnsavedSqlClose: true,
-  appCloseUnsavedTabsMode: "prompt",
+  appCloseUnsavedTabsMode: "keep-drafts",
   savedSqlOpenTargetMode: "saved",
   compactTabTitle: false,
   tabLayout: "scroll",
