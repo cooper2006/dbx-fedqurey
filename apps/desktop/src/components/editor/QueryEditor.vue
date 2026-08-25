@@ -133,6 +133,7 @@ import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
+import { createQueryEditorExecutionShortcutBindings, createQueryEditorPostCompositionKeyGuard } from "@/lib/editor/queryEditorExecutionShortcut";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -608,6 +609,8 @@ let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
+const postCompositionKeyGuard = createQueryEditorPostCompositionKeyGuard();
+let postCompositionKeyGuardCleanup: (() => void) | null = null;
 
 function runStatementGutterExtension(): import("@codemirror/state").Extension {
   const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
@@ -1924,8 +1927,14 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
   const binding = (shortcut: string, run: (view: EditorViewType) => boolean) => (shortcut ? [{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run }] : []);
   // Keep the shortcut on the shared execution-mode path (selection priority + configured cursor/all target),
   // but bypass the picker so the keyboard shortcut always executes directly instead of popping a dialog.
-  const executeBindings = props.hideExecutionControls ? [] : binding(shortcuts.executeSql, () => requestExecute({ bypassPicker: true }));
-  const executeInNewResultTabBindings = props.hideExecutionControls ? [] : binding(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab);
+  const executeBindings = props.hideExecutionControls
+    ? []
+    : createQueryEditorExecutionShortcutBindings(
+        shortcuts.executeSql,
+        () => requestExecute({ bypassPicker: true }),
+        (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
+      );
+  const executeInNewResultTabBindings = props.hideExecutionControls ? [] : createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab, (currentView) => shouldBlockExecutionShortcut(undefined, currentView));
   return [
     Prec?.high(
       codeMirrorKeymap.of([
@@ -5641,6 +5650,7 @@ onMounted(async () => {
   });
 
   view.value = new EditorView({ state, parent: editorElement });
+  postCompositionKeyGuardCleanup = postCompositionKeyGuard.attach(view.value.contentDOM);
   registerEditorScrollbarPointerGuard(view.value);
   view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, {
     passive: true,
@@ -5965,6 +5975,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("keyup", clearTableNavigationHoverOnModifierRelease);
   window.removeEventListener("blur", clearTableNavigationHover);
   contextMenuPointerCleanup?.();
+  postCompositionKeyGuardCleanup?.();
+  postCompositionKeyGuardCleanup = null;
   zoomCommitScheduler.dispose();
   view.value?.destroy();
 });
@@ -6121,12 +6133,17 @@ function acceptGutterExecutionViewport(requestId: number) {
   return executionViewportOwnership.acceptRequest(requestId);
 }
 
+function shouldBlockExecutionShortcut(event?: KeyboardEvent, currentView: EditorViewType | null = view.value): boolean {
+  return (currentView ? isEditorComposing(currentView) : false) || (event ? postCompositionKeyGuard.blocks(event) : false);
+}
+
 defineExpose({
   openSearch,
   openReplace,
   scrollCursorIntoView,
   beginExecutionViewportTracking,
   acceptGutterExecutionViewport,
+  shouldBlockExecutionShortcut,
   requestExecute,
   requestExecuteInNewResultTab,
   pasteClipboardAsSqlInCondition,

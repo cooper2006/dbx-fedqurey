@@ -1120,6 +1120,10 @@ function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
+function shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent) {
+  return queryEditorRef.value?.shouldBlockExecutionShortcut?.(event) ?? false;
+}
+
 function acceptQueryEditorExecutionViewport(requestId: number) {
   return queryEditorRef.value?.acceptGutterExecutionViewport(requestId) ?? false;
 }
@@ -1164,6 +1168,7 @@ defineExpose({
   handleModRTarget,
   requestQueryEditorExecute,
   requestQueryEditorExecuteInNewResultTab,
+  shouldBlockQueryEditorExecutionShortcut,
   acceptQueryEditorExecutionViewport,
   pasteClipboardAsSqlInCondition,
   applyTableStructureChanges,
