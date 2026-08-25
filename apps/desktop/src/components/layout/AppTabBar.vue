@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -721,6 +722,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>
+                    <TabExecutionStatus :tab="tab" />
                     <input
                       v-if="editingTabId === tab.id"
                       v-model="editingTitle"
@@ -843,6 +845,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 >
                   <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
                   <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  <TabExecutionStatus :tab="tab" />
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                     <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
@@ -927,6 +930,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>
+                    <TabExecutionStatus :tab="tab" />
                     <input
                       v-if="editingTabId === tab.id"
                       v-model="editingTitle"
@@ -995,6 +999,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 >
                   <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
                   <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  <TabExecutionStatus :tab="tab" />
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                     <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
