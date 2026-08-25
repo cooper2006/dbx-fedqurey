@@ -1257,6 +1257,7 @@ test("discard all pending close changes closes the full pending batch", () => {
 
 test("app close confirmation discards dirty SQL without closing the tab", () => {
   setActivePinia(createPinia());
+  useSettingsStore().editorSettings.appCloseUnsavedTabsMode = "prompt";
   const store = useQueryStore();
   const tabId = store.createTab("conn-1", "db", "a.sql");
   const tab = store.tabs.find((item) => item.id === tabId);
@@ -1310,6 +1311,7 @@ test("disabled unsaved SQL close confirmation skips app close prompt", () => {
 
 test("discard all app close changes keeps tabs open and clean", () => {
   setActivePinia(createPinia());
+  useSettingsStore().editorSettings.appCloseUnsavedTabsMode = "prompt";
   const store = useQueryStore();
   const firstId = store.createTab("conn-1", "db", "a.sql");
   const first = store.tabs.find((item) => item.id === firstId);
