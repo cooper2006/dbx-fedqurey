@@ -4931,6 +4931,7 @@ onMounted(async () => {
   buildSqlCompletionExtension = () =>
     autocompletion({
       activateOnTyping: true,
+      selectOnOpen: false,
       compareCompletions: (a, b) => compareSqlCompletions(a, b, settingsStore.editorSettings.sortCompletionColumnsAlphabetically),
       override: [async (context: CompletionContext) => provideSqlCompletions(context)],
     });
