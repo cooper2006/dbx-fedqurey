@@ -131,6 +131,7 @@ import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLin
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
+import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -202,6 +203,7 @@ const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
 const COMPLETION_DEBOUNCE_DELAY_MS = 150;
 const COMPLETION_TAB_RETRY_DELAY_MS = 16;
 const COMPLETION_TAB_MAX_WAIT_MS = COMPLETION_DEBOUNCE_DELAY_MS + COMPLETION_REMOTE_LATENCY_BUDGET_MS + 100;
+const COMPLETION_ENTER_MAX_WAIT_MS = 125;
 // Internal rollback switch: flip to false to route completion, diagnostics, and navigation through the legacy SQL context path.
 const SEMANTIC_SQL_COMPLETION_ENABLED = true;
 
@@ -554,6 +556,8 @@ let buildSqlSemanticHighlightExtension: (() => import("@codemirror/state").Exten
 let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snippetCompletion;
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
+let codeMirrorSelectedCompletionIndex: typeof import("@codemirror/autocomplete").selectedCompletionIndex | null = null;
+let codeMirrorSelectFirstCompletion: import("@codemirror/view").Command | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
 let codeMirrorCloseCompletion: typeof import("@codemirror/autocomplete").closeCompletion | null = null;
 let codeMirrorInsertCompletionText: typeof import("@codemirror/autocomplete").insertCompletionText | null = null;
@@ -574,6 +578,7 @@ let codeMirrorToggleBlockComment: typeof import("@codemirror/commands").toggleBl
 let codeMirrorDefaultKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let codeMirrorToggleFold: typeof import("@codemirror/language").toggleFold | null = null;
 let pendingCompletionTabTimer: ReturnType<typeof setTimeout> | null = null;
+let cancelPendingCompletionEnter: (() => void) | null = null;
 let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null = null;
 let setPreviewRangeEffect:
   | import("@codemirror/state").StateEffectType<{
@@ -1925,7 +1930,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       codeMirrorKeymap.of([
         {
           key: "Enter",
-          run: insertNewlineWithoutCompletion,
+          run: handleEnter,
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
@@ -1995,6 +2000,36 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
   ];
 }
 
+function handleEnter(view: EditorViewType): boolean {
+  clearPendingCompletionEnter();
+  if (settingsStore.editorSettings.selectFirstCompletionOnOpen && codeMirrorCompletionStatus) {
+    let cancelRetry: (() => void) | null = null;
+    const result = acceptSelectedCompletionWithRetry(view, {
+      completionStatus: codeMirrorCompletionStatus,
+      acceptCompletion: codeMirrorAcceptCompletion,
+      selectedCompletionIndex: codeMirrorSelectedCompletionIndex,
+      selectFirstCompletion: codeMirrorSelectFirstCompletion,
+      retryDelayMs: COMPLETION_TAB_RETRY_DELAY_MS,
+      maxWaitMs: COMPLETION_ENTER_MAX_WAIT_MS,
+      onUnavailable: () => insertNewlineWithoutCompletion(view),
+      onSettled: () => {
+        if (cancelPendingCompletionEnter === cancelRetry) cancelPendingCompletionEnter = null;
+      },
+    });
+    if (result.handled) {
+      cancelRetry = result.cancel ?? null;
+      cancelPendingCompletionEnter = cancelRetry;
+      return true;
+    }
+  }
+  return insertNewlineWithoutCompletion(view);
+}
+
+function clearPendingCompletionEnter() {
+  cancelPendingCompletionEnter?.();
+  cancelPendingCompletionEnter = null;
+}
+
 function insertNewlineWithoutCompletion(view: EditorViewType): boolean {
   codeMirrorCloseCompletion?.(view);
   suppressNextSqlCompletionAutoStartUntil = Date.now() + 750;
@@ -2018,7 +2053,7 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   // of the indent edit itself, so it must never hijack this or a following Tab.
   if (view.state.selection.ranges.every((range) => range.empty)) {
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
-    if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return true;
+    if (completionStatus === "active" && acceptSelectedOrFirstCompletion(view, codeMirrorAcceptCompletion, codeMirrorSelectedCompletionIndex, codeMirrorSelectFirstCompletion)) return true;
     if (completionStatus) return waitForCompletionTab(view);
   }
   return codeMirrorNextSnippetField?.(view) ?? false;
@@ -2042,7 +2077,7 @@ function waitForCompletionTab(view: EditorViewType): boolean {
     if (view.state.doc !== initialDoc || selectionRanges.length !== initialSelectionRanges.length || selectionRanges.some((range, index) => !range.empty || range.anchor !== initialSelectionRanges[index]?.anchor || range.head !== initialSelectionRanges[index]?.head)) return;
 
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
-    if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return;
+    if (completionStatus === "active" && acceptSelectedOrFirstCompletion(view, codeMirrorAcceptCompletion, codeMirrorSelectedCompletionIndex, codeMirrorSelectFirstCompletion)) return;
     if (completionStatus && Date.now() - startedAt < COMPLETION_TAB_MAX_WAIT_MS) {
       pendingCompletionTabTimer = setTimeout(retry, COMPLETION_TAB_RETRY_DELAY_MS);
       return;
@@ -4661,7 +4696,7 @@ onMounted(async () => {
     },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
-    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion },
+    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion, moveCompletionSelection, selectedCompletionIndex },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, toggleBlockComment, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree, highlightingFor, syntaxTree },
     { searchKeymap },
@@ -4698,6 +4733,8 @@ onMounted(async () => {
   setSqlDiagnosticsEffect = StateEffect.define<SqlSemanticDiagnostic[]>();
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
+  codeMirrorSelectedCompletionIndex = selectedCompletionIndex;
+  codeMirrorSelectFirstCompletion = moveCompletionSelection(true);
   codeMirrorCloseCompletion = closeCompletion;
   codeMirrorStartCompletion = startCompletion;
   codeMirrorInsertCompletionText = insertCompletionText;
@@ -4931,7 +4968,7 @@ onMounted(async () => {
   buildSqlCompletionExtension = () =>
     autocompletion({
       activateOnTyping: true,
-      selectOnOpen: false,
+      selectOnOpen: settingsStore.editorSettings.selectFirstCompletionOnOpen,
       compareCompletions: (a, b) => compareSqlCompletions(a, b, settingsStore.editorSettings.sortCompletionColumnsAlphabetically),
       override: [async (context: CompletionContext) => provideSqlCompletions(context)],
     });
@@ -5841,7 +5878,7 @@ watch(
 );
 
 watch(
-  () => [settingsStore.editorSettings.snippets, settingsStore.editorSettings.sortCompletionColumnsAlphabetically],
+  () => [settingsStore.editorSettings.snippets, settingsStore.editorSettings.sortCompletionColumnsAlphabetically, settingsStore.editorSettings.selectFirstCompletionOnOpen],
   () => {
     completionEpoch++;
     if (!view.value || !completionComp || !buildSqlCompletionExtension) return;
@@ -5879,6 +5916,7 @@ function pauseQueryEditorBackgroundWork() {
   flushEditorViewport();
   flushEditorSelection();
   clearTableNavigationHover();
+  clearPendingCompletionEnter();
   clearPendingCompletionTab();
   executionViewportOwnership.reset();
   editorIsActive = false;
