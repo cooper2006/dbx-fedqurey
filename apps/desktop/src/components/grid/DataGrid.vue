@@ -230,6 +230,7 @@ import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDa
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
+import { buildDataGridSavedRowRefreshPlan, dataGridSavedRowRefreshPatches } from "@/lib/dataGrid/dataGridSavedRowRefresh";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -567,6 +568,14 @@ let preservedDetailsOnNextResult: {
   cellDialog?: PersistedDataGridSelection;
   rowDialog?: PersistedDataGridSelection;
   columnDialog?: PersistedDataGridSelection;
+} | null = null;
+let preservedViewportAnchorOnNextResult: {
+  anchor: {
+    row?: PersistedDataGridSelection;
+    fallbackDisplayIndex: number;
+    offsetWithinRow: number;
+  };
+  sourceResult: QueryResult;
 } | null = null;
 
 watch(
@@ -3506,6 +3515,7 @@ watch(
     if (!loading && prevLoading && isRefreshingData.value) {
       isRefreshingData.value = false;
       if (preservedSelectionOnNextResult?.sourceResult === props.result) preservedSelectionOnNextResult = null;
+      if (preservedViewportAnchorOnNextResult?.sourceResult === props.result) preservedViewportAnchorOnNextResult = null;
       const total = paginationTotalRowCount.value;
       if (!total || total <= 0) return;
       const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
@@ -3863,6 +3873,88 @@ type DisplayRowRef =
       status: RowStatus;
     };
 
+async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; columns: readonly string[]; rows: readonly (readonly CellValue[])[] }): Promise<boolean> {
+  const tableMeta = props.tableMeta;
+  const connectionId = props.connectionId;
+  if (!tableMeta || !connectionId) return false;
+
+  const planResult = buildDataGridSavedRowRefreshPlan({
+    context: props.context,
+    infiniteScroll: infiniteScrollEnabled.value,
+    filterActive: !!currentWhereInput() || hasLocalColumnFilters.value || (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value),
+    orderActive: !!orderByInput.value.trim() || !!sortCol.value,
+    columns: request.columns,
+    sourceColumns: props.sourceColumns,
+    rows: request.rows,
+    primaryKeys: tableMeta.primaryKeys,
+    dirtyRows: request.dirtyRows,
+  });
+  if (!planResult.eligible || planResult.plan.sourceIndexes.length === 0) return false;
+
+  const identityConditions: string[] = [];
+  for (const sourceIndex of planResult.plan.sourceIndexes) {
+    const row = request.rows[sourceIndex];
+    if (!row) return false;
+    const conditions: string[] = [];
+    for (let identityIndex = 0; identityIndex < planResult.plan.identityColumns.length; identityIndex++) {
+      const columnName = planResult.plan.identityColumns[identityIndex]!;
+      const value = row[planResult.plan.identityColumnIndexes[identityIndex]!] ?? null;
+      const condition = await buildDataGridContextFilterCondition({
+        databaseType: resolvedDatabaseType.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
+        columnName,
+        columnInfo: tableMeta.columns.find((column) => column.name.toLocaleLowerCase() === columnName.toLocaleLowerCase()),
+        mode: value === null ? "is-null" : "equals",
+        value,
+      });
+      if (!condition) return false;
+      conditions.push(`(${condition})`);
+    }
+    identityConditions.push(`(${conditions.join(" AND ")})`);
+  }
+
+  const sql = await buildTableSelectSql({
+    databaseType: resolvedDatabaseType.value,
+    driverProfile: connectionStore.getConfig(connectionId)?.driver_profile,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
+    catalog: tableMeta.catalog,
+    database: tableMeta.database,
+    schema: tableMeta.schema,
+    tableName: tableMeta.tableName,
+    tableType: tableMeta.tableType,
+    columns: tableMeta.columns.map((column) => column.name),
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    primaryKeys: tableMeta.primaryKeys,
+    ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
+    whereInput: identityConditions.join(" OR "),
+    limit: planResult.plan.sourceIndexes.length + 1,
+    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+  });
+  const refreshed = await api.executeQuery(connectionId, props.executionDatabase ?? props.database ?? "", sql, tableMeta.schema ?? props.schema, undefined, {
+    maxRows: planResult.plan.sourceIndexes.length + 1,
+    fetchSize: planResult.plan.sourceIndexes.length + 1,
+    pageSize: planResult.plan.sourceIndexes.length + 1,
+  });
+  const patches = dataGridSavedRowRefreshPatches(planResult.plan, request.columns, props.sourceColumns, refreshed.columns, refreshed.rows);
+  if (!patches) return false;
+
+  const refreshedSourceIndexes = new Set(patches.map((patch) => patch.sourceIndex));
+  for (const patch of patches) props.result.rows[patch.sourceIndex] = patch.row;
+  if (props.result.large_value_cells || refreshed.large_value_cells) {
+    props.result.large_value_cells = [
+      ...(props.result.large_value_cells ?? []).filter((cell) => !refreshedSourceIndexes.has(cell.row_index)),
+      ...patches.flatMap((patch) => (refreshed.large_value_cells ?? []).filter((cell) => cell.row_index === patch.refreshedRowIndex).map((cell) => ({ ...cell, row_index: patch.sourceIndex }))),
+    ];
+  }
+  if (props.result.spatial_values || refreshed.spatial_values) {
+    props.result.spatial_values ??= props.result.rows.map(() => []);
+    for (const patch of patches) props.result.spatial_values[patch.sourceIndex] = [...(refreshed.spatial_values?.[patch.refreshedRowIndex] ?? [])];
+  }
+  clearCellFormatCache();
+  scheduleCanvasDraw();
+  return true;
+}
+
 const editor = useDataGridEditor({
   result: computed(() => props.result),
   editable: computed(() => props.editable),
@@ -3889,6 +3981,7 @@ const editor = useDataGridEditor({
   currentPage,
   cacheKey: computed(() => props.pendingStateKey ?? props.cacheKey),
   onResultPayloadMutated: () => queryStore.invalidateResultEstimateForPayload(props.result),
+  refreshSavedRows,
   onCellValueChanged: invalidateVisibleLargeValuePreviewCell,
   prepareFullReload,
   emit,
@@ -4341,11 +4434,13 @@ function resetInfiniteScrollState() {
 }
 
 function prepareFullReload() {
+  const viewportAnchor = captureViewportAnchorForRefresh();
   if (infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   }
   const selection = captureCurrentSelectionForRefresh();
   preservedSelectionOnNextResult = selection ? { selection, sourceResult: props.result } : null;
+  preservedViewportAnchorOnNextResult = viewportAnchor ? { anchor: viewportAnchor, sourceResult: props.result } : null;
   preservedDetailsOnNextResult = captureDetailsForRefresh();
   preserveTransposeOnNextResult.value = showTranspose.value;
   isRefreshingData.value = true;
@@ -4379,13 +4474,8 @@ async function onToolbarCommit() {
 }
 
 function onToolbarRollback() {
-  preserveTransposeOnNextResult.value = showTranspose.value;
   discardChanges();
-  // Reset infinite scroll state on rollback
-  if (infiniteScrollEnabled.value) {
-    resetInfiniteScrollState();
-  }
-  isRefreshingData.value = true;
+  prepareFullReload();
   emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
@@ -5434,6 +5524,51 @@ function captureRowTargetForRefresh(rowId: number | null): PersistedDataGridSele
       selectingAll: false,
     }) ?? undefined
   );
+}
+
+function captureViewportAnchorForRefresh(): { row?: PersistedDataGridSelection; fallbackDisplayIndex: number; offsetWithinRow: number } | null {
+  if (showTranspose.value || displayItems.value.length === 0) return null;
+  const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
+  if (!scroller) return null;
+  const rowHeight = useCanvasGridRows.value ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
+  const fallbackDisplayIndex = Math.max(0, Math.min(displayItems.value.length - 1, Math.floor(scroller.scrollTop / rowHeight)));
+  const item = displayItems.value[fallbackDisplayIndex];
+  return {
+    row: item ? captureRowTargetForRefresh(item.id) : undefined,
+    fallbackDisplayIndex,
+    offsetWithinRow: Math.max(0, scroller.scrollTop - fallbackDisplayIndex * rowHeight),
+  };
+}
+
+function restoreViewportAnchorAfterRefresh(anchor: { row?: PersistedDataGridSelection; fallbackDisplayIndex: number; offsetWithinRow: number }) {
+  if (showTranspose.value || displayItems.value.length === 0) return;
+  let displayRowIndex = anchor.fallbackDisplayIndex;
+  if (anchor.row) {
+    const restored = restoreDataGridSelection({
+      snapshot: anchor.row,
+      columns: props.result.columns,
+      sourceColumns: props.sourceColumns,
+      rows: props.result.rows,
+      visibleColumnIndexes: visibleColumnIndexes.value,
+      displayItems: displayItems.value,
+    });
+    if (restored?.kind === "rows") displayRowIndex = restored.scrollRowIndex;
+  }
+  displayRowIndex = Math.max(0, Math.min(displayItems.value.length - 1, displayRowIndex));
+  nextTick(() => {
+    requestAnimationFrame(() => {
+      const canvasMode = useCanvasGridRows.value;
+      const scroller = canvasMode ? canvasScrollerElement() : gridScrollerElement();
+      if (!scroller) return;
+      const rowHeight = canvasMode ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
+      const nextScrollTop = Math.max(0, Math.min(displayRowIndex * rowHeight + anchor.offsetWithinRow, scroller.scrollHeight - scroller.clientHeight));
+      const virtualScroller = scrollerRef.value;
+      if (!canvasMode && virtualScroller && !(virtualScroller instanceof HTMLElement)) virtualScroller.scrollToPosition?.(nextScrollTop);
+      else scroller.scrollTop = nextScrollTop;
+      if (canvasMode) syncCanvasViewport();
+      else updateGridVerticalScrollbar(scroller);
+    });
+  });
 }
 
 function captureColumnTargetForRefresh(columnIndex: number | null): PersistedDataGridSelection | undefined {
@@ -9870,6 +10005,8 @@ watch(
   (result, previousResult) => {
     const selectionSnapshot = preservedSelectionOnNextResult?.selection;
     preservedSelectionOnNextResult = null;
+    const viewportAnchorSnapshot = preservedViewportAnchorOnNextResult?.anchor;
+    preservedViewportAnchorOnNextResult = null;
     const detailsSnapshot = preservedDetailsOnNextResult;
     preservedDetailsOnNextResult = null;
     const shouldPreserveTranspose = preserveTransposeOnNextResult.value;
@@ -9908,6 +10045,7 @@ watch(
     exitTransaction();
     if (selectionSnapshot) restoreSelectionAfterRefresh(selectionSnapshot);
     if (detailsSnapshot) restoreDetailsAfterRefresh(detailsSnapshot);
+    if (viewportAnchorSnapshot) restoreViewportAnchorAfterRefresh(viewportAnchorSnapshot);
   },
 );
 
