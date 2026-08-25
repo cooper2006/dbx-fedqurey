@@ -47,6 +47,7 @@ import {
   getSqlCompletionResultValidFor,
   isSqlCompletionSuppressedContext,
   isSqlLikeCompletionStatement,
+  prepareSqlCompletionReplacement,
   recordCompletionSelection,
   selectStarResultColumnsMatch,
   shouldAutoOpenSqlCompletion,
@@ -3327,6 +3328,11 @@ function buildCompletionResult(items: QueryCompletionItem[], from: number, valid
   };
 }
 
+function buildSqlCompletionResult(items: SqlCompletionItem[], completionContext: SqlCompletionContext, fullDoc: string, position: number) {
+  const replacement = prepareSqlCompletionReplacement(fullDoc, position, completionContext, items);
+  return buildCompletionResult(replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+}
+
 // CodeMirror's built-in matcher only matches single-character queries against
 // the label start, and cannot match pinyin initials against Han labels. Our
 // provider already filters and ranks items itself (substring + pinyin), so
@@ -3679,7 +3685,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+      return buildSqlCompletionResult(items, completionContext, fullDoc, position);
     }
 
     const useDatabase = props.databaseType === "sqlserver" ? sqlServerUseDatabaseBeforeCursor(fullDoc, position) : undefined;
@@ -3740,7 +3746,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+      return buildSqlCompletionResult(items, completionContext, fullDoc, position);
     }
 
     const tableNameCompletion = isTableNameCompletionContext(completionContext);
@@ -4047,7 +4053,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+  return buildSqlCompletionResult(items, completionContext, fullDoc, position);
 }
 
 function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
@@ -4528,7 +4534,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+  return buildSqlCompletionResult(items, completionContext, fullDoc, position);
 }
 
 function isReferencedTableQualifier(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {
