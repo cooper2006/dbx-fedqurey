@@ -10154,6 +10154,7 @@ function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleC
   }
   clearRowSelection();
   if (!cellIsSelected(rowIndex, visibleColIdx)) {
+    clearCellSelection();
     selectSingleCell(rowIndex, visibleColIdx);
     contextSelectionIsSynthetic.value = true;
   } else {
