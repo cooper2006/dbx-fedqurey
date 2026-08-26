@@ -4652,7 +4652,7 @@ export const useQueryStore = defineStore("query", () => {
           const sourceRange = commandRange && options?.sourceOffset !== undefined ? { from: options.sourceOffset + commandRange.from, to: options.sourceOffset + commandRange.to } : undefined;
           try {
             const result = await api.redisExecuteCommand(executionConnectionId, currentDb, command, skipSafety);
-            allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command), command, undefined, undefined, sourceRange)));
+            allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, command), command, undefined, undefined, sourceRange)));
             // Track db switches from SELECT N so later commands in the same batch run on the right db.
             currentDb = nextRedisCommandDb(currentDb, command, result.value);
             // Write commands (SET/DEL/...) mutate the key set — drop the cached key-name completion
