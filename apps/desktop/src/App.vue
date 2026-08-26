@@ -66,6 +66,7 @@ import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPa
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind, QueryTab, TreeNode } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
+import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
 import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
@@ -143,6 +144,7 @@ const DriverStorePage = defineAsyncComponent(() => import("@/components/config/D
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
+const AiRunsClosePromptDialog = defineAsyncComponent(() => import("@/components/layout/AiRunsClosePromptDialog.vue"));
 const LoginPage = defineAsyncComponent(() => import("@/components/auth/LoginPage.vue"));
 const QuickOpenDialog = defineAsyncComponent(() => import("@/components/quick-open/QuickOpenDialog.vue"));
 const TabSwitcherDialog = defineAsyncComponent(() => import("@/components/tabs/TabSwitcherDialog.vue"));
@@ -154,6 +156,8 @@ type AiAssistantHandle = {
   setPrompt: (text: string) => void;
   addTableMention: (target: { schema?: string; table: string }) => void;
   clearContextReferences: () => void;
+  /** Opens a conversation by id (used by the background-run toast, §9). */
+  selectConversationById: (conversationId: string) => void;
 };
 
 const { t } = useI18n();
@@ -180,7 +184,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
     await connectionStore.updateConnection(config);
   }
 });
-const { message: toastMessage, visible: toastVisible, toast } = useToast();
+const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
 const { activeCount: activeBackgroundTaskCount } = useExportTracker();
 const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
@@ -211,6 +215,10 @@ const {
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
+const activeAiRunCount = computed(() => (isDesktop ? activeDesktopAiRuns().length : 0));
+/** Runs waiting for a write confirmation — the panel-entry badge shows these
+ *  with a higher-priority indicator (parent PRD §4 line 71 / §9). */
+const awaitingAiRunCount = computed(() => (isDesktop ? activeDesktopAiRuns().filter((run) => run.status === "awaiting_write_confirmation").length : 0));
 const { mcpUpdateAvailable, refreshMcpUpdateStatus, handleMcpStatusChanged } = useMcpUpdateBadge({
   isDesktop,
   updateNotificationsEnabled: () => settingsStore.editorSettings.updateNotificationsEnabled,
@@ -307,6 +315,9 @@ const pendingPrevActiveTabId = ref<string | null>(null);
 const pendingSaveShouldCloseTab = ref(true);
 const pendingAppCloseAction = ref<AppCloseAction | null>(null);
 const pendingCloseActionChoice = ref(false);
+const showAiRunsClosePrompt = ref(false);
+const blockingAiRunCount = computed(() => (isDesktop ? blockingDesktopAiRunsForQuit().length : 0));
+let aiRunsQuitConfirmed = false;
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
 const tabNavigationHistory = ref(createTabNavigationHistory());
@@ -953,6 +964,16 @@ function openAiPanel() {
   openRightSidebarPanel("ai");
 }
 
+/** A background AI run reached a terminal/confirmation state while the panel
+ *  was closed. Opens the panel and selects the run's conversation (parent PRD
+ *  §4 line 71 / §9 clickable toast). */
+function handleAiRunNotify(event: Event) {
+  const conversationId = (event as CustomEvent).detail?.conversationId as string | undefined;
+  if (!conversationId) return;
+  openRightSidebarPanel("ai");
+  invokeWhenAiReady((handle) => handle.selectConversationById(conversationId));
+}
+
 function analyzeHistoryWithAi(entry: HistoryEntry) {
   const connectionId = entry.connection_id || activeTab.value?.connectionId;
   if (!connectionId) {
@@ -1088,10 +1109,18 @@ function cancelPendingSaveAndClose() {
 function cancelPendingAppClose() {
   pendingAppCloseAction.value = null;
   pendingCloseActionChoice.value = false;
+  showAiRunsClosePrompt.value = false;
+  aiRunsQuitConfirmed = false;
   pendingSaveShouldCloseTab.value = true;
 }
 
 async function finishPendingAppClose(action: AppCloseAction) {
+  if (action === "quit" && !aiRunsQuitConfirmed && blockingAiRunCount.value > 0) {
+    pendingAppCloseAction.value = action;
+    showAiRunsClosePrompt.value = true;
+    return;
+  }
+  aiRunsQuitConfirmed = false;
   if (pendingCloseActionChoice.value) {
     pendingCloseActionChoice.value = false;
     showCloseActionPrompt.value = true;
@@ -1118,6 +1147,13 @@ async function finishPendingAppClose(action: AppCloseAction) {
   await disposeRuntimeBeforeClose();
   await queryStore.flushPendingPersist().catch(() => undefined);
   await performCloseAction(action);
+}
+
+function confirmQuitWithActiveAiRuns() {
+  const action = pendingAppCloseAction.value ?? "quit";
+  showAiRunsClosePrompt.value = false;
+  aiRunsQuitConfirmed = true;
+  void finishPendingAppClose(action);
 }
 
 function continuePendingAppCloseAfterSave() {
@@ -2811,6 +2847,7 @@ onMounted(async () => {
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.addEventListener("dbx:activate-query-surface", activateQuerySurface);
   window.addEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
+  window.addEventListener("dbx:ai-run-notify", handleAiRunNotify);
   if (isDesktop) {
     document.addEventListener("contextmenu", handleContextMenu);
   }
@@ -2886,6 +2923,7 @@ onUnmounted(() => {
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.removeEventListener("dbx:activate-query-surface", activateQuerySurface);
   window.removeEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
+  window.removeEventListener("dbx:ai-run-notify", handleAiRunNotify);
   document.removeEventListener("contextmenu", handleContextMenu);
   window.clearTimeout(sqlLibraryFlyAnimationTimer);
 });
@@ -2900,6 +2938,8 @@ onUnmounted(() => {
           :is-dark="isDark"
           :theme-mode="themeMode"
           :show-ai-panel="showAiPanel"
+          :active-ai-run-count="activeAiRunCount"
+          :awaiting-ai-run-count="awaitingAiRunCount"
           :show-history="showHistory"
           :show-sql-library="showSqlLibraryPanel"
           :sql-library-save-feedback-id="sqlLibrarySaveFeedbackId"
@@ -3241,6 +3281,7 @@ onUnmounted(() => {
         />
         <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />
+        <AiRunsClosePromptDialog v-if="isDesktop && showAiRunsClosePrompt" v-model:open="showAiRunsClosePrompt" :count="blockingAiRunCount" @cancel="cancelPendingAppClose" @quit="confirmQuitWithActiveAiRuns" />
         <QuickOpenDialog :open="showQuickOpen" @update:open="showQuickOpen = $event" @select="handleQuickOpenSelect" />
         <TabSwitcherDialog :open="showTabSwitcher" :tabs="tabSwitcherTabs" :selected-index="tabSwitcherIndex" :shortcut-hint="tabSwitcherShortcutHint" @update:open="handleTabSwitcherOpenChange" @update:selected-index="tabSwitcherIndex = $event" @select="handleTabSwitcherSelect" />
       </div>
@@ -3259,8 +3300,11 @@ onUnmounted(() => {
           @animationend="finishSqlLibraryFlyAnimation(sqlLibraryFlyAnimation.id)"
         />
         <Transition name="toast">
-          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 w-max max-w-[90vw] sm:max-w-3xl mx-auto z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text whitespace-pre-wrap break-words">
-            {{ toastMessage }}
+          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 mx-auto z-99999 w-max max-w-[90vw] sm:max-w-3xl px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text whitespace-pre-wrap break-words">
+            <span>{{ toastMessage }}</span>
+            <button v-if="toastAction" type="button" class="ml-3 shrink-0 rounded border border-background/40 bg-background/10 px-2 py-0.5 text-xs font-medium hover:bg-background/20" @click="toastAction.onClick()">
+              {{ toastAction.label }}
+            </button>
           </div>
         </Transition>
       </Teleport>
