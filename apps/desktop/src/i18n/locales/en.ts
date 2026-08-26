@@ -963,7 +963,7 @@ export default {
       configuredDescription: "Shows information known from the form first. A successful test adds server version and driver metadata.",
       testedDescription: "This information comes from the connection used by the latest successful test.",
       productName: "DBMS",
-      productVersion: "DBMS version",
+      productVersion: "Server version",
       currentDatabase: "Current database",
       serverComment: "Server comment",
       serverCharset: "Server charset",

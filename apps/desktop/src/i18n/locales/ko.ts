@@ -855,7 +855,7 @@ export default withEnglishFallback({
       configuredDescription: "먼저 양식에서 알려진 정보를 표시합니다. 성공적인 테스트는 서버 버전과 드라이버 메타데이터를 추가합니다.",
       testedDescription: "이 정보는 가장 최근 성공한 테스트에 사용된 연결에서 가져왔습니다.",
       productName: "DBMS",
-      productVersion: "DBMS 버전",
+      productVersion: "서버 버전",
       currentDatabase: "현재 데이터베이스",
       serverComment: "서버 주석",
       serverCharset: "서버 문자셋",

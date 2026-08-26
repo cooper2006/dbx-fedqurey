@@ -887,7 +887,7 @@ export default withEnglishFallback({
       configuredDescription: "先显示表单中可确定的信息；测试成功后会补充服务器返回的版本和驱动元数据。",
       testedDescription: "以下信息来自本次成功测试使用的连接。",
       productName: "数据库管理系统",
-      productVersion: "数据库版本",
+      productVersion: "服务端版本",
       currentDatabase: "当前数据库",
       serverComment: "服务器说明",
       serverCharset: "服务器字符集",

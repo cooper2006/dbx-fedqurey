@@ -1007,7 +1007,7 @@ export default withEnglishFallback({
       configuredDescription: "Exibe as informações que podem ser determinadas no formulário; após um teste bem-sucedido, serão complementadas com a versão e os metadados do driver retornados pelo servidor.",
       testedDescription: "As informações abaixo são da conexão usada neste teste bem-sucedido.",
       productName: "Sistema de Gerenciamento de Banco de Dados",
-      productVersion: "Versão do banco de dados",
+      productVersion: "Versão do servidor",
       currentDatabase: "Banco de dados atual",
       serverComment: "Descrição do servidor",
       serverCharset: "Charset do servidor",

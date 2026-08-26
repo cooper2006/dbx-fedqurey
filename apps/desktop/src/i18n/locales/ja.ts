@@ -1006,7 +1006,7 @@ export default withEnglishFallback({
       configuredDescription: "まずフォームで確定可能な情報を表示します。テスト成功後、サーバーから返されたバージョンとドライバーのメタデータが補足されます。",
       testedDescription: "以下の情報は、今回の成功したテストで使用された接続からのものです。",
       productName: "データベース管理システム",
-      productVersion: "データベースバージョン",
+      productVersion: "サーバーバージョン",
       currentDatabase: "現在のデータベース",
       serverComment: "サーバーコメント",
       serverCharset: "サーバー文字セット",

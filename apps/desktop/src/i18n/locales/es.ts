@@ -1008,7 +1008,7 @@ export default withEnglishFallback({
       configuredDescription: "Muestra primero la información que se puede determinar desde el formulario; después de una prueba exitosa, se complementa con la versión devuelta por el servidor y los metadatos del controlador.",
       testedDescription: "La siguiente información proviene de la conexión utilizada para esta prueba exitosa.",
       productName: "Sistema de gestión de bases de datos",
-      productVersion: "Versión de la base de datos",
+      productVersion: "Versión del servidor",
       currentDatabase: "Base de datos actual",
       serverComment: "Comentario del servidor",
       serverCharset: "Conjunto de caracteres del servidor",

@@ -1006,7 +1006,7 @@ export default withEnglishFallback({
       configuredDescription: "Mostra prima le informazioni determinabili dal modulo; dopo un test riuscito, vengono aggiunte la versione restituita dal server e i metadati del driver.",
       testedDescription: "Le seguenti informazioni provengono dalla connessione utilizzata per questo test riuscito.",
       productName: "Sistema di gestione database",
-      productVersion: "Versione database",
+      productVersion: "Versione del server",
       currentDatabase: "Database corrente",
       serverComment: "Commento server",
       serverCharset: "Set di caratteri del server",

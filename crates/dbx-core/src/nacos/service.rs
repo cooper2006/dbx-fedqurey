@@ -1,8 +1,17 @@
 use std::future::Future;
 
 use crate::connection::AppState;
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{DatabaseConnectionInfo, DatabaseType};
 use crate::nacos::types::*;
+
+pub fn database_info_from_connection(info: &NacosConnectionInfo) -> Option<DatabaseConnectionInfo> {
+    let product_version = info.server_version.clone().filter(|value| !value.trim().is_empty());
+    Some(DatabaseConnectionInfo {
+        product_name: Some("Nacos".to_string()),
+        product_version,
+        ..DatabaseConnectionInfo::default()
+    })
+}
 
 async fn refresh_access_control_after_mutation(admin: &std::sync::Arc<dyn crate::nacos::port::NacosAdmin>) {
     admin.invalidate_access_control_capabilities();

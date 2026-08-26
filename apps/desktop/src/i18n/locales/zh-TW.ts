@@ -1006,7 +1006,7 @@ export default withEnglishFallback({
       configuredDescription: "先顯示表單中可確定的資訊；測試成功後會補充伺服器回傳的版本和驅動元數據。",
       testedDescription: "以下資訊來自本次成功測試使用的連線。",
       productName: "資料庫管理系統",
-      productVersion: "資料庫版本",
+      productVersion: "伺服器版本",
       currentDatabase: "目前資料庫",
       serverComment: "伺服器說明",
       serverCharset: "伺服器字元集",
