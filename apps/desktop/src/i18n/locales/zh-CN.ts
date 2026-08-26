@@ -4712,6 +4712,7 @@ export default withEnglishFallback({
     createFieldRequired: "请输入 hash 字段",
     createScoreInvalid: "请输入有效分数",
     jsonModuleNotAvailable: "该 Redis 服务器未加载 ReJSON 模块",
+    field: "字段",
     fieldRequired: "请输入字段名",
     valueRequired: "请输入值",
     memberRequired: "请输入成员",

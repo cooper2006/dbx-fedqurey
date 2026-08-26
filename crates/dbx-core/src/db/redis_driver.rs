@@ -2956,6 +2956,194 @@ where
     redis::cmd("HDEL").arg(key).arg(field).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
+/// Atomically update a hash field, optionally moving it to a new name.
+///
+/// The operation is intentionally implemented as one Lua script rather than
+/// as an HSET/HDEL pair.  That keeps destination collision checks and the
+/// source deletion in the same server-side critical section.  Hash-field
+/// expiry commands were introduced after hashes themselves, so the script
+/// probes them with `pcall` and preserves expiry when the server supports
+/// HTTL/HEXPIRE while remaining usable on older Redis versions.  Permission
+/// errors are surfaced instead of being mistaken for an unsupported command,
+/// since silently dropping a field TTL would be data loss.
+pub async fn hash_field_update<C>(
+    con: &mut C,
+    key: &[u8],
+    old_field: &str,
+    new_field: &str,
+    value: &str,
+) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    const SCRIPT: &str = r#"
+        local key = KEYS[1]
+        local old_field = ARGV[1]
+        local new_field = ARGV[2]
+        local value = ARGV[3]
+
+        -- Keep enough source state to undo a destination write if a later
+        -- command fails.  EVAL itself is atomic, but Redis does not roll back
+        -- writes made before a Lua runtime error.
+        if redis.call('HEXISTS', key, old_field) == 0 then
+            return 0
+        end
+        local old_value = redis.call('HGET', key, old_field)
+        if old_value == false then
+            return 0
+        end
+        if old_field ~= new_field and redis.call('HEXISTS', key, new_field) == 1 then
+            return -1
+        end
+
+        if old_field ~= new_field then
+            -- The collision check established that new_field is absent. Probe
+            -- HDEL before writing so a restricted HDEL permission cannot
+            -- leave both fields behind after the later source delete.
+            local delete_probe = redis.pcall('HDEL', key, new_field)
+            if type(delete_probe) == 'table' and delete_probe.err ~= nil then
+                return -3
+            end
+        end
+
+        local function optional_expiry_error(reply)
+            if type(reply) ~= 'table' or reply.err == nil then
+                return false
+            end
+            local detail = string.lower(reply.err)
+            return string.find(detail, 'unknown command', 1, true) ~= nil
+                or string.find(detail, 'syntax error', 1, true) ~= nil
+                or string.find(detail, 'unsupported', 1, true) ~= nil
+        end
+
+        -- HTTL returns an array containing -1 (persistent), -2 (missing), or
+        -- the remaining seconds.  Unsupported commands are deliberately
+        -- ignored so Redis versions without hash-field expiry still work.
+        local source_ttl = -2
+        local ttl_reply = redis.pcall('HTTL', key, 'FIELDS', 1, old_field)
+        if type(ttl_reply) == 'table' and ttl_reply.err ~= nil then
+            if not optional_expiry_error(ttl_reply) then
+                return -3
+            end
+        elseif type(ttl_reply) == 'table' and ttl_reply[1] ~= nil then
+            source_ttl = tonumber(ttl_reply[1])
+            if source_ttl == nil or source_ttl < -2 then
+                return -3
+            end
+            -- The source can expire between the initial HGET and HTTL. Do
+            -- not create a new field when the probe already says it is gone.
+            if source_ttl == -2 then
+                return 0
+            end
+            -- HTTL rounds down to seconds. HEXPIRE 0 deletes a field, so an
+            -- imminent expiry must abort before HSET rather than losing data.
+            if source_ttl == 0 then
+                return -3
+            end
+        end
+
+        local function restore_source()
+            local restored = redis.pcall('HSET', key, old_field, old_value)
+            if type(restored) == 'table' and restored.err ~= nil then
+                return false
+            end
+            if source_ttl > 0 then
+                local expiry = redis.pcall('HEXPIRE', key, source_ttl, 'FIELDS', 1, old_field)
+                if type(expiry) == 'table' and expiry.err ~= nil and not optional_expiry_error(expiry) then
+                    return false
+                end
+            end
+            return true
+        end
+
+        local function apply_source_expiry(field)
+            if source_ttl < 0 then
+                return true
+            end
+            local expiry = redis.pcall('HEXPIRE', key, source_ttl, 'FIELDS', 1, field)
+            if type(expiry) == 'table' and expiry.err ~= nil then
+                -- A missing command is expected on Redis versions before
+                -- hash-field expiry.  Other errors must fail safely.
+                return optional_expiry_error(expiry)
+            end
+            return type(expiry) == 'table' and tonumber(expiry[1]) == 1
+        end
+
+        local written = redis.pcall('HSET', key, new_field, value)
+        if type(written) == 'table' and written.err ~= nil then
+            return -3
+        end
+
+        if not apply_source_expiry(new_field) then
+            if old_field == new_field then
+                restore_source()
+            else
+                redis.pcall('HDEL', key, new_field)
+            end
+            return -3
+        end
+
+        if old_field == new_field then
+            return 1
+        end
+
+        local deleted = redis.pcall('HDEL', key, old_field)
+        if type(deleted) == 'table' and deleted.err ~= nil then
+            redis.pcall('HDEL', key, new_field)
+            return -3
+        end
+        if tonumber(deleted) ~= 1 then
+            redis.pcall('HDEL', key, new_field)
+            return 0
+        end
+        return 2
+    "#;
+
+    let result = redis::cmd("EVAL")
+        .arg(SCRIPT)
+        .arg(1)
+        .arg(key)
+        .arg(old_field)
+        .arg(new_field)
+        .arg(value)
+        .query_async::<i64>(con)
+        .await;
+
+    let result = match result {
+        Ok(result) => result,
+        Err(error) if is_hash_field_update_acl_compatibility_error(&error) => {
+            return Err(
+                "Atomic Redis hash field updates require the Redis EVAL and hash command permissions. Ask an administrator to grant them."
+                    .to_string(),
+            );
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+
+    match result {
+        1 | 2 => Ok(()),
+        0 => Err("The Redis hash field no longer exists. Refresh and try again.".to_string()),
+        -1 => Err("A Redis hash field with the new name already exists.".to_string()),
+        -3 => Err("Redis hash field update failed before completion.".to_string()),
+        _ => Err("Unexpected result while updating Redis hash field.".to_string()),
+    }
+}
+
+fn is_hash_field_update_acl_compatibility_error(error: &redis::RedisError) -> bool {
+    if error.code() != Some("NOPERM") {
+        return false;
+    }
+
+    let detail = error.detail().unwrap_or_default().to_ascii_lowercase();
+    detail.contains("eval")
+        || detail.contains("hexists")
+        || detail.contains("hget")
+        || detail.contains("hset")
+        || detail.contains("hdel")
+        || detail.contains("httl")
+        || detail.contains("hexpire")
+}
+
 pub async fn list_push<C>(con: &mut C, key: &[u8], value: &str, ttl: Option<i64>) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -5118,6 +5306,106 @@ mod tests {
         assert_eq!(con.command_count("HTTL"), 1);
         assert_eq!(con.command_count("HSET"), 1);
         assert_eq!(con.command_count("HEXPIRE"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_uses_one_atomic_script_and_carries_field_ttl() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(2)]);
+
+        super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap();
+
+        assert_eq!(con.command_count("EVAL"), 1);
+        // HSET/HDEL/HTTL/HEXPIRE are script body text, not independent
+        // requests.  This guards the atomic path and its TTL handling.
+        assert_eq!(con.command_count("HSET"), 0);
+        assert_eq!(con.command_count("HDEL"), 0);
+        assert!(con.commands[0].contains("redis.call('HEXISTS'"));
+        assert!(con.commands[0].contains("redis.pcall('HTTL'"));
+        assert!(con.commands[0].contains("redis.pcall('HEXPIRE'"));
+        assert!(con.commands[0].contains("redis.pcall('HDEL'"));
+        assert!(con.commands[0].contains("local delete_probe"));
+        assert!(con.commands[0].contains("if source_ttl == 0 then"));
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_rejects_destination_collisions_without_follow_up_commands() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(-1)]);
+
+        let error = super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap_err();
+
+        assert!(error.contains("new name already exists"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_reports_a_missing_source_field() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap_err();
+
+        assert!(error.contains("no longer exists"));
+        assert_eq!(con.command_count("EVAL"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_supports_value_only_edits_without_renaming() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        super::hash_field_update(&mut con, b"hash-key", "session", "session", "Grace").await.unwrap();
+
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert!(con.commands[0].contains("if old_field == new_field then"));
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_keeps_failures_inside_the_atomic_operation() {
+        let failure = redis::make_extension_error("ERR".to_string(), Some("script command failed".to_string()));
+        let mut con = FakeRedisConnection::with_results(vec![Err(failure)]);
+
+        let error = super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap_err();
+
+        assert!(error.contains("script command failed"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.command_count("HSET"), 0);
+        assert_eq!(con.command_count("HDEL"), 0);
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_reports_restricted_eval_access_without_fallback() {
+        let mut con = FakeRedisConnection::with_results(vec![Err(noperm("eval"))]);
+
+        let error = super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap_err();
+
+        assert!(error.contains("EVAL and hash command permissions"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_does_not_restore_a_source_that_disappeared_before_hdel() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(2)]);
+
+        super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap();
+
+        let script = &con.commands[0];
+        let delete_branch = script.find("if tonumber(deleted) ~= 1 then").expect("HDEL result branch");
+        let branch = &script[delete_branch..];
+        assert!(branch.contains("redis.pcall('HDEL', key, new_field)"));
+        assert!(branch.contains("return 0"));
+        assert!(!branch.contains("restore_source()"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_hash_field_updates_use_serialized_evals_and_reject_the_loser() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(2), RedisRawValue::Int(0)]);
+
+        super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap();
+        let error = super::hash_field_update(&mut con, b"hash-key", "session", "profile", "Grace").await.unwrap_err();
+
+        assert!(error.contains("no longer exists"));
+        assert_eq!(con.command_count("EVAL"), 2);
+        assert_eq!(con.commands.len(), 2);
     }
 
     #[tokio::test]

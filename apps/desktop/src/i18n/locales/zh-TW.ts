@@ -3867,6 +3867,7 @@ export default withEnglishFallback({
     createFieldRequired: "請輸入 hash 欄位",
     createScoreInvalid: "請輸入有效分數",
     jsonModuleNotAvailable: "該 Redis 伺服器未載入 ReJSON 模組",
+    field: "欄位",
     fieldRequired: "請輸入欄位名稱",
     valueRequired: "請輸入值",
     memberRequired: "請輸入成員",

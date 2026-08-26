@@ -4727,6 +4727,7 @@ export default {
     createFieldRequired: "Enter a hash field",
     createScoreInvalid: "Enter a valid score",
     jsonModuleNotAvailable: "ReJSON module is not loaded on this Redis server",
+    field: "Field",
     fieldRequired: "Enter a field name",
     valueRequired: "Enter a value",
     memberRequired: "Enter a member",

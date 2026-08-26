@@ -2703,6 +2703,17 @@ export async function redisHashDel(connectionId: string, db: number, keyRaw: str
   return post("/api/redis/hash-del", { connectionId, db, keyRaw, field });
 }
 
+export async function redisHashFieldUpdate(connectionId: string, db: number, keyRaw: string, oldField: string, newField: string, value: string): Promise<void> {
+  return post("/api/redis/hash-field-update", {
+    connectionId,
+    db,
+    keyRaw,
+    oldField,
+    newField,
+    value,
+  });
+}
+
 export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {
   return post("/api/redis/hash-field-set-ttl", { connectionId, db, keyRaw, field, ttl });
 }

@@ -2590,6 +2590,17 @@ export async function redisHashDel(connectionId: string, db: number, keyRaw: str
   return invoke("redis_hash_del", { connectionId, db, keyRaw, field });
 }
 
+export async function redisHashFieldUpdate(connectionId: string, db: number, keyRaw: string, oldField: string, newField: string, value: string): Promise<void> {
+  return invoke("redis_hash_field_update", {
+    connectionId,
+    db,
+    keyRaw,
+    oldField,
+    newField,
+    value,
+  });
+}
+
 export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {
   return invoke("redis_hash_field_set_ttl", { connectionId, db, keyRaw, field, ttl });
 }

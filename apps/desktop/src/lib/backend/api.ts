@@ -468,6 +468,7 @@ export const redisDeleteKey = forward("redisDeleteKey");
 export const redisRenameKey = forward("redisRenameKey");
 export const redisHashSet = forward("redisHashSet");
 export const redisHashDel = forward("redisHashDel");
+export const redisHashFieldUpdate = forward("redisHashFieldUpdate");
 export const redisHashFieldSetTtl = forward("redisHashFieldSetTtl");
 export const redisHashFieldSetExpireAt = forward("redisHashFieldSetExpireAt");
 export const redisListPush = forward("redisListPush");
