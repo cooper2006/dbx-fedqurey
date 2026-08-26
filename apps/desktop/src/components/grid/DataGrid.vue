@@ -37,6 +37,7 @@ import {
   Maximize2,
   PanelBottom,
   PanelRight,
+  RefreshCw,
   TableProperties,
   UserRound,
   Database,
@@ -11818,6 +11819,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     }),
     [exportSubmenu()],
     previewItems,
+    // 右键刷新：与工具栏刷新按钮/Mod+R 走同一个 onToolbarRefresh，方便
+    // 习惯 Navicat 等工具在数据页右键刷新的用户（#7273）。
+    [
+      { label: "", separator: true },
+      {
+        label: t("grid.refresh"),
+        action: () => void onToolbarRefresh(),
+        icon: RefreshCw,
+        shortcut: "Mod+R",
+        disabled: () => isSaving.value,
+      },
+    ],
   );
 });
 

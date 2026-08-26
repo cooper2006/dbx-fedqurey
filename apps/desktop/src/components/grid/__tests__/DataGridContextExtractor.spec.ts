@@ -135,7 +135,7 @@ function pasteGridCell(host: HTMLElement, value: string) {
   gridRoot.dispatchEvent(paste);
 }
 
-function mountGrid(initialResult = largeValueResult()) {
+function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
   const result = shallowRef(markRaw(initialResult));
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
   const pinia = createPinia();
@@ -169,6 +169,7 @@ function mountGrid(initialResult = largeValueResult()) {
                   primaryKeys: ["id"],
                 },
                 onExecuteSql,
+                ...(onReload ? { onReload } : {}),
               }),
           },
         );
@@ -318,6 +319,23 @@ describe("DataGrid context menu target lifecycle", () => {
     await settle();
 
     expect(contextMenuLabels()).toContain("Filter");
+  });
+
+  it("offers toolbar-equivalent refresh in the cell context menu (issue #7273)", async () => {
+    const onReload = vi.fn();
+    const { host } = mountGrid(hydratedResult(1, "value"), onReload);
+    await settle();
+    const cell = host.querySelector<HTMLElement>('[data-row-index="0"] [data-visible-col-index="1"]');
+    if (!cell) throw new Error("Grid cell not found");
+    openContextMenu(cell);
+    await settle();
+    // The item renders its label plus the Mod+R shortcut keys, so match by prefix.
+    const refreshLabels = contextMenuLabels().filter((label) => label.startsWith("Refresh"));
+    expect(refreshLabels.length).toBe(1);
+    const refreshButton = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((button) => button.textContent?.trim().startsWith("Refresh"));
+    refreshButton!.click();
+    await settle();
+    expect(onReload).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the native context menu for the expanded condition editor", async () => {
