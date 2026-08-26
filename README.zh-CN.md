@@ -69,8 +69,10 @@
   <tr>
     <td align="center" valign="middle" width="220">
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <img src="https://www.rainyun.com/img/logo.d193755d.png#gh-light-mode-only" alt="雨云" height="48" />
-        <img src="https://www.rainyun.com/img/logo.d193755d.png#gh-dark-mode-only" alt="" aria-hidden="true" height="48" style="filter: brightness(0) invert(1);" />
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/rainyun-dark.png" />
+          <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="雨云" height="48" />
+        </picture>
       </a>
     </td>
     <td>
@@ -92,8 +94,10 @@
   <tr>
     <td align="center" valign="middle" width="220">
       <a href="https://easysearch.cn" target="_blank">
-        <img src="docs/public/sponsors/easysearch.png#gh-light-mode-only" alt="Easysearch" width="150" />
-        <img src="docs/public/sponsors/easysearch.png#gh-dark-mode-only" alt="" aria-hidden="true" width="150" style="filter: brightness(0) invert(1);" />
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/easysearch-dark.png" />
+          <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
+        </picture>
       </a>
     </td>
     <td>
@@ -104,8 +108,10 @@
   <tr>
     <td align="center" valign="middle" width="220">
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="https://www.atlascloud.ai/logo.svg#gh-light-mode-only" alt="Atlas Cloud" width="150" />
-        <img src="https://www.atlascloud.ai/logo.svg#gh-dark-mode-only" alt="" aria-hidden="true" width="150" style="filter: brightness(0) invert(1);" />
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/atlas-dark.svg" />
+          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
+        </picture>
       </a>
     </td>
     <td>
