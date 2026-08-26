@@ -3277,6 +3277,154 @@ fn qualified_name(name: &str, db_type: DatabaseType, schema: Option<&str>) -> St
         .unwrap_or_else(|| quote_id(name, db_type))
 }
 
+/// `CREATE TABLE`-family header keywords that native source DDL may start
+/// with, longest-prefix-first so e.g. `CREATE FOREIGN TABLE` isn't shadowed
+/// by a naive `CREATE TABLE` match.
+const TABLE_DDL_HEADER_KEYWORDS: &[&str] =
+    &["CREATE FOREIGN TABLE", "CREATE UNLOGGED TABLE", "CREATE TEMPORARY TABLE", "CREATE TEMP TABLE", "CREATE TABLE"];
+
+/// `CREATE VIEW`-family header keywords, covering the `OR REPLACE` and
+/// `MATERIALIZED` variants emitted by the Postgres/MySQL view DDL builders.
+const VIEW_DDL_HEADER_KEYWORDS: &[&str] = &["CREATE MATERIALIZED VIEW", "CREATE OR REPLACE VIEW", "CREATE VIEW"];
+
+/// Case-insensitive ASCII prefix check that avoids allocating an uppercased
+/// copy of `haystack` (which can be a whole multi-KB `CREATE TABLE` body) just
+/// to compare its first few bytes against a short keyword.
+fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack.get(..needle.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle))
+}
+
+/// Native DDL captured from the source connection is schema/database-qualified
+/// against the *source* schema (see `render_postgres_table_ddl_with_partition_info`
+/// and `build_view_ddl_sql`). When the diff engine reuses that DDL verbatim for a
+/// same-dialect sync script, running it against a different target schema fails
+/// outright — the statement still names the source schema, which may not even
+/// exist on the target connection.
+///
+/// Rewrites the object name in a `CREATE ...` header to `qualified` when the
+/// captured name is already schema/database-qualified (contains a `.`). An
+/// unqualified name (e.g. MySQL DDL relying on the connection's current
+/// database) is left untouched, since it already resolves correctly wherever
+/// the sync script runs.
+fn rewrite_ddl_header_qualifier(ddl: &str, header_keywords: &[&str], schema: Option<&str>, qualified: &str) -> String {
+    let leading_ws = ddl.len() - ddl.trim_start().len();
+    let body = &ddl[leading_ws..];
+    let Some(keyword) = header_keywords.iter().find(|keyword| starts_with_ignore_ascii_case(body, keyword)) else {
+        return ddl.to_string();
+    };
+
+    let mut idx = skip_ascii_whitespace(ddl, leading_ws + keyword.len());
+    if starts_with_ignore_ascii_case(&ddl[idx..], "IF NOT EXISTS") {
+        idx = skip_ascii_whitespace(ddl, idx + "IF NOT EXISTS".len());
+    }
+
+    let ident_start = idx;
+    let Some(parsed) = parse_qualified_identifier(ddl, idx) else {
+        return ddl.to_string();
+    };
+    let Some((schema_start, schema_end)) = parsed.schema_span else {
+        // Unqualified name (e.g. MySQL DDL relying on the connection's
+        // current database) already resolves correctly wherever the sync
+        // script runs — leave it untouched.
+        return ddl.to_string();
+    };
+    let embedded_schema = strip_identifier_quotes(&ddl[schema_start..schema_end]);
+    if schema.map(str::trim).is_some_and(|schema| schema == embedded_schema) {
+        // Already qualified with the target schema — avoid needlessly
+        // reformatting DDL that's already correct.
+        return ddl.to_string();
+    }
+    format!("{}{}{}", &ddl[..ident_start], qualified, &ddl[parsed.end..])
+}
+
+struct ParsedDdlName {
+    end: usize,
+    schema_span: Option<(usize, usize)>,
+}
+
+/// Parses a (possibly dotted, possibly quoted) identifier starting at `idx`.
+/// Returns the byte offset just past it, plus the span of the schema/database
+/// segment if the name was qualified, or `None` if `idx` isn't the start of
+/// an identifier. Handles the quoting styles used across DDL dialects: double
+/// quotes, backticks, and SQL Server brackets.
+fn parse_qualified_identifier(ddl: &str, start: usize) -> Option<ParsedDdlName> {
+    let mut idx = start;
+    let mut schema_span = None;
+    let mut segment_start = start;
+    loop {
+        let segment_end = parse_identifier_segment_end(ddl, idx)?;
+        idx = segment_end;
+        if ddl[idx..].starts_with('.') {
+            schema_span = Some((segment_start, segment_end));
+            idx += 1;
+            segment_start = idx;
+            continue;
+        }
+        break;
+    }
+    Some(ParsedDdlName { end: idx, schema_span })
+}
+
+/// Parses one identifier segment (quoted or bare) starting at `idx` and
+/// returns the byte offset just past it, or `None` if `idx` isn't the start
+/// of a segment.
+fn parse_identifier_segment_end(ddl: &str, mut idx: usize) -> Option<usize> {
+    let start = idx;
+    let ch = ddl[idx..].chars().next()?;
+    let closing_quote = match ch {
+        '"' => Some('"'),
+        '`' => Some('`'),
+        '[' => Some(']'),
+        _ => None,
+    };
+    if let Some(closing_quote) = closing_quote {
+        idx += ch.len_utf8();
+        loop {
+            let next = ddl[idx..].chars().next()?;
+            idx += next.len_utf8();
+            if next == closing_quote {
+                // SQL Server brackets escape a literal `]` the same way
+                // double-quote/backtick identifiers escape their own quote
+                // char: by doubling it (`[a]]b]` is the identifier `a]b`).
+                if ddl[idx..].starts_with(closing_quote) {
+                    idx += closing_quote.len_utf8();
+                    continue;
+                }
+                break;
+            }
+        }
+    } else if ch.is_alphanumeric() || ch == '_' {
+        while let Some(next) = ddl[idx..].chars().next() {
+            if next.is_alphanumeric() || next == '_' {
+                idx += next.len_utf8();
+            } else {
+                break;
+            }
+        }
+    } else {
+        return None;
+    }
+    (idx != start).then_some(idx)
+}
+
+/// Strips a single matching pair of identifier-quoting characters (double
+/// quotes, backticks, or brackets) from `segment`, undoubling an escaped
+/// closing quote. Returns `segment` unchanged if it isn't quoted.
+fn strip_identifier_quotes(segment: &str) -> String {
+    let mut chars = segment.chars();
+    let (Some(first), Some(last)) = (chars.next(), segment.chars().next_back()) else {
+        return segment.to_string();
+    };
+    let matches = matches!((first, last), ('"', '"') | ('`', '`') | ('[', ']'));
+    if !matches || segment.len() < 2 {
+        return segment.to_string();
+    }
+    let inner = &segment[first.len_utf8()..segment.len() - last.len_utf8()];
+    // Brackets escape their closing char the same way same-char quoting
+    // does (`]]` -> `]`), just with a different open/close pair.
+    inner.replace(&format!("{last}{last}"), &last.to_string())
+}
+
 fn drop_index_sql(table_name: &str, index_name: &str, db_type: DatabaseType, schema: Option<&str>) -> String {
     let profile = profile_for(db_type);
     let table = qualified_name(table_name, db_type, schema);
@@ -4870,6 +5018,7 @@ fn generate_schema_sync_sql_inner(
         if diff.diff_type == "added" && diff.object_type.as_deref() == Some("view") {
             if let Some(ddl) = &diff.ddl {
                 if is_same_dialect || source_dialect.is_none() {
+                    let ddl = rewrite_ddl_header_qualifier(ddl, VIEW_DDL_HEADER_KEYWORDS, schema, &table);
                     lines.push(format!("-- Create view: {}", diff.name));
                     lines.push(format!("{};", ddl.trim_end().trim_end_matches(';')));
                     lines.push(String::new());
@@ -4917,6 +5066,11 @@ fn generate_schema_sync_sql_inner(
                 } else if let Some(ddl) = diff.target_ddl.as_deref() {
                     // Inversion places only the removed target table's native
                     // DDL here, validating that it belongs to the dialect restored.
+                    // It's already qualified against the same target schema this
+                    // rollback re-runs against, so the rewrite below is normally a
+                    // no-op — kept for symmetry with the other native-DDL
+                    // passthrough sites in case that invariant ever changes.
+                    let ddl = rewrite_ddl_header_qualifier(ddl, TABLE_DDL_HEADER_KEYWORDS, schema, &table);
                     lines.push(format!("-- Recreate table from native target DDL: {}", diff.name));
                     lines.push(format!("{};", ddl.trim_end_matches(';')));
                     lines.push(String::new());
@@ -4929,8 +5083,9 @@ fn generate_schema_sync_sql_inner(
                 // Prefer native source DDL when the target profile wants it
                 // (MySQL-family), or as fallback without a structured snapshot.
                 if let Some(ddl) = &diff.ddl {
+                    let ddl = rewrite_ddl_header_qualifier(ddl, TABLE_DDL_HEADER_KEYWORDS, schema, &table);
                     lines.push(format!("-- Create {}: {}", diff.object_type.as_deref().unwrap_or("table"), diff.name));
-                    lines.push(format!("{};", ddl));
+                    lines.push(format!("{};", ddl.trim_end().trim_end_matches(';')));
                     lines.push(String::new());
                 } else if let Some(cols) = &diff.columns {
                     let trigger_infos: Vec<TriggerInfo> = diff
@@ -8312,6 +8467,124 @@ mod tests {
             ]
             .join("\n")
         );
+    }
+
+    #[test]
+    fn added_table_native_ddl_rewrites_source_schema_to_target_schema() {
+        // Issue #7249: comparing two Postgres schemas emitted the *source*
+        // schema-qualified CREATE TABLE verbatim, so the generated sync SQL
+        // referenced a schema that may not even exist on the target and
+        // failed 100% of the time.
+        let diffs = vec![TableDiff {
+            diff_type: "added".to_string(),
+            object_type: Some("table".to_string()),
+            name: "orders".to_string(),
+            ddl: Some("CREATE TABLE \"source_schema\".\"orders\" (\n  \"id\" integer\n)".to_string()),
+            ..TableDiff::default()
+        }];
+
+        let sql = generate_schema_sync_sql(
+            &diffs,
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("target_schema"),
+            false,
+            Some(DialectKind::Postgres),
+            &[],
+        );
+
+        assert!(sql.contains("CREATE TABLE \"target_schema\".\"orders\""), "{sql}");
+        assert!(!sql.contains("source_schema"), "{sql}");
+    }
+
+    #[test]
+    fn added_view_native_ddl_rewrites_source_schema_to_target_schema() {
+        let diffs = vec![TableDiff {
+            diff_type: "added".to_string(),
+            object_type: Some("view".to_string()),
+            name: "active_orders".to_string(),
+            ddl: Some("CREATE OR REPLACE VIEW \"source_schema\".\"active_orders\" AS\nSELECT 1".to_string()),
+            ..TableDiff::default()
+        }];
+
+        let sql = generate_schema_sync_sql(
+            &diffs,
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("target_schema"),
+            false,
+            Some(DialectKind::Postgres),
+            &[],
+        );
+
+        assert!(sql.contains("CREATE OR REPLACE VIEW \"target_schema\".\"active_orders\""), "{sql}");
+        assert!(!sql.contains("source_schema"), "{sql}");
+    }
+
+    #[test]
+    fn added_table_unqualified_native_ddl_is_left_unchanged() {
+        // MySQL-family DDL that relies on the connection's current database
+        // (no schema/database qualifier) already resolves correctly wherever
+        // the sync script runs, so it must not be rewritten.
+        let diffs = vec![TableDiff {
+            diff_type: "added".to_string(),
+            object_type: Some("table".to_string()),
+            name: "orders".to_string(),
+            ddl: Some("CREATE TABLE `orders` (\n  `id` int\n)".to_string()),
+            ..TableDiff::default()
+        }];
+
+        let sql = generate_schema_sync_sql(
+            &diffs,
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("shop"),
+            false,
+            Some(DialectKind::Mysql),
+            &[],
+        );
+
+        assert!(sql.contains("CREATE TABLE `orders`"), "{sql}");
+    }
+
+    #[test]
+    fn added_table_native_ddl_rewrites_bracket_quoted_schema_with_escaped_bracket() {
+        // SQL Server escapes a literal `]` inside a bracketed identifier by
+        // doubling it (`[a]]b]` is the identifier `a]b`) — the schema segment
+        // here must still be recognized as "source_schema]" rather than the
+        // parser stopping at the first `]`.
+        let diffs = vec![TableDiff {
+            diff_type: "added".to_string(),
+            object_type: Some("table".to_string()),
+            name: "orders".to_string(),
+            ddl: Some("CREATE TABLE [source_schema]]].[orders] (\n  [id] int\n)".to_string()),
+            ..TableDiff::default()
+        }];
+
+        let sql = generate_schema_sync_sql(
+            &diffs,
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::SqlServer,
+            Some("target_schema"),
+            false,
+            Some(DialectKind::SqlServer),
+            &[],
+        );
+
+        assert!(sql.contains("[target_schema].[orders]"), "{sql}");
+        assert!(!sql.contains("source_schema"), "{sql}");
     }
 
     // ========================================================================
