@@ -6036,6 +6036,7 @@ export default withEnglishFallback({
     shortcutConflict: "이 단축키는 같은 범위의 다른 작업과 충돌합니다.",
     shortcutClear: "단축키 지우기",
     preview: "실시간 미리보기",
+    previewSyntaxErrorHint: "미리보기는 읽기 전용입니다. 데모 SQL의 FOM 오타는 의도적인 구문 오류이며 오류 강조 표시를 보여줍니다.",
     customTheme: "사용자 지정 테마",
     customThemeConfigure: "사용자 지정 테마 설정",
     customThemeTitle: "사용자 지정 테마 구성",

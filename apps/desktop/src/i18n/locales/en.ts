@@ -6661,6 +6661,7 @@ export default {
     shortcutConflict: "This shortcut conflicts with another action in the same scope.",
     shortcutClear: "Clear shortcut",
     preview: "Live Preview",
+    previewSyntaxErrorHint: "Read-only preview. The FOM typo in the demo SQL is intentional and demonstrates syntax-error highlighting.",
     customTheme: "Custom Theme",
     customThemeConfigure: "Configure Custom Theme",
     customThemeTitle: "Custom Theme Configuration",

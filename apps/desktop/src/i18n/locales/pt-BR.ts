@@ -6334,6 +6334,7 @@ export default withEnglishFallback({
     shortcutConflict: "Este atalho conflita com outra ação no mesmo escopo.",
     shortcutClear: "Limpar atalho",
     preview: "Pré-visualização ao vivo",
+    previewSyntaxErrorHint: "Pré-visualização somente leitura. O erro FOM no SQL de exemplo é intencional e demonstra o destaque de erros de sintaxe.",
     customTheme: "Tema personalizado",
     customThemeConfigure: "Configurar tema personalizado",
     customThemeTitle: "Configuração do tema personalizado",

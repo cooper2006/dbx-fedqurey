@@ -3755,6 +3755,9 @@ watch(previewRef, async (el) => {
       previewLineNumbersComp.of(buildPreviewLineNumbersExtension(ss.showLineNumbers)),
       highlightActiveLineGutter(),
       previewBasicSetup,
+      EditorState.readOnly.of(true),
+      EditorView.editable.of(false),
+      EditorView.contentAttributes.of({ tabindex: "0" }),
       sql({ dialect: MySQL }),
       themeComp.of(themeExt),
       fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),
@@ -3943,6 +3946,9 @@ onUnmounted(() => {
                 <div class="rounded-md border overflow-auto max-w-full" :class="editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode' ? 'border-border' : 'border-border/50'">
                   <div ref="previewRef" style="min-width: 100%" />
                 </div>
+                <p v-if="editSqlSemanticDiagnosticsEnabled" class="text-xs text-muted-foreground">
+                  {{ t("settings.previewSyntaxErrorHint") }}
+                </p>
               </div>
 
               <Separator />

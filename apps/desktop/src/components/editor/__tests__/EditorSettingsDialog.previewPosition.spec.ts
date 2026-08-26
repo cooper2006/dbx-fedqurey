@@ -38,4 +38,21 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(dialogSource).toContain("previewLineNumbersComp.reconfigure(buildPreviewLineNumbersExtension(ss.showLineNumbers))");
     expect(dialogSource).toContain("return buildQueryEditorLineNumbersExtension(previewLineNumbersFactory, enabled");
   });
+
+  it("creates the preview editor as read-only so demo edits cannot desync the Apply buttons", () => {
+    expect(dialogSource).toContain("EditorState.readOnly.of(true)");
+    expect(dialogSource).toContain("EditorView.editable.of(false)");
+    expect(dialogSource).toContain('EditorView.contentAttributes.of({ tabindex: "0" })');
+  });
+
+  it("explains the intentional syntax-error demo below the preview when diagnostics are enabled", () => {
+    const preview = editorSection.indexOf('ref="previewRef"');
+    expect(editorSection).toContain('v-if="editSqlSemanticDiagnosticsEnabled"');
+    expect(editorSection.indexOf('t("settings.previewSyntaxErrorHint")')).toBeGreaterThan(preview);
+  });
+
+  it.each(["en", "zh-CN", "zh-TW", "es", "pt-BR", "it", "ja", "ko"])("locale %s translates settings.previewSyntaxErrorHint", (locale) => {
+    const localeSource = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
+    expect(localeSource).toMatch(/previewSyntaxErrorHint: ".+"/);
+  });
 });

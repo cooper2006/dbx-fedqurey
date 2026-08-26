@@ -6332,6 +6332,7 @@ export default withEnglishFallback({
     shortcutConflict: "Este atajo entra en conflicto con otra acción del mismo ámbito.",
     shortcutClear: "Borrar atajo",
     preview: "Vista previa en tiempo real",
+    previewSyntaxErrorHint: "Vista previa de solo lectura. El error FOM en el SQL de ejemplo es intencionado y demuestra el resaltado de errores de sintaxis.",
     customTheme: "Tema personalizado",
     customThemeConfigure: "Configurar tema personalizado",
     customThemeTitle: "Configuración de tema personalizado",

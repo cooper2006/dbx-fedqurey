@@ -6332,6 +6332,7 @@ export default withEnglishFallback({
     shortcutConflict: "Questa scorciatoia è in conflitto con un'altra azione nello stesso ambito.",
     shortcutClear: "Cancella scorciatoia",
     preview: "Anteprima in tempo reale",
+    previewSyntaxErrorHint: "Anteprima di sola lettura. L'errore FOM nell'SQL di esempio è intenzionale e mostra l'evidenziazione degli errori di sintassi.",
     customTheme: "Tema personalizzato",
     customThemeConfigure: "Configura tema personalizzato",
     customThemeTitle: "Configurazione tema personalizzato",

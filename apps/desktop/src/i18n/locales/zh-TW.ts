@@ -5639,6 +5639,7 @@ export default withEnglishFallback({
     shortcutConflict: "這個快速鍵與同一作用域內的其他操作衝突。",
     shortcutClear: "清除快速鍵",
     preview: "即時預覽",
+    previewSyntaxErrorHint: "預覽為唯讀。範例 SQL 中的 FOM 拼寫是刻意設置的語法錯誤，用於示範錯誤高亮效果。",
     customTheme: "自定義主題",
     customThemeConfigure: "自定義主題配置",
     customThemeTitle: "自定義主題配置",

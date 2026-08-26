@@ -6647,6 +6647,7 @@ export default withEnglishFallback({
     shortcutConflict: "这个快捷键与同一作用域内的其他操作冲突。",
     shortcutClear: "清除快捷键",
     preview: "实时预览",
+    previewSyntaxErrorHint: "预览为只读。示例 SQL 中的 FOM 拼写是故意设置的语法错误，用于演示错误高亮效果。",
     customTheme: "自定义主题",
     customThemeConfigure: "自定义主题配置",
     customThemeTitle: "自定义主题配置",

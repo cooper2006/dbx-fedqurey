@@ -6343,6 +6343,7 @@ export default withEnglishFallback({
     shortcutConflict: "このショートカットは同じスコープ内の別のアクションと競合しています。",
     shortcutClear: "ショートカットをクリア",
     preview: "ライブプレビュー",
+    previewSyntaxErrorHint: "プレビューは読み取り専用です。デモ SQL 内の FOM は意図的な構文エラーで、エラーのハイライトを示しています。",
     customTheme: "カスタムテーマ",
     customThemeConfigure: "カスタムテーマを設定",
     customThemeTitle: "カスタムテーマ設定",
