@@ -51,7 +51,7 @@ import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
-import { redisKeySearchPattern } from "@/lib/redis/redisKeyPattern";
+import { redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
 import { filterRedisKeyTemplates, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
@@ -198,6 +198,8 @@ let redisDbFlushedListenerRegistered = false;
 let redisInfiniteScrollFrame = 0;
 const loadedKeyRaws = new Set<string>();
 let treeIndex: RedisKeyTreeIndex | null = null;
+// 展开分组时已定向补扫过的子树（见 fillGroupSubtree）；在 loadKeys 重置。
+const subtreeFilledGroupIds = new Set<string>();
 const REDIS_COMMAND_COMPLETION_MENU_LIMIT = 12;
 let commandCompletionRequestId = 0;
 let commandDocumentationConnectionId: string | null = null;
@@ -745,6 +747,7 @@ async function loadKeys() {
   loading.value = true;
   loadedKeyRaws.clear();
   ttlObservedAtByRaw.clear();
+  subtreeFilledGroupIds.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   treeIndex = null;
@@ -913,12 +916,58 @@ function stopFetchAll() {
   fetchAllStopRequested.value = true;
 }
 
+// 展开分组时的定向补扫：树模式的自动加载只覆盖有界 SCAN 预算内的键，
+// 未扫到的分组在树里完全不存在（搜索能找到、树里看不到）。展开分组时用
+// `前缀:*` 模式以独立游标扫描该子树直至耗尽，让"展开即可见"成立；补扫
+// 结果经 loadedKeyRaws 去重后并入主树，主 SCAN 游标不受影响。
+const SUBTREE_SCAN_ITERATIONS_PER_CALL = 8;
+
+function shouldFillGroupSubtree(): boolean {
+  return hasMore.value && !useFlatKeySearchRows.value && !isSearchMode.value && !isFetchingAll.value;
+}
+
+function mergeScannedKeys(newKeys: RedisKeyInfo[]) {
+  if (newKeys.length === 0) return;
+  for (const key of newKeys) recordKeyTtlObservedAt(key);
+  flatKeys.value = [...flatKeys.value, ...newKeys];
+  mergeTree(newKeys);
+  connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
+    loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+  });
+}
+
+async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = searchRequestId) {
+  if (subtreeFilledGroupIds.has(group.id)) return;
+  subtreeFilledGroupIds.add(group.id);
+  const pattern = redisGroupSubtreePattern(group.pathSegments, redisKeySeparator.value);
+  let cursor = 0;
+  try {
+    while (requestId === searchRequestId && !isFetchingAll.value) {
+      if (flatKeys.value.length >= redisInfiniteScrollMaxKeys.value) break;
+      const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, pattern, redisScanPageSize.value, SUBTREE_SCAN_ITERATIONS_PER_CALL, true);
+      if (requestId !== searchRequestId) return;
+      mergeScannedKeys(collectUniqueRedisKeys(result.keys, loadedKeyRaws));
+      cursor = result.cursor;
+      if (cursor === 0) break;
+    }
+  } catch (error) {
+    // 失败不阻塞浏览；下次展开该分组会重试
+    subtreeFilledGroupIds.delete(group.id);
+    toast(errorMessage(error), 5000);
+  }
+}
+
 function toggleGroup(groupId: string) {
   const next = new Set(expandedGroupIds.value);
-  if (next.has(groupId)) next.delete(groupId);
-  else next.add(groupId);
+  const expanding = !next.has(groupId);
+  if (expanding) next.add(groupId);
+  else next.delete(groupId);
   expandedGroupIds.value = next;
   void maybeAutoLoadMoreRedisKeys();
+  if (expanding && shouldFillGroupSubtree()) {
+    const group = treeIndex?.groupById.get(groupId);
+    if (group) void fillGroupSubtree(group);
+  }
 }
 
 function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
