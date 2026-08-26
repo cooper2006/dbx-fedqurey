@@ -381,7 +381,7 @@ mod tests {
             Ok(_) => panic!("SQLCipher attachments must be rejected"),
             Err(error) => error,
         };
-        assert!(error.contains("SQLCipher"), "{error}");
+        assert!(error.contains("encrypted connections"), "{error}");
     }
 
     #[tokio::test]
@@ -567,7 +567,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(feature = "sqlite-sqlcipher")]
+    #[cfg(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers"))]
     #[tokio::test]
     async fn sqlite_connect_from_config_uses_sqlcipher_key() {
         let path = std::env::temp_dir().join(format!("dbx-tauri-sqlcipher-{}.db", uuid::Uuid::new_v4()));
@@ -601,7 +601,7 @@ mod tests {
             Ok(_) => panic!("wrong SQLCipher key must fail"),
             Err(err) => err,
         };
-        assert!(wrong_key.contains("SQLCipher database unlock failed"));
+        assert!(wrong_key.contains("Encrypted SQLite database unlock failed"));
 
         let missing_key = match connect_sqlite_from_config(&sqlite_config(&path, "")).await {
             Ok(_) => panic!("missing SQLCipher key must fail"),
