@@ -319,17 +319,13 @@ function leafVisible(host: HTMLElement, keyRaw: string): boolean {
 // The toolbar refresh action: the only untitled `h-6 w-6` icon button (the
 // create-key button next to it carries a title).
 function clickRefresh(host: HTMLElement) {
-  const refresh = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(
-    (button) => button.className.includes("h-6 w-6") && !button.hasAttribute("title"),
-  );
+  const refresh = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.className.includes("h-6 w-6") && !button.hasAttribute("title"));
   expect(refresh, "refresh button").toBeDefined();
   refresh!.click();
 }
 
 function clickLoadMore(host: HTMLElement) {
-  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(
-    (button) => button.textContent?.includes("redis.loadMoreKeys") && !button.disabled,
-  );
+  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("redis.loadMoreKeys") && !button.disabled);
   expect(loadMore, "load more button").toBeDefined();
   loadMore!.click();
 }
