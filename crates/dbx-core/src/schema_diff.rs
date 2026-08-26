@@ -2000,6 +2000,17 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     let (added_views, removed_views, common_views) = diff_names(&source_view_names, &target_view_names);
     let mut result = Vec::new();
 
+    // A foreign key whose `ref_table` is itself one of the tables being compared is a
+    // same-database self-reference. Its `ref_schema` is always the literal source/target
+    // database name (MySQL's information_schema reports it unconditionally, even for
+    // self-references), so source and target will almost always disagree even though the
+    // relationship is structurally identical. Clearing it here makes such FKs compare and
+    // regenerate against the *other side's own* database instead of being flagged as
+    // "different" and then rewritten to literally reference the source database name.
+    // Genuine cross-database references (ref_table not part of this database) are left as-is.
+    let source_table_name_set: HashSet<&str> = source_table_names.iter().map(String::as_str).collect();
+    let target_table_name_set: HashSet<&str> = target_table_names.iter().map(String::as_str).collect();
+
     for name in added {
         let source_detail = source_details.get(name.as_str());
         result.push(TableDiff {
@@ -2040,12 +2051,15 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                 detail
                     .foreign_keys
                     .iter()
-                    .map(|fk| ForeignKeyDiff {
-                        diff_type: "added".to_string(),
-                        name: fk.name.clone(),
-                        source: Some(fk.clone()),
-                        target: None,
-                        changes: vec![],
+                    .map(|fk| {
+                        let fk = normalize_self_referencing_fk(fk, &source_table_name_set);
+                        ForeignKeyDiff {
+                            diff_type: "added".to_string(),
+                            name: fk.name.clone(),
+                            source: Some(fk),
+                            target: None,
+                            changes: vec![],
+                        }
                     })
                     .collect()
             }),
@@ -2220,7 +2234,11 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             options.target_dialect,
         );
         let index_diffs = diff_indexes(&source.indexes, &target.indexes);
-        let foreign_key_diffs = diff_foreign_keys(&source.foreign_keys, &target.foreign_keys);
+        let normalized_source_fks: Vec<ForeignKeyInfo> =
+            source.foreign_keys.iter().map(|fk| normalize_self_referencing_fk(fk, &source_table_name_set)).collect();
+        let normalized_target_fks: Vec<ForeignKeyInfo> =
+            target.foreign_keys.iter().map(|fk| normalize_self_referencing_fk(fk, &target_table_name_set)).collect();
+        let foreign_key_diffs = diff_foreign_keys(&normalized_source_fks, &normalized_target_fks);
         let trigger_diffs = diff_triggers(&source.triggers, &target.triggers);
         let source_comment = source_table_comments.get(name.as_str()).cloned().unwrap_or(None);
         let target_comment = target_table_comments.get(name.as_str()).cloned().unwrap_or(None);
@@ -2881,6 +2899,14 @@ fn normalized_foreign_key_action(action: Option<&str>) -> Option<String> {
     action
         .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_self_referencing_fk(fk: &ForeignKeyInfo, own_table_names: &HashSet<&str>) -> ForeignKeyInfo {
+    let mut normalized = fk.clone();
+    if fk.ref_schema.is_some() && own_table_names.contains(fk.ref_table.as_str()) {
+        normalized.ref_schema = None;
+    }
+    normalized
 }
 
 pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -> Vec<ForeignKeyDiff> {
@@ -11158,6 +11184,188 @@ mod tests {
         );
         assert!(sql.contains("REFERENCES \"identity\".\"users\" (\"id\")"), "schema: {sql}");
         assert!(sql.contains("ON DELETE SET NULL ON UPDATE CASCADE"), "actions: {sql}");
+    }
+
+    // -- Regression: issue #7287 --
+    // MySQL's information_schema always fills REFERENCED_TABLE_SCHEMA with the literal
+    // database name, even for a foreign key that just self-references a table in its own
+    // database. Comparing two differently-named databases (e.g. a dev copy vs prod) made
+    // every such self-referencing FK look "changed" purely because the database names
+    // differ, and the deploy script it generated pointed the target's FK at the *source*
+    // database instead of leaving it self-referencing within the target.
+    fn self_referencing_fk_options(
+        source_ref_schema: &str,
+        target_ref_schema: &str,
+        source_on_delete: &str,
+        target_on_delete: &str,
+    ) -> SchemaDiffPreparationOptions {
+        let table_infos = vec![
+            TableInfo {
+                name: "sys_organization".into(),
+                table_type: "BASE TABLE".into(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "sys_user".into(),
+                table_type: "BASE TABLE".into(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let cols = vec![column("id", "int(11)", None), column("leader_id", "int(11)", None)];
+        let fk = |ref_schema: &str, on_delete: &str| ForeignKeyInfo {
+            name: "sys_organization_ibfk_1".into(),
+            column: "leader_id".into(),
+            ref_schema: Some(ref_schema.to_string()),
+            ref_table: "sys_user".into(),
+            ref_column: "user_id".into(),
+            on_update: Some("RESTRICT".into()),
+            on_delete: Some(on_delete.to_string()),
+        };
+        SchemaDiffPreparationOptions {
+            source_tables: table_infos.clone(),
+            target_tables: table_infos,
+            source_details: vec![
+                TableSchemaDetail {
+                    name: "sys_organization".into(),
+                    columns: cols.clone(),
+                    indexes: vec![],
+                    foreign_keys: vec![fk(source_ref_schema, source_on_delete)],
+                    triggers: vec![],
+                    ddl: None,
+                },
+                TableSchemaDetail {
+                    name: "sys_user".into(),
+                    columns: vec![column("user_id", "int(11)", None)],
+                    indexes: vec![],
+                    foreign_keys: vec![],
+                    triggers: vec![],
+                    ddl: None,
+                },
+            ],
+            target_details: vec![
+                TableSchemaDetail {
+                    name: "sys_organization".into(),
+                    columns: cols.clone(),
+                    indexes: vec![],
+                    foreign_keys: vec![fk(target_ref_schema, target_on_delete)],
+                    triggers: vec![],
+                    ddl: None,
+                },
+                TableSchemaDetail {
+                    name: "sys_user".into(),
+                    columns: vec![column("user_id", "int(11)", None)],
+                    indexes: vec![],
+                    foreign_keys: vec![],
+                    triggers: vec![],
+                    ddl: None,
+                },
+            ],
+            database_type: DatabaseType::Mysql,
+            target_schema: Some("jinxinnuo_agent_db".into()),
+            ignore_comments: false,
+            cascade_delete: false,
+            compare_column_order: false,
+            detect_renames: true,
+            detect_table_renames: false,
+            rename_threshold: 0.5,
+            enable_rollback: false,
+            source_dialect: Some(DialectKind::Mysql),
+            target_dialect: Some(DialectKind::Mysql),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn self_referencing_fk_across_differently_named_databases_is_not_a_diff() {
+        let options =
+            self_referencing_fk_options("jinxinnuo_agent_db_test", "jinxinnuo_agent_db", "SET NULL", "SET NULL");
+        let result = prepare_schema_diff(options);
+        assert!(
+            !result.sync_sql.contains("sys_organization_ibfk_1"),
+            "same-database self-reference must not be resynced just because the two \
+             database names differ: {}",
+            result.sync_sql
+        );
+    }
+
+    #[test]
+    fn modified_self_referencing_fk_regenerates_against_target_database() {
+        // A genuine change (ON DELETE) forces the FK to be resynced; the regenerated
+        // REFERENCES clause must still point at the target's own database, not the source's.
+        let options =
+            self_referencing_fk_options("jinxinnuo_agent_db_test", "jinxinnuo_agent_db", "SET NULL", "CASCADE");
+        let result = prepare_schema_diff(options);
+        assert!(
+            !result.sync_sql.contains("jinxinnuo_agent_db_test"),
+            "must not reference the source database: {}",
+            result.sync_sql
+        );
+        assert!(
+            result.sync_sql.contains("REFERENCES `jinxinnuo_agent_db`.`sys_user`")
+                || result.sync_sql.contains("REFERENCES `sys_user`"),
+            "must reference the target database (or be left unqualified): {}",
+            result.sync_sql
+        );
+    }
+
+    #[test]
+    fn genuine_cross_database_fk_reference_change_is_still_detected() {
+        // `external_lookup` is not one of the tables being compared, so a differing
+        // ref_schema here is a real cross-database reference change, not a same-database
+        // self-reference — it must still be surfaced and regenerated with the source's value.
+        let table_infos = vec![TableInfo {
+            name: "orders".into(),
+            table_type: "BASE TABLE".into(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }];
+        let cols = vec![column("id", "int(11)", None), column("region_id", "int(11)", None)];
+        let make_detail = |ref_schema: &str| TableSchemaDetail {
+            name: "orders".into(),
+            columns: cols.clone(),
+            indexes: vec![],
+            foreign_keys: vec![ForeignKeyInfo {
+                name: "orders_region_fk".into(),
+                column: "region_id".into(),
+                ref_schema: Some(ref_schema.to_string()),
+                ref_table: "external_lookup".into(),
+                ref_column: "id".into(),
+                on_update: Some("RESTRICT".into()),
+                on_delete: Some("RESTRICT".into()),
+            }],
+            triggers: vec![],
+            ddl: None,
+        };
+        let options = SchemaDiffPreparationOptions {
+            source_tables: table_infos.clone(),
+            target_tables: table_infos,
+            source_details: vec![make_detail("shared_lookup_db")],
+            target_details: vec![make_detail("stale_lookup_db")],
+            database_type: DatabaseType::Mysql,
+            target_schema: Some("jinxinnuo_agent_db".into()),
+            ignore_comments: false,
+            cascade_delete: false,
+            compare_column_order: false,
+            detect_renames: true,
+            detect_table_renames: false,
+            rename_threshold: 0.5,
+            enable_rollback: false,
+            source_dialect: Some(DialectKind::Mysql),
+            target_dialect: Some(DialectKind::Mysql),
+            ..Default::default()
+        };
+        let result = prepare_schema_diff(options);
+        assert!(
+            result.sync_sql.contains("REFERENCES `shared_lookup_db`.`external_lookup`"),
+            "genuine cross-database reference change must still be resynced to the source's \
+             external database: {}",
+            result.sync_sql
+        );
     }
 
     #[test]
