@@ -1610,6 +1610,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "等しくない",
     filterBuilderContains: "含む",
     filterBuilderNotContains: "含まない",
+    filterBuilderBeginsWith: "で始まる",
+    filterBuilderEndsWith: "で終わる",
     filterBuilderGreaterThan: "より大きい",
     filterBuilderGreaterThanOrEqual: "以上",
     filterBuilderLessThan: "より小さい",

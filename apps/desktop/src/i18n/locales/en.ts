@@ -1711,6 +1711,8 @@ export default {
     filterBuilderNotEquals: "Does not equal",
     filterBuilderContains: "Contains",
     filterBuilderNotContains: "Does not contain",
+    filterBuilderBeginsWith: "Starts with",
+    filterBuilderEndsWith: "Ends with",
     filterBuilderGreaterThan: "Greater than",
     filterBuilderGreaterThanOrEqual: "Greater than or equal to",
     filterBuilderLessThan: "Less than",

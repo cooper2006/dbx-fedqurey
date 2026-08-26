@@ -1594,6 +1594,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "Distinto de",
     filterBuilderContains: "Contiene",
     filterBuilderNotContains: "No contiene",
+    filterBuilderBeginsWith: "Empieza por",
+    filterBuilderEndsWith: "Termina por",
     filterBuilderGreaterThan: "Mayor que",
     filterBuilderGreaterThanOrEqual: "Mayor o igual que",
     filterBuilderLessThan: "Menor que",

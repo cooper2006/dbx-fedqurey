@@ -1587,6 +1587,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "같지 않음",
     filterBuilderContains: "포함",
     filterBuilderNotContains: "포함하지 않음",
+    filterBuilderBeginsWith: "…으로 시작",
+    filterBuilderEndsWith: "…으로 끝",
     filterBuilderGreaterThan: "보다 큼",
     filterBuilderGreaterThanOrEqual: "크거나 같음",
     filterBuilderLessThan: "보다 작음",
