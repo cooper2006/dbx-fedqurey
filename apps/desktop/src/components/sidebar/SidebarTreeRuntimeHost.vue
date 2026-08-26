@@ -3714,7 +3714,14 @@ async function confirmDropDatabase() {
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
     if (!executed) return;
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
-    await connectionStore.loadDatabases(connectionId, { force: true });
+    try {
+      await connectionStore.loadDatabases(connectionId, { force: true });
+    } catch {
+      // The database was already dropped successfully above; if this refresh
+      // itself fails (e.g. a network blip), evict the node directly instead
+      // of leaving the deleted database showing in the tree.
+      connectionStore.removeTreeNode(node.id);
+    }
     showDropDatabaseConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);

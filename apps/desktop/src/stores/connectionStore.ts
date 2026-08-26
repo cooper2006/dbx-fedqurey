@@ -1365,8 +1365,16 @@ export const useConnectionStore = defineStore("connection", () => {
     return connectionMetadataChildren(children).length > 0;
   }
 
-  function preserveExistingConnectionMetadataChildren(parent: TreeNode, children: TreeNode[]): TreeNode[] {
+  // `trustEmptyMetadataChildren` distinguishes two very different reasons this
+  // reload's metadata children can come back empty: the backend's raw fetch
+  // returned nothing at all (still ambiguous/possibly transient — keep the
+  // stale-preserve protection below), vs. the raw fetch had data but our own
+  // visible-databases/visible-schemas filter deterministically reduced it to
+  // zero (e.g. the only visible database was just dropped) — that emptiness
+  // is legitimate and must not be overridden by stale cached children.
+  function preserveExistingConnectionMetadataChildren(parent: TreeNode, children: TreeNode[], trustEmptyMetadataChildren = false): TreeNode[] {
     if (parent.type !== "connection" || hasConnectionMetadataChildren(children)) return children;
+    if (trustEmptyMetadataChildren) return children;
 
     const existingMetadataChildren = connectionMetadataChildren(parent.children);
     const nextUtilityChildren = children.filter(isConnectionUtilityNode);
@@ -1467,9 +1475,9 @@ export const useConnectionStore = defineStore("connection", () => {
     return deduped;
   }
 
-  function setChildren(parent: TreeNode, children: TreeNode[]) {
+  function setChildren(parent: TreeNode, children: TreeNode[], options?: { trustEmptyConnectionChildren?: boolean }) {
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
-    children = preserveExistingConnectionMetadataChildren(parent, children);
+    children = preserveExistingConnectionMetadataChildren(parent, children, options?.trustEmptyConnectionChildren === true);
     children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlFilesByDatabase, parent.children);
     if (parent.type === "database") {
       children = withDatabaseSavedSqlRoot(parent, children, savedSqlFilesByDatabase);
@@ -4130,7 +4138,7 @@ export const useConnectionStore = defineStore("connection", () => {
             const targetNode = treeNodeLoadTarget(load);
             if (!targetNode) return;
             recordPrimaryVisibleObjectNames(connectionId, databaseNames);
-            setChildren(targetNode, children);
+            setChildren(targetNode, children, { trustEmptyConnectionChildren: databaseNames.length > 0 && visibleNames.length === 0 });
             await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
           } else if (config && connectionUsesVisibleSchemaFilter(config)) {
             const schemaFilterConfig = config;
@@ -4161,7 +4169,7 @@ export const useConnectionStore = defineStore("connection", () => {
             const targetNode = treeNodeLoadTarget(load);
             if (!targetNode) return;
             recordPrimaryVisibleObjectNames(connectionId, schemas);
-            setChildren(targetNode, withSavedSqlRoot(connectionId, schemaNodes, targetNode));
+            setChildren(targetNode, withSavedSqlRoot(connectionId, schemaNodes, targetNode), { trustEmptyConnectionChildren: schemas.length > 0 && visibleSchemas.length === 0 });
             await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || schemaNodes);
           } else {
             // Doris / StarRocks multi-catalog: when external catalogs exist,
@@ -4252,7 +4260,7 @@ export const useConnectionStore = defineStore("connection", () => {
                 connectionId,
                 databases.map((database) => database.name),
               );
-              setChildren(targetNode, children);
+              setChildren(targetNode, children, { trustEmptyConnectionChildren: databases.length > 0 && visibleNames.length === 0 });
               await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
             }
           }
@@ -4683,6 +4691,7 @@ export const useConnectionStore = defineStore("connection", () => {
           })),
           targetNode,
         ),
+        { trustEmptyConnectionChildren: dbs.length > 0 && visibleDbs.length === 0 },
       );
       targetNode.isExpanded = true;
     } catch (e) {
