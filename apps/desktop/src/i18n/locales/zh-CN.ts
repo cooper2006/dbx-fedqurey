@@ -1772,6 +1772,7 @@ export default withEnglishFallback({
     batchAppendPasteEmpty: "剪贴板中没有可新增的行。",
     batchAppendPasteReadonlyColumn: "粘贴的数据包含不可编辑的列。",
     search: "搜索...",
+    searchTruncatedValuesHint: "部分长文本/JSON 值已截断显示，搜索仅覆盖已加载的显示内容，匹配数可能少于 SQL 查询。",
     searchOrWhere: "搜索，或输入 WHERE 条件...",
     applyWhere: "应用 WHERE",
     filterRows: "筛选行",

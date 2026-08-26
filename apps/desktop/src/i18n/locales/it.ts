@@ -1712,6 +1712,7 @@ export default withEnglishFallback({
     unfreezeColumns: "Sblocca colonne",
     pasted: "Incollato!",
     search: "Cerca...",
+    searchTruncatedValuesHint: "Alcuni valori di testo/JSON lunghi sono troncati per la visualizzazione; la ricerca copre solo il contenuto caricato e può trovare meno corrispondenze della query SQL.",
     searchOrWhere: "Cerca o inserisci una clausola WHERE...",
     applyWhere: "Applica WHERE",
     filterRows: "Filtra righe",

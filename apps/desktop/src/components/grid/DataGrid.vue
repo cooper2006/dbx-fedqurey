@@ -12092,6 +12092,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
               :match-count="searchMatches.length"
               :current-match-index="currentMatchIndex"
               :has-deferred-search-text="!!deferredClientSearchText"
+              :values-truncated="(props.result.large_value_cells?.length ?? 0) > 0"
               @keydown="onSearchKeydown"
               @navigate="navigateMatch"
               @close="closeSearch"

@@ -1713,6 +1713,7 @@ export default withEnglishFallback({
     unfreezeColumns: "取消凍結",
     pasted: "已貼上！",
     search: "搜尋……",
+    searchTruncatedValuesHint: "部分長文字/JSON 值已截斷顯示，搜尋僅涵蓋已載入的顯示內容，符合數可能少於 SQL 查詢。",
     searchOrWhere: "搜尋，或輸入 WHERE 條件……",
     applyWhere: "套用 WHERE",
     filterRows: "篩選列",

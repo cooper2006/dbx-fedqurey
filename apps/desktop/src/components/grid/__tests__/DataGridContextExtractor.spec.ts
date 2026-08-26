@@ -321,6 +321,33 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(contextMenuLabels()).toContain("Filter");
   });
 
+  async function openGridSearchAndType(host: HTMLElement, query: string) {
+    await settle();
+    const gridRoot = host.querySelector<HTMLElement>("[data-grid-root]");
+    if (!gridRoot) throw new Error("Grid root not found");
+    gridRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("input[type=search]");
+    if (!input) throw new Error("Search input not found");
+    input.value = query;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    // useDataGridSearch 防抖 150ms，等待 deferredSearchText 生效
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+
+  it("marks the search overlay when truncated large values may hide matches (issue #7279)", async () => {
+    const { host } = mountGrid(largeValueResult(1, "preview"));
+    await openGridSearchAndType(host, "prev");
+    expect(host.querySelector("[data-grid-search-truncated-hint]")).toBeTruthy();
+  });
+
+  it("does not show the truncation hint for fully loaded values", async () => {
+    const { host } = mountGrid(hydratedResult(1, "preview"));
+    await openGridSearchAndType(host, "prev");
+    expect(host.querySelector("[data-grid-search-truncated-hint]")).toBeNull();
+  });
+
   it("offers toolbar-equivalent refresh in the cell context menu (issue #7273)", async () => {
     const onReload = vi.fn();
     const { host } = mountGrid(hydratedResult(1, "value"), onReload);

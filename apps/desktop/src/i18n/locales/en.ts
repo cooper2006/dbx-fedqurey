@@ -1847,6 +1847,7 @@ export default {
     batchAppendPasteEmpty: "The clipboard does not contain rows to add.",
     batchAppendPasteReadonlyColumn: "The pasted data includes a column that cannot be edited.",
     search: "Search...",
+    searchTruncatedValuesHint: "Some long text/JSON values are truncated for display; the search only covers loaded cell text and may miss matches.",
     searchOrWhere: "Search, or enter a WHERE clause...",
     applyWhere: "Apply WHERE",
     filterRows: "Filter rows",

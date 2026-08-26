@@ -1730,6 +1730,7 @@ export default withEnglishFallback({
     unfreezeColumns: "列の固定を解除",
     pasted: "貼り付けました！",
     search: "検索...",
+    searchTruncatedValuesHint: "一部の長いテキスト/JSON 値は表示用に切り詰められています。検索は読み込み済みの表示内容のみが対象で、SQL クエリより一致数が少なくなることがあります。",
     searchOrWhere: "検索、またはWHERE句を入力...",
     applyWhere: "WHEREを適用",
     filterRows: "行をフィルター",
