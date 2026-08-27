@@ -772,8 +772,8 @@ fn dameng_integer_column_omits_mysql_display_width() {
     assert_eq!(
         result.statements,
         vec![
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" integer);",
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" number(10,0));",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" INTEGER);",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" NUMBER(10,0));",
         ]
     );
 }
@@ -2776,6 +2776,32 @@ fn dameng_add_column_with_identity() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"ID\" INT IDENTITY(10, 2));"]);
+}
+
+#[test]
+fn dameng_uppercases_lowercase_column_type() {
+    let mut status = column("STATUS");
+    status.data_type = "varchar(50)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "TEST".to_string(),
+        columns: vec![status],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // A lower-case type keyword must not reach the DDL: Dameng would store it
+    // as a USER-DEFINED type instead of the built-in VARCHAR (issue #7343).
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"STATUS\" VARCHAR(50));"]);
 }
 
 #[test]

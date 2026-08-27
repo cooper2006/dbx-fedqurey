@@ -162,7 +162,15 @@ pub(super) fn column_data_type(dialect: StructureDialect, column: &EditableStruc
     if dialect == StructureDialect::Questdb {
         return questdb_column_type(column);
     }
-    normalize_column_data_type(dialect, &column.data_type)
+    let normalized = normalize_column_data_type(dialect, &column.data_type);
+    // Dameng only recognizes its built-in type keywords in the canonical
+    // upper-case form: a lower-case `varchar(50)` in DDL is stored as a
+    // USER-DEFINED type instead of VARCHAR (issue #7343). Uppercase after the
+    // dialect-specific normalization so its rewrites still apply.
+    if dialect == StructureDialect::Dameng {
+        return normalized.to_uppercase();
+    }
+    normalized
 }
 
 fn manticore_column_type(column: &EditableStructureColumn) -> String {
