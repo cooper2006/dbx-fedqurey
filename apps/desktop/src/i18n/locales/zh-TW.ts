@@ -2050,10 +2050,13 @@ export default withEnglishFallback({
     batchAppendPasteEmpty: "剪貼簿中沒有可新增的行。",
     batchAppendPasteReadonlyColumn: "貼上的資料包含不可編輯的列。",
     xlsxHeaderTitle: "表頭格式",
+    xlsxExportTitle: "匯出選項",
     xlsxHeaderPrompt: "請選擇匯出 Excel 時使用的表頭格式：",
     xlsxHeaderOriginal: "表頭使用欄位名稱",
     xlsxHeaderComment: "表頭使用註解",
     xlsxHeaderNameAndComment: "表頭使用欄位名稱 + 註解",
+    xlsxFilterPrompt: "請選擇匯出的 Excel 是否包含篩選：",
+    xlsxIncludeAutoFilter: "包含篩選",
     cut: "已剪下",
   },
   exportProgress: {
