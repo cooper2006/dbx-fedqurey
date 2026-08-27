@@ -1910,6 +1910,7 @@ export default withEnglishFallback({
     setNull: "Imposta NULL",
     restoreOriginalValue: "Ripristina Originale",
     copyColumnName: "Copia Nome Colonna",
+    columnDragChipMany: "{names} ({count} colonne)",
     copyAlterColumnSql: "Copia come SQL ALTER",
     alterSqlCopied: "SQL ALTER copiato negli appunti",
     alterSqlCopiedWithWarnings: "SQL ALTER copiato negli appunti ({count} avviso/i)",

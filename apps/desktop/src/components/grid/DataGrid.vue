@@ -303,7 +303,9 @@ import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DAT
 import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
-import { useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
+import { useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeaderReferenceDragController } from "@/composables/useDataGridColumnLayout";
+import { createColumnReferencePayload, createTableReferenceDragEndEvent, createTableReferenceDropEvent, createTableReferenceHoverEvent } from "@/lib/editor/queryEditorTableDrop";
+import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
@@ -2867,6 +2869,62 @@ function unfreezeAllColumns() {
   applyColumnOrderChange(unfreezeAllColumnsInLayout);
 }
 
+// --- 表头拖拽进 SQL 编辑器：目标导向模式切换的控制器 ---
+// 按选择顺序（Set 插入序）取列名；被拖列未选中时仅拖该列。
+function columnReferenceDragNames(draggedVisibleColIdx: number): string[] | null {
+  const selected = [...selection.selectedColumnIndexes.value];
+  const ordered = selected.includes(draggedVisibleColIdx) ? selected : [draggedVisibleColIdx];
+  const names = ordered.map((index) => visibleColumns.value[index]).filter((name): name is string => !!name);
+  return names.length > 0 ? names : null;
+}
+
+function buildColumnReferencePayload(draggedVisibleColIdx: number) {
+  const columnNames = columnReferenceDragNames(draggedVisibleColIdx);
+  if (!columnNames) return null;
+  return createColumnReferencePayload({
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: props.schema,
+    columnNames,
+    databaseType: resolvedDatabaseType.value,
+  });
+}
+
+let referenceDragFeedback: TableReferenceDragFeedback | null = null;
+
+// 拖拽 chip 文案：≤3 个列名直接平铺，更多时走 i18n 摘要模板。
+function columnReferenceDragLabel(names: string[]): string {
+  if (names.length <= 3) return names.join(", ");
+  return t("grid.columnDragChipMany", { names: names.slice(0, 2).join(", "), count: names.length });
+}
+
+const columnHeaderReferenceDragController: ColumnHeaderReferenceDragController = {
+  isOverEditorTarget: (clientX, clientY) => isOverSqlEditorTarget(clientX, clientY),
+  onEnter(sourceVisibleIndex) {
+    const names = columnReferenceDragNames(sourceVisibleIndex);
+    if (!names) return null;
+    const label = columnReferenceDragLabel(names);
+    referenceDragFeedback?.end();
+    referenceDragFeedback = beginTableReferenceDragFeedback(label);
+    return label;
+  },
+  onMove(_sourceVisibleIndex, clientX, clientY) {
+    referenceDragFeedback?.update(clientX, clientY);
+    window.dispatchEvent(createTableReferenceHoverEvent({ clientX, clientY }));
+  },
+  onDrop(sourceVisibleIndex, clientX, clientY) {
+    const payload = buildColumnReferencePayload(sourceVisibleIndex);
+    if (!payload) return false;
+    window.dispatchEvent(createTableReferenceDropEvent({ payload, clientX, clientY }));
+    return true;
+  },
+  onCancel() {
+    referenceDragFeedback?.end();
+    referenceDragFeedback = null;
+    window.dispatchEvent(createTableReferenceDragEndEvent());
+  },
+};
+
 const {
   renderedColumnOffsets,
   horizontalColumnWindow,
@@ -2905,6 +2963,7 @@ const {
   onRefreshMetrics: scheduleColumnLayoutRefresh,
   onPersistColumnOrder: persistDraggedColumnOrder,
   frozenColumnCount,
+  columnReferenceDrag: columnHeaderReferenceDragController,
 });
 
 function onHeaderClickCapture(event: MouseEvent) {

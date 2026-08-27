@@ -2054,6 +2054,7 @@ export default {
     setNull: "Set NULL",
     restoreOriginalValue: "Restore Original",
     copyColumnName: "Copy Column Name",
+    columnDragChipMany: "{names} ({count} columns)",
     copyAlterColumnSql: "Copy as SQL ALTER",
     alterSqlCopied: "SQL ALTER copied to clipboard",
     alterSqlCopiedWithWarnings: "SQL ALTER copied to clipboard ({count} warning(s))",

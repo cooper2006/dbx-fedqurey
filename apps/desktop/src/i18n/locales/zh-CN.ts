@@ -1979,6 +1979,7 @@ export default withEnglishFallback({
     setNull: "设为 NULL",
     restoreOriginalValue: "恢复原值",
     copyColumnName: "复制列名",
+    columnDragChipMany: "{names} 等 {count} 列",
     copyAlterColumnSql: "复制为SQL ALTER",
     alterSqlCopied: "SQL ALTER 已复制到剪贴板",
     alterSqlCopiedWithWarnings: "SQL ALTER 已复制到剪贴板（含 {count} 条警告）",
