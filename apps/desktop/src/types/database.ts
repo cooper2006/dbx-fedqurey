@@ -1253,6 +1253,7 @@ export interface QueryTab {
     editableSourceKey?: string;
     multiSource?: boolean;
     allowInsert?: boolean;
+    allowDelete?: boolean;
     allowInsertDelete?: boolean;
     distinct?: boolean;
     sources?: {

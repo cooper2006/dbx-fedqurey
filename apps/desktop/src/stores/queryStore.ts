@@ -4229,6 +4229,8 @@ export const useQueryStore = defineStore("query", () => {
       const allSourceColumns = loadedSources.map((source) => ({ source: source.source, columns: source.tableMeta.columns }));
       // Match DBeaver's safety model: a joined result is writable only when one
       // source table has a complete row identifier and at least one writable column.
+      // A keyless source has no row identifier: allPrimaryKeysPresent is vacuously
+      // true for an empty key set, so joined results must exclude such sources.
       const candidates = loadedSources
         .map((loaded) => {
           const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(dbType, loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
@@ -4247,7 +4249,7 @@ export const useQueryStore = defineStore("query", () => {
             editableSourceColumnCount,
           };
         })
-        .filter((loaded) => (loaded.primaryKeysPresent || loaded.keylessAllowed) && !!loaded.sourceColumns && loaded.editableSourceColumnCount > 0);
+        .filter((loaded) => ((loaded.primaryKeysPresent && loaded.tableMeta.primaryKeys.length > 0) || loaded.keylessAllowed) && !!loaded.sourceColumns && loaded.editableSourceColumnCount > 0);
 
       if (loadedSources.length === 1) {
         const loaded = loadedSources[0]!;
@@ -4330,6 +4332,7 @@ export const useQueryStore = defineStore("query", () => {
       const queryAnalysis = {
         ...target.analysis,
         ...(target.analysis.distinct && canInsertIntoEditableQuerySource(tab, dbType as DatabaseType, target, target.sourceColumns) ? { allowInsert: true } : {}),
+        allowDelete: !target.analysis.distinct,
         allowInsertDelete: false,
         multiSource: true,
       };
