@@ -399,6 +399,20 @@ export async function saveConnectionDatabaseInfo(connectionId: string, databaseI
   });
 }
 
+export async function unlockConnectionWrites(connectionId: string, durationSecs: number): Promise<number> {
+  const state = await post<{ remainingMs: number }>("/api/connection/write-unlock", { connectionId, durationSecs });
+  return state.remainingMs;
+}
+
+export async function lockConnectionWrites(connectionId: string): Promise<void> {
+  return post("/api/connection/write-unlock/lock", { connectionId });
+}
+
+export async function connectionWriteUnlockState(connectionId: string): Promise<number> {
+  const state = await post<{ remainingMs: number }>("/api/connection/write-unlock/state", { connectionId });
+  return state.remainingMs;
+}
+
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
   return post("/api/connection/final-proxy-port", { config });
 }

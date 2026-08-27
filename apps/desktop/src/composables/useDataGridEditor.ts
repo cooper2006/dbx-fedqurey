@@ -11,6 +11,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
+import { ensureReadOnlyWriteAccess, isWriteUnlockActive } from "@/lib/database/readOnlyWriteAccess";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import { DBX_NEO4J_ELEMENT_ID_COLUMN, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -1598,6 +1599,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
     saveError.value = "";
     const connection = connectionStore.getConfig(connectionId.value);
+    if (!(await ensureReadOnlyWriteAccess({ connection, sql: statement, source: i18n.global.t("readOnlyUnlock.sourceDataEditor") }))) return null;
     const productionAssessment = assessProductionSql(statement, connection, database.value);
     if (productionAssessment.active && productionAssessment.isMutation) {
       const confirmed = await productionSafetyStore.requestConfirmation({
@@ -1605,7 +1607,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         connectionName: connection?.name,
         database: database.value,
         productionDatabases: productionAssessment.databases,
-        source: "Data editor",
+        source: i18n.global.t("readOnlyUnlock.sourceDataEditor"),
       });
       if (!confirmed) return null;
     }
@@ -1701,6 +1703,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     const customHandler = customSaveHandler?.value;
     const connection = connectionStore.getConfig(connectionId.value ?? "");
+    if (connection?.read_only) {
+      if (saveOptions.autoSave && !isWriteUnlockActive(connection.id)) return;
+      if (!(await ensureReadOnlyWriteAccess({ connection, sql: describeDataGridChanges(snapshot), source: i18n.global.t("readOnlyUnlock.sourceDataEditor"), treatAsMutation: true }))) {
+        return;
+      }
+    }
     const customHandlerProductionContext = productionContextForDatabase(connection, database.value);
     if (customHandler && customHandlerProductionContext.active) {
       // Custom data sources may not expose SQL, but their row mutations still need the same production interlock.
@@ -1712,7 +1720,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         connectionName: connection?.name,
         database: database.value,
         productionDatabases: customHandlerProductionContext.databases,
-        source: "Data editor",
+        source: i18n.global.t("readOnlyUnlock.sourceDataEditor"),
       });
       if (!confirmed) return;
     }
@@ -1793,7 +1801,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         connectionName: connection?.name,
         database: database.value,
         productionDatabases: productionAssessment.databases,
-        source: "Data editor",
+        source: i18n.global.t("readOnlyUnlock.sourceDataEditor"),
       });
       if (!confirmed) {
         await finishInterruptedSaveChanges(snapshot);

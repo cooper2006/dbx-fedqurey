@@ -1209,24 +1209,16 @@ async fn try_export_mysql_query_result_stream(
     state.touch_pool_activity(&pool_key).await;
     let _activity_touch = state.pool_activity_touch(&pool_key);
 
-    let (mysql_dialect, read_only_connection) = {
+    let mysql_dialect = {
         let configs = state.configs.read().await;
-        let config = configs.get(&request.connection_id);
-        (
-            config
-                .map(|config| {
-                    crate::db::mysql::MySqlQueryDialect::for_connection(
-                        config.db_type,
-                        config.driver_profile.as_deref(),
-                    )
-                })
-                .unwrap_or_default(),
-            config.filter(|config| config.read_only).map(|config| (config.name.clone(), config.db_type)),
-        )
+        configs
+            .get(&request.connection_id)
+            .map(|config| {
+                crate::db::mysql::MySqlQueryDialect::for_connection(config.db_type, config.driver_profile.as_deref())
+            })
+            .unwrap_or_default()
     };
-    if let Some((name, database_type)) = read_only_connection {
-        crate::query_execution_sql::check_read_only(&request.sql, &name, database_type)?;
-    }
+    crate::query::check_read_only_for_connection(state, &request.connection_id, &request.sql).await?;
 
     let row_limit = effective_row_limit(request);
     let stream_row_limit = row_limit;
