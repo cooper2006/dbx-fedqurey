@@ -314,7 +314,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       editValue.value = cached.editValue ?? "";
       restoredEditingCell = !!cached.editingCell;
       restoredTransactionActive = cached.transactionActive === true;
-      pendingScrollRestore = cached.scroll;
+      // A scroll-only snapshot (no pending edits, draft row, or active cell editor)
+      // must not drag a remounted grid back to the previous viewport: the fresh
+      // result should start at the first row (#7341). Scroll is only replayed
+      // alongside edit state so the user lands back on their edited rows. The
+      // KeepAlive activate path keeps pure scroll restore via the in-instance
+      // pendingScrollRestore, which this gate does not touch.
+      const snapshotHasEditState = cached.newRows.length > 0 || cached.dirtyRows.size > 0 || cached.deletedRows.size > 0 || !!cached.editingCell || !!cached.quickEntryDraftRow;
+      pendingScrollRestore = snapshotHasEditState ? cached.scroll : undefined;
       pendingChangesCache.delete(key);
     } else {
       pendingChangesCache.delete(key);

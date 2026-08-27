@@ -10061,6 +10061,11 @@ watch(
   () => props.result,
   (result, previousResult) => {
     const selectionSnapshot = preservedSelectionOnNextResult?.selection;
+    // The four preserved markers are armed together by prepareFullReload (toolbar
+    // refresh / rollback / row-save reload). Any of them being pending means the
+    // incoming result is an in-place refresh that must keep the viewport, so the
+    // check has to run before the markers are consumed below.
+    const inPlaceRefreshPending = preservedSelectionOnNextResult !== null || preservedViewportAnchorOnNextResult !== null || preservedDetailsOnNextResult !== null || preserveTransposeOnNextResult.value;
     preservedSelectionOnNextResult = null;
     const viewportAnchorSnapshot = preservedViewportAnchorOnNextResult?.anchor;
     preservedViewportAnchorOnNextResult = null;
@@ -10086,6 +10091,12 @@ watch(
     }
     if (getResetScrollAfterResult()) {
       clearResetScrollAfterResult();
+      resetGridVerticalScroll();
+    } else if (!inPlaceRefreshPending) {
+      // A result replaced without an internal grid action (e.g. SQL re-executed
+      // from the editor or a grid-embedded run button) is a brand-new dataset:
+      // start from the first row instead of stranding the viewport at the old
+      // scroll offset (#7341). In-place refreshes opt out via prepareFullReload.
       resetGridVerticalScroll();
     }
     closeReadonlyCellTextSelection();
