@@ -6327,6 +6327,7 @@ export default withEnglishFallback({
     shortcutToggleTranspose: "Attiva/disattiva vista trasposta",
     shortcutCancelSearch: "Annulla ricerca",
     shortcutToggleSidebar: "Attiva/disattiva barra laterale",
+    shortcutToggleZenMode: "Attiva/disattiva modalità Zen",
     shortcutCopySidebarSelection: "Copia selezione barra laterale",
     shortcutPasteSidebarSelection: "Incolla nella barra laterale",
     shortcutEditSidebarConnection: "Modifica connessione barra laterale",

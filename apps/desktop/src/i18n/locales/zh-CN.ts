@@ -6637,6 +6637,7 @@ export default withEnglishFallback({
     shortcutOpenSettings: "打开设置",
     shortcutCloseTab: "关闭标签页",
     shortcutToggleSidebar: "切换侧边栏",
+    shortcutToggleZenMode: "切换禅模式",
     shortcutFocusSearch: "聚焦当前页面搜索",
     shortcutQuickOpen: "快速打开 (搜索所有数据库对象)",
     shortcutNavigateTabHistoryBack: "返回到上一个查看的标签页",

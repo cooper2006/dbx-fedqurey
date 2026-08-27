@@ -6050,6 +6050,7 @@ export default withEnglishFallback({
     shortcutToggleTranspose: "전치 보기 전환",
     shortcutCancelSearch: "검색 취소",
     shortcutToggleSidebar: "사이드바 전환",
+    shortcutToggleZenMode: "Zen 모드 전환",
     shortcutCopySidebarSelection: "사이드바 선택 복사",
     shortcutPasteSidebarSelection: "사이드바에 붙여넣기",
     shortcutEditSidebarConnection: "사이드바 연결 편집",

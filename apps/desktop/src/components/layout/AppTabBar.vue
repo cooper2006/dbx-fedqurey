@@ -34,6 +34,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "activate-tab": [];
+  "toggle-zen-mode": [];
   "locate-tab": [tab: QueryTab];
   "activate-driver-store": [];
   "close-driver-store": [];
@@ -577,6 +578,17 @@ function handleTabClick(tab: QueryTab) {
   activateTab(tab.id);
 }
 
+function handleTabDoubleClick(tab: QueryTab, event: MouseEvent) {
+  event.stopPropagation();
+  if (tabDrag.state.suppressClick || (event.target instanceof Element && event.target.closest("button, input, [role='button']"))) return;
+  if (tab.mode === "data") {
+    if (tab.id !== queryStore.activeTabId) activateTab(tab.id);
+    emit("toggle-zen-mode");
+    return;
+  }
+  startRenameTab(tab);
+}
+
 function handleTabMouseDown(event: PointerEvent, tabId: string) {
   if (event.button === 0) {
     dispatchBeforeTabSwitch(tabId);
@@ -697,7 +709,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
                     :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
                     @click="handleTabClick(tab)"
-                    @dblclick.stop="startRenameTab(tab)"
+                    @dblclick="handleTabDoubleClick(tab, $event)"
                     @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
                     @pointerdown="handleTabMouseDown($event, tab.id)"
                     @mouseenter="handleTabDragTarget($event, tab)"
@@ -902,7 +914,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
                     :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
                     @click="handleTabClick(tab)"
-                    @dblclick.stop="startRenameTab(tab)"
+                    @dblclick="handleTabDoubleClick(tab, $event)"
                     @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
                     @pointerdown="handleTabMouseDown($event, tab.id)"
                     @mouseenter="handleTabDragTarget($event, tab)"

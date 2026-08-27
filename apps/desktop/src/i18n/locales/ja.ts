@@ -6335,6 +6335,7 @@ export default withEnglishFallback({
     shortcutToggleTranspose: "転置ビューを切替",
     shortcutCancelSearch: "検索をキャンセル",
     shortcutToggleSidebar: "サイドバーを切替",
+    shortcutToggleZenMode: "Zenモードを切替",
     shortcutCopySidebarSelection: "サイドバーの選択をコピー",
     shortcutPasteSidebarSelection: "サイドバーに貼り付け",
     shortcutEditSidebarConnection: "サイドバー接続を編集",

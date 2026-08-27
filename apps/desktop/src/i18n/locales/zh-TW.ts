@@ -5611,6 +5611,7 @@ export default withEnglishFallback({
     shortcutOpenSettings: "開啟設定",
     shortcutCloseTab: "關閉分頁",
     shortcutToggleSidebar: "切換側邊欄",
+    shortcutToggleZenMode: "切換禪模式",
     shortcutFocusSearch: "聚焦目前頁面搜尋",
     shortcutQuickOpen: "快速開啟 (搜尋所有資料庫物件)",
     shortcutNavigateTabHistoryBack: "返回到上一個檢視的分頁",

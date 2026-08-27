@@ -6304,6 +6304,7 @@ export default withEnglishFallback({
     shortcutOpenSettings: "Abrir configuración",
     shortcutCloseTab: "Cerrar pestaña",
     shortcutToggleSidebar: "Alternar barra lateral",
+    shortcutToggleZenMode: "Alternar modo Zen",
     shortcutFocusSearch: "Enfocar búsqueda de la vista actual",
     shortcutQuickOpen: "Abrir rápido (buscar todos los objetos de base de datos)",
     shortcutNavigateTabHistoryBack: "Volver a la pestaña vista anteriormente",
