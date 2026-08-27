@@ -2074,6 +2074,66 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listDatabasesFallsBackToShowDatabasesWhenGetCatalogsUnsupported() throws Exception {
+        Driver driver = new HiveCatalogsUnsupportedDriver("jdbc:hive2://inceptor.example.test:10000/default");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listDatabases", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:hive2://inceptor.example.test:10000/default",
+                    "username": "dcuser",
+                    "password": "secret"
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(1, response.path("result").size());
+            assertEquals("default", response.path("result").path(0).path("name").asText());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+            request("close", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:hive2://inceptor.example.test:10000/default",
+                    "username": "dcuser",
+                    "password": "secret"
+                  }
+                }
+                """);
+        }
+    }
+
+    @Test
+    void connectUsesRegisteredDriverWhenOtherDriversThrowUnsupportedOperationException() throws Exception {
+        String url = "jdbc:hive2://hive2-connect-test:10000/default";
+        String driverClass = Hive2ConnectGoodDriver.class.getName();
+        Driver badDriver = new Hive2ConnectThrowsUnsupportedDriver();
+        DriverManager.registerDriver(badDriver);
+        String connection = """
+            {
+              "connection_string": "%s",
+              "jdbc_driver_class": "%s"
+            }
+            """.formatted(url, driverClass);
+        try {
+            JsonNode response = request("listDatabases", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(1, response.path("result").size());
+            assertEquals("default", response.path("result").path(0).path("name").asText());
+        } finally {
+            DriverManager.deregisterDriver(badDriver);
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+        }
+    }
+
+    @Test
     void listDataTypesUsesJdbcTypeInfo() throws Exception {
         JsonNode response = request("listDataTypes", """
             { "connection": %s }
@@ -4431,6 +4491,200 @@ final class DbxJdbcPluginTest {
         if (returnType == double.class) return 0d;
         if (returnType == char.class) return '\0';
         return null;
+    }
+
+    private static final class Hive2ConnectThrowsUnsupportedDriver implements Driver {
+        @Override
+        public Connection connect(String connectUrl, Properties info) {
+            if (acceptsURL(connectUrl)) {
+                throw new UnsupportedOperationException("Method not supported");
+            }
+            return null;
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return connectUrl != null && connectUrl.startsWith("jdbc:hive2:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static final class Hive2ConnectGoodDriver implements Driver {
+        private static final String URL = "jdbc:hive2://hive2-connect-test:10000/default";
+
+        @Override
+        public Connection connect(String connectUrl, Properties info) throws SQLException {
+            if (!acceptsURL(connectUrl)) {
+                return null;
+            }
+            return new HiveCatalogsUnsupportedDriver(URL).connect(connectUrl, info);
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return URL.equals(connectUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static final class HiveCatalogsUnsupportedDriver implements Driver {
+        private final String url;
+
+        private HiveCatalogsUnsupportedDriver(String url) {
+            this.url = url;
+        }
+
+        @Override
+        public Connection connect(String connectUrl, Properties info) throws SQLException {
+            if (!acceptsURL(connectUrl)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "isClosed" -> false;
+                    case "isValid" -> true;
+                    case "close" -> null;
+                    case "getMetaData" -> hiveMetaData();
+                    case "getCatalog" -> {
+                        throw new UnsupportedOperationException("Method not supported");
+                    }
+                    case "createStatement" -> hiveShowDatabasesStatement();
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return url.equals(connectUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+
+        private static DatabaseMetaData hiveMetaData() {
+            return (DatabaseMetaData) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { DatabaseMetaData.class },
+                (proxy, method, args) -> {
+                    if ("getCatalogs".equals(method.getName())) {
+                        throw new UnsupportedOperationException("Method not supported");
+                    }
+                    return defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private static Statement hiveShowDatabasesStatement() {
+            return (Statement) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Statement.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "executeQuery" -> {
+                        if (args != null && args.length > 0 && "SHOW DATABASES".equals(args[0])) {
+                            yield singleColumnResultSet("default");
+                        }
+                        throw new SQLException("unexpected sql: " + (args == null || args.length == 0 ? null : args[0]));
+                    }
+                    case "close" -> null;
+                    case "isClosed" -> false;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private static ResultSet singleColumnResultSet(String value) {
+            return (ResultSet) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { ResultSet.class },
+                new java.lang.reflect.InvocationHandler() {
+                    private int index = -1;
+
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        return switch (method.getName()) {
+                            case "next" -> ++index == 0;
+                            case "getString" -> value;
+                            case "getObject" -> value;
+                            case "close" -> null;
+                            default -> defaultValue(method.getReturnType());
+                        };
+                    }
+                }
+            );
+        }
     }
 
     public static final class ErrorOnLoad {

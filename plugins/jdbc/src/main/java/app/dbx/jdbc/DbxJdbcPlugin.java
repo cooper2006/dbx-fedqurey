@@ -33,6 +33,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLClientInfoException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.sql.Statement;
 import java.sql.Time;
@@ -146,6 +147,7 @@ public final class DbxJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:taos-rs:", TAOS_QUIRKS)
     );
     private static String registeredDriverKey = "";
+    private static Driver registeredDriver;
     private static String sharedConnectionKey = "";
     private static Connection sharedConnection;
     private static boolean manualTransactionActive;
@@ -341,18 +343,24 @@ public final class DbxJdbcPlugin {
 
     private static String informativeThrowableMessage(Throwable error) {
         String message = error.getMessage();
-        if (message == null || message.isBlank()) {
-            return null;
-        }
-        String trimmed = message.trim();
         if (error instanceof ClassNotFoundException || error instanceof NoClassDefFoundError) {
+            String trimmed = message == null ? "" : message.trim();
             String className = trimmed.replace('/', '.');
             if (className.startsWith("io.modelcontextprotocol.")) {
                 return "Missing JDBCX MCP runtime class " + className
                     + ". Install io.github.jdbcx:io.modelcontextprotocol with the version required by the selected JDBCX runtime.";
             }
-            return "Missing Java class " + className + ". Install the required runtime dependency.";
+            if (!className.isEmpty()) {
+                return "Missing Java class " + className + ". Install the required runtime dependency.";
+            }
         }
+        if (error instanceof UnsupportedOperationException || error instanceof AbstractMethodError) {
+            return describeThrowable(error);
+        }
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        String trimmed = message.trim();
         return trimmed.equals(error.getClass().getName()) || trimmed.equals(error.getClass().getSimpleName())
             ? null
             : trimmed;
@@ -560,10 +568,11 @@ public final class DbxJdbcPlugin {
 
     private static void registerDrivers(JsonNode connection) throws Exception {
         String driverKey = driverKey(connection);
-        if (driverKey.equals(registeredDriverKey)) {
+        if (driverKey.equals(registeredDriverKey) && registeredDriver != null) {
             return;
         }
         closeSharedConnection();
+        registeredDriver = null;
         List<URL> urls = new ArrayList<>();
         JsonNode paths = connection.path("jdbc_driver_paths");
         if (paths.isArray()) {
@@ -582,20 +591,29 @@ public final class DbxJdbcPlugin {
 
         String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverClass != null) {
-            Driver driver = (Driver) Class.forName(driverClass, true, loader).getDeclaredConstructor().newInstance();
-            DriverManager.registerDriver(new DriverShim(driver));
+            Constructor<?> constructor = Class.forName(driverClass, true, loader).getDeclaredConstructor();
+            constructor.setAccessible(true);
+            Driver driver = (Driver) constructor.newInstance();
+            registeredDriver = new DriverShim(driver);
+            DriverManager.registerDriver(registeredDriver);
             registeredDriverKey = driverKey;
             return;
         }
 
         boolean loaded = false;
+        Driver first = null;
         for (Driver driver : ServiceLoader.load(Driver.class, loader)) {
-            DriverManager.registerDriver(new DriverShim(driver));
+            Driver shim = new DriverShim(driver);
+            if (first == null) {
+                first = shim;
+            }
+            DriverManager.registerDriver(shim);
             loaded = true;
         }
         if (!loaded && !urls.isEmpty()) {
             throw new IllegalArgumentException("No JDBC driver was discovered. Enter the driver class name for this JAR.");
         }
+        registeredDriver = first;
         registeredDriverKey = driverKey;
     }
 
@@ -605,7 +623,7 @@ public final class DbxJdbcPlugin {
             throw new IllegalArgumentException("JDBC URL is required.");
         }
         String key = connectionKey(connection);
-        if (sharedConnection != null && key.equals(sharedConnectionKey) && !sharedConnection.isClosed()) {
+        if (sharedConnection != null && key.equals(sharedConnectionKey) && !isConnectionClosed(sharedConnection)) {
             configureOrdinaryAutoCommit(sharedConnection);
             return sharedConnection;
         }
@@ -634,10 +652,59 @@ public final class DbxJdbcPlugin {
         if (isOracleUrl(url)) {
             applyOracleProperties(connection, properties);
         }
-        sharedConnection = DriverManager.getConnection(url, properties);
+        // Prefer the explicitly registered driver. DriverManager.getConnection only catches
+        // SQLException; Hive/Inceptor drivers may throw UnsupportedOperationException for optional
+        // methods, which aborts connect before the intended driver is reached.
+        sharedConnection = connectWithRegisteredDriver(url, properties);
         sharedConnectionKey = key;
         configureOrdinaryAutoCommit(sharedConnection);
         return sharedConnection;
+    }
+
+    private static Connection connectWithRegisteredDriver(String url, Properties properties) throws SQLException {
+        if (registeredDriver != null) {
+            try {
+                Connection connection = registeredDriver.connect(url, properties);
+                if (connection != null) {
+                    return connection;
+                }
+            } catch (UnsupportedOperationException | AbstractMethodError error) {
+                throw new SQLException("JDBC driver rejected connect for URL '" + url + "'", error);
+            }
+        }
+        try {
+            return DriverManager.getConnection(url, properties);
+        } catch (UnsupportedOperationException | AbstractMethodError error) {
+            throw new SQLException("JDBC DriverManager rejected connect for URL '" + url + "'", error);
+        }
+    }
+
+    private static String describeThrowable(Throwable error) {
+        if (error == null) {
+            return "unknown error";
+        }
+        String message = error.getMessage();
+        if (message != null && !message.isBlank()
+            && !message.equals(error.getClass().getName())
+            && !message.equals(error.getClass().getSimpleName())) {
+            return error.getClass().getName() + ": " + message.trim();
+        }
+        StackTraceElement[] stack = error.getStackTrace();
+        if (stack != null && stack.length > 0) {
+            StackTraceElement top = stack[0];
+            return error.getClass().getName() + " at " + top.getClassName() + "." + top.getMethodName()
+                + "(" + top.getFileName() + ":" + top.getLineNumber() + ")";
+        }
+        return error.getClass().getName();
+    }
+
+    private static boolean isConnectionClosed(Connection connection) {
+        try {
+            return connection.isClosed();
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            // Hive-based drivers may throw UnsupportedOperationException for optional Connection methods.
+            return true;
+        }
     }
 
     private static void configureOrdinaryAutoCommit(Connection jdbcConnection) throws SQLException {
@@ -720,7 +787,9 @@ public final class DbxJdbcPlugin {
     private static void applyConnectTimeout(JsonNode connection, Properties properties) {
         int connectTimeoutSecs = positiveInt(connection, "connect_timeout_secs", 30);
         DriverManager.setLoginTimeout(connectTimeoutSecs);
-        if (isPrestoOrTrinoConnection(connection)) {
+        if (isPrestoOrTrinoConnection(connection) || isHive2Connection(connection)) {
+            // Hive/Inceptor treat unknown timeout properties inconsistently; keep only
+            // DriverManager login timeout and avoid injecting vendor-specific keys.
             return;
         }
         String value = Integer.toString(connectTimeoutSecs);
@@ -728,6 +797,19 @@ public final class DbxJdbcPlugin {
         if (!jdbcUrlHasParameter(jdbcUrl(connection), "connectTimeout")) {
             properties.putIfAbsent("connectTimeout", connectTimeoutPropertyValue(connection, connectTimeoutSecs));
         }
+    }
+
+    private static boolean isHive2Connection(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        if (urlMatchesPrefix(url, "jdbc:hive2:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.contains("hive") || normalized.contains("inceptor") || normalized.contains("kyuubi");
     }
 
     private static String connectTimeoutPropertyValue(JsonNode connection, int connectTimeoutSecs) {
@@ -1833,11 +1915,23 @@ public final class DbxJdbcPlugin {
             return result;
         }
         DatabaseMetaData metadata = conn.getMetaData();
+        SQLException catalogFailure = null;
         try (ResultSet rs = metadata.getCatalogs()) {
             while (rs.next()) {
                 String name = rs.getString("TABLE_CAT");
                 addDatabase(result, name);
             }
+        } catch (AbstractMethodError | UnsupportedOperationException ignored) {
+            // Hive/Inceptor often throw UnsupportedOperationException for optional metadata methods.
+        } catch (SQLException e) {
+            catalogFailure = e;
+        }
+        if (result.isEmpty() && quirks.useCatalogFallbackSql()) {
+            addDatabasesFromShowDatabases(conn, result);
+        }
+        if (catalogFailure != null && result.isEmpty()) {
+            // Only tolerate getCatalogs failures when the SHOW DATABASES fallback recovered them.
+            throw catalogFailure;
         }
         if (result.isEmpty() && quirks.schemasAsDatabasesFallback()) {
             addSchemaDatabases(result, metadata);
@@ -1854,6 +1948,21 @@ public final class DbxJdbcPlugin {
         try (ResultSet rs = metadata.getSchemas()) {
             while (rs.next()) {
                 addDatabase(result, rs.getString("TABLE_SCHEM"));
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+    }
+
+    private static void addDatabasesFromShowDatabases(Connection conn, ArrayNode result) {
+        try (Statement statement = conn.createStatement()) {
+            if (statement == null) {
+                // Proxied or broken drivers may return null; let the schemas fallback take over.
+                return;
+            }
+            try (ResultSet rs = statement.executeQuery("SHOW DATABASES")) {
+                while (rs.next()) {
+                    addDatabase(result, rs.getString(1));
+                }
             }
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
@@ -3602,28 +3711,29 @@ public final class DbxJdbcPlugin {
     private static JsonNode getObjectSource(JsonNode connection, String database, String schema, String name, String objectType)
         throws SQLException {
         Connection conn = openConnection(connection);
-        if (!driverQuirks(connection).useOracleMetadata()) {
-            throw new SQLException("Object source is not supported by this JDBC driver");
-        }
-        String owner = oracleEffectiveSchema(conn, schema);
-        String metadataType = oracleMetadataObjectType(objectType);
-        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, metadataType);
-            ps.setString(2, name);
-            ps.setString(3, owner);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) {
-                    throw new SQLException("Object source not found");
+        if (driverQuirks(connection).useOracleMetadata()) {
+            String owner = oracleEffectiveSchema(conn, schema);
+            String metadataType = oracleMetadataObjectType(objectType);
+            String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, metadataType);
+                ps.setString(2, name);
+                ps.setString(3, owner);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new SQLException("Object source not found");
+                    }
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", name);
+                    item.put("object_type", objectType);
+                    putNullable(item, "schema", owner);
+                    putNullable(item, "source", rs.getString(1));
+                    return item;
                 }
-                ObjectNode item = MAPPER.createObjectNode();
-                item.put("name", name);
-                item.put("object_type", objectType);
-                putNullable(item, "schema", owner);
-                putNullable(item, "source", rs.getString(1));
-                return item;
             }
         }
+
+        throw new SQLException("Object source is not supported by this JDBC driver");
     }
 
     private static String oracleMetadataObjectType(String objectType) {
