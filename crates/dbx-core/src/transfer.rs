@@ -1565,8 +1565,8 @@ fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> V
         .collect()
 }
 
-fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) -> String {
-    let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
+fn identity_insert_statement(table: &str, schema: &str, db_type: &DatabaseType, enabled: bool) -> String {
+    let full_table = qualified_table(table, schema, db_type, None);
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
 }
 
@@ -1590,27 +1590,25 @@ async fn execute_transfer_write_statement(
     schema: &str,
     needs_identity_insert: bool,
 ) -> Result<(), String> {
-    if !needs_identity_insert || !matches!(target_db_type, DatabaseType::Dameng) {
+    if !needs_identity_insert || !matches!(target_db_type, DatabaseType::Dameng | DatabaseType::SqlServer) {
         execute_on_pool(state, target_pool_key, sql).await?;
         return Ok(());
     }
 
-    let enable_sql = dameng_identity_insert_statement(table, schema, true);
-    let disable_sql = dameng_identity_insert_statement(table, schema, false);
+    let enable_sql = identity_insert_statement(table, schema, target_db_type, true);
+    let disable_sql = identity_insert_statement(table, schema, target_db_type, false);
     execute_on_pool(state, target_pool_key, &enable_sql)
         .await
-        .map_err(|e| format!("Failed to enable Dameng IDENTITY_INSERT for {table}: {e}"))?;
+        .map_err(|e| format!("Failed to enable IDENTITY_INSERT for {table}: {e}"))?;
     let write_result = execute_on_pool(state, target_pool_key, sql).await;
     let disable_result = execute_on_pool(state, target_pool_key, &disable_sql).await;
 
     match (write_result, disable_result) {
         (Ok(_), Ok(_)) => Ok(()),
         (Err(write_error), Ok(_)) => Err(write_error),
-        (Ok(_), Err(disable_error)) => {
-            Err(format!("Failed to disable Dameng IDENTITY_INSERT for {table}: {disable_error}"))
-        }
+        (Ok(_), Err(disable_error)) => Err(format!("Failed to disable IDENTITY_INSERT for {table}: {disable_error}")),
         (Err(write_error), Err(disable_error)) => {
-            Err(format!("{write_error}; also failed to disable Dameng IDENTITY_INSERT for {table}: {disable_error}"))
+            Err(format!("{write_error}; also failed to disable IDENTITY_INSERT for {table}: {disable_error}"))
         }
     }
 }
@@ -7387,7 +7385,7 @@ where
         (request.mode.clone(), vec![])
     };
 
-    let writes_dameng_identity_columns = matches!(target_db_type, DatabaseType::Dameng)
+    let writes_identity_insert_columns = matches!(target_db_type, DatabaseType::Dameng | DatabaseType::SqlServer)
         && selected_columns_include_identity_columns(&col_names, &target_columns);
     let overrides_postgres_system_values = matches!(target_db_type, DatabaseType::Postgres)
         && selected_columns_include_postgres_generated_always_identity_columns(&col_names, &target_columns);
@@ -7471,7 +7469,7 @@ where
                     target_db_type,
                     &target_table,
                     &request.target_schema,
-                    writes_dameng_identity_columns,
+                    writes_identity_insert_columns,
                 )
                 .await
                 .map_err(|e| {
@@ -9561,6 +9559,18 @@ mod tests {
         assert_eq!(
             sql,
             "SET IDENTITY_INSERT \"SYSDBA\".\"USERS\" ON;\nINSERT INTO \"SYSDBA\".\"USERS\" (\"ID\") VALUES\n(1);\nSET IDENTITY_INSERT \"SYSDBA\".\"USERS\" OFF;"
+        );
+    }
+
+    #[test]
+    fn sqlserver_identity_insert_statement_quotes_schema_and_table() {
+        assert_eq!(
+            identity_insert_statement("inter_putaway", "dbo", &DatabaseType::SqlServer, true),
+            "SET IDENTITY_INSERT [dbo].[inter_putaway] ON"
+        );
+        assert_eq!(
+            identity_insert_statement("inter_putaway", "dbo", &DatabaseType::SqlServer, false),
+            "SET IDENTITY_INSERT [dbo].[inter_putaway] OFF"
         );
     }
 
