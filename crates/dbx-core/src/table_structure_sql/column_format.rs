@@ -26,6 +26,12 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
     }
     if !column.is_nullable && !is_oracle_like(dialect) && dialect != StructureDialect::ClickHouse {
         parts.push("NOT NULL".to_string());
+    } else if column.is_nullable
+        && dialect == StructureDialect::Mysql
+        && mysql_generated_clause.is_none()
+        && is_mysql_timestamp_type(&column.data_type)
+    {
+        parts.push("NULL".to_string());
     }
     if mysql_generated_clause.is_none() {
         if let Some(extra_clause) = column_extra_clause(dialect, column) {
@@ -437,4 +443,19 @@ pub(super) fn is_mysql_character_data_type(data_type: &str) -> bool {
     };
     let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     matches!(normalized.as_str(), "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext" | "enum" | "set")
+}
+
+/// MySQL silently rewrites a nullable `TIMESTAMP` column to `NOT NULL` when the
+/// generated DDL omits an explicit `NULL` keyword — regardless of whether a
+/// `DEFAULT` is present. With the (still common) `explicit_defaults_for_timestamp`
+/// server default of `OFF`, this can outright fail with `ERROR 1067 (42000):
+/// Invalid default value` for any non-first TIMESTAMP column. `DATETIME` is not
+/// affected and must not be touched.
+pub(super) fn is_mysql_timestamp_type(data_type: &str) -> bool {
+    let trimmed = data_type.trim();
+    let base_type = match trimmed.find('(') {
+        Some(open_index) => trimmed[..open_index].trim(),
+        None => trimmed,
+    };
+    base_type.eq_ignore_ascii_case("timestamp")
 }
