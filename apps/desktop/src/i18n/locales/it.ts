@@ -5786,6 +5786,7 @@ export default withEnglishFallback({
     sqlFormatterFromSameLine: "FROM con la prima tabella",
     sqlFormatterExpressionWidth: "Larghezza espressione",
     sqlFormatterLinesBetweenQueries: "Righe tra query",
+    sqlFormatterPreserveEmptyLines: "Mantieni le righe vuote",
     sqlFormatterDenseOperators: "Operatori compatti",
     sqlFormatterNewlineBeforeSemicolon: "Punto e virgola su nuova riga",
     sqlFormatterAdvancedOptions: "Opzioni avanzate",

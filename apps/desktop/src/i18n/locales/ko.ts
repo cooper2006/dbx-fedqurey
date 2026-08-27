@@ -5465,6 +5465,7 @@ export default withEnglishFallback({
     sqlFormatterFromSameLine: "FROM과 첫 번째 테이블을 같은 줄에 배치",
     sqlFormatterExpressionWidth: "표현식 너비",
     sqlFormatterLinesBetweenQueries: "쿼리 사이 줄 수",
+    sqlFormatterPreserveEmptyLines: "빈 줄 유지",
     sqlFormatterDenseOperators: "조밀한 연산자",
     sqlFormatterNewlineBeforeSemicolon: "세미콜론 새 줄에",
     sqlFormatterAdvancedOptions: "고급 옵션",

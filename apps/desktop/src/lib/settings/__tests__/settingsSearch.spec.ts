@@ -239,6 +239,7 @@ describe("settings search", () => {
       { titleKey: "settings.sqlFormatterLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterExpressionWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLinesBetweenQueries", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterPreserveEmptyLines", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterDenseOperators", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterNewlineBeforeSemicolon", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterParamTypes", category: "formatter", targetId: "formatter" },

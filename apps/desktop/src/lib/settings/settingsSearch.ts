@@ -142,6 +142,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "formatter-from-clause-layout", category: "formatter", titleKey: "settings.sqlFormatterFromClauseLayout", targetId: "formatter" },
   { id: "formatter-expression-width", category: "formatter", titleKey: "settings.sqlFormatterExpressionWidth", targetId: "formatter" },
   { id: "formatter-lines-between-queries", category: "formatter", titleKey: "settings.sqlFormatterLinesBetweenQueries", targetId: "formatter" },
+  { id: "formatter-preserve-empty-lines", category: "formatter", titleKey: "settings.sqlFormatterPreserveEmptyLines", targetId: "formatter" },
   { id: "formatter-dense-operators", category: "formatter", titleKey: "settings.sqlFormatterDenseOperators", targetId: "formatter" },
   { id: "formatter-newline-before-semicolon", category: "formatter", titleKey: "settings.sqlFormatterNewlineBeforeSemicolon", targetId: "formatter" },
   { id: "formatter-param-types", category: "formatter", titleKey: "settings.sqlFormatterParamTypes", targetId: "formatter" },

@@ -6041,6 +6041,7 @@ export default withEnglishFallback({
     sqlFormatterFromSameLine: "FROM 与首个表同行",
     sqlFormatterExpressionWidth: "表达式宽度",
     sqlFormatterLinesBetweenQueries: "查询之间空行",
+    sqlFormatterPreserveEmptyLines: "保留原有空行",
     sqlFormatterDenseOperators: "紧凑运算符",
     sqlFormatterNewlineBeforeSemicolon: "分号单独换行",
     sqlFormatterAdvancedOptions: "高级选项",

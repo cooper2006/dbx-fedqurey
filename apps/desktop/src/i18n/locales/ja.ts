@@ -5824,6 +5824,7 @@ export default withEnglishFallback({
     sqlFormatterFromSameLine: "FROM と最初のテーブルを同じ行に配置",
     sqlFormatterExpressionWidth: "式の幅",
     sqlFormatterLinesBetweenQueries: "クエリ間の行数",
+    sqlFormatterPreserveEmptyLines: "空行を保持",
     sqlFormatterDenseOperators: "演算子を詰める",
     sqlFormatterNewlineBeforeSemicolon: "セミコロンを新しい行に",
     sqlFormatterAdvancedOptions: "詳細オプション",

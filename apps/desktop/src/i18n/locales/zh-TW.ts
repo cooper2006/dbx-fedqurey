@@ -5110,6 +5110,7 @@ export default withEnglishFallback({
     sqlFormatterFromSameLine: "FROM 與第一個表同行",
     sqlFormatterExpressionWidth: "運算式寬度",
     sqlFormatterLinesBetweenQueries: "查詢之間空行",
+    sqlFormatterPreserveEmptyLines: "保留原有空行",
     sqlFormatterDenseOperators: "緊湊運算子",
     sqlFormatterNewlineBeforeSemicolon: "分號獨立換行",
     sqlFormatterAdvancedOptions: "進階選項",

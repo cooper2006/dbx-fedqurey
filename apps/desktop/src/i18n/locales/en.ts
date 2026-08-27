@@ -6057,6 +6057,7 @@ export default {
     sqlFormatterFromSameLine: "FROM with first table",
     sqlFormatterExpressionWidth: "Expression width",
     sqlFormatterLinesBetweenQueries: "Lines between queries",
+    sqlFormatterPreserveEmptyLines: "Preserve empty lines",
     sqlFormatterDenseOperators: "Dense operators",
     sqlFormatterNewlineBeforeSemicolon: "Semicolon on new line",
     sqlFormatterAdvancedOptions: "Advanced options",
