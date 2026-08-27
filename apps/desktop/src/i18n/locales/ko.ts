@@ -2269,6 +2269,7 @@ export default withEnglishFallback({
     settings: "AI 설정",
     noConfig: "AI가 구성되지 않았습니다. 설정 > AI에서 AI 공급자를 설정하세요.",
     provider: "공급자",
+    providerCustom: "사용자 지정",
     providerStatusActive: "활성",
     providerStatusConfigured: "구성됨",
     switchProvider: "공급자 전환",

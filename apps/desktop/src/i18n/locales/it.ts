@@ -2371,6 +2371,7 @@ export default withEnglishFallback({
     settings: "Impostazioni AI",
     noConfig: "L'AI non è configurata. Configura il tuo provider AI in Impostazioni > AI.",
     provider: "Provider",
+    providerCustom: "Personalizzato",
     providerStatusActive: "Attivo",
     providerStatusConfigured: "Configurato",
     switchProvider: "Cambia provider",

@@ -2397,6 +2397,7 @@ export default withEnglishFallback({
     settings: "AI設定",
     noConfig: "AIが設定されていません。設定 > AIでAIプロバイダーを設定してください。",
     provider: "プロバイダー",
+    providerCustom: "カスタム",
     providerStatusActive: "使用中",
     providerStatusConfigured: "設定済み",
     switchProvider: "プロバイダーを切替",

@@ -2437,6 +2437,7 @@ export default {
     settings: "AI Settings",
     noConfig: "AI is not configured. Please set up your AI provider in Settings > AI.",
     provider: "Provider",
+    providerCustom: "Custom",
     providerStatusActive: "Active",
     providerStatusConfigured: "Configured",
     switchProvider: "Switch Provider",

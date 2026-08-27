@@ -2373,6 +2373,7 @@ export default withEnglishFallback({
     settings: "Configuración de IA",
     noConfig: "La IA no está configurada. Configura tu proveedor de IA en Ajustes > IA.",
     provider: "Proveedor",
+    providerCustom: "Personalizado",
     providerStatusActive: "Activo",
     providerStatusConfigured: "Configurado",
     switchProvider: "Cambiar proveedor",

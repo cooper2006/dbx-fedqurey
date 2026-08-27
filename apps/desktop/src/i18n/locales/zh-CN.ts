@@ -2361,6 +2361,7 @@ export default withEnglishFallback({
     settings: "AI 设置",
     noConfig: "AI 尚未配置。请在 设置 > AI 中配置你的 AI 服务。",
     provider: "提供商",
+    providerCustom: "自定义",
     providerStatusActive: "当前",
     providerStatusConfigured: "已配置",
     switchProvider: "切换服务商",

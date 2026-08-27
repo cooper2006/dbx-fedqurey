@@ -313,6 +313,12 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
   },
 };
 
+/** Brand names stay as preset labels; only the generic "custom" entry is localized. */
+export function aiProviderLabel(provider: AiProvider, t: (key: string) => string): string {
+  if (provider === "custom") return t("ai.providerCustom");
+  return AI_PROVIDER_PRESETS[provider].label;
+}
+
 const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.fromEntries(
   Object.entries(AI_PROVIDER_PRESETS).map(([provider, preset]) => {
     const { label: _label, iconSlug: _iconSlug, requiresApiKey: _requiresApiKey, ...config } = preset;
