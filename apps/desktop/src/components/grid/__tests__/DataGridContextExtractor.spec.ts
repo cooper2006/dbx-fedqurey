@@ -608,3 +608,34 @@ describe("DataGrid visible large-value preview lifecycle", () => {
     expect(visibleHydrationCalls()).toHaveLength(0);
   });
 });
+
+describe("DataGrid DOM initial scroll position", () => {
+  it("keeps the first row visible while the virtual list finishes measuring", async () => {
+    const { host, replaceResult } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    const scroller = host.querySelector<HTMLElement>(".data-grid-scroller");
+    if (!scroller) throw new Error("Data grid scroller not found");
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, writable: true, value: 0 },
+      scrollWidth: { configurable: true, value: 1200 },
+      clientWidth: { configurable: true, value: 600 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollHeight: {
+        configurable: true,
+        get: () => (scroller.classList.contains("has-horizontal-scrollbar") ? 2600 : 500),
+      },
+    });
+
+    replaceResult({
+      columns: ["id", "payload"],
+      rows: Array.from({ length: 100 }, (_, index) => [index + 1, `row-${index + 1}`]),
+      affected_rows: 0,
+      execution_time_ms: 0,
+    });
+    await settle();
+
+    expect(scroller.classList.contains("has-horizontal-scrollbar")).toBe(true);
+    expect(scroller.scrollTop).toBe(0);
+  });
+});
