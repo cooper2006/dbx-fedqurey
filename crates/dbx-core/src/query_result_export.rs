@@ -23,7 +23,7 @@ use crate::query_result_sql::{
     QueryPaginationExecutionPlanOptions,
 };
 use crate::table_export::TableExportProgress;
-use crate::transfer::keyset_pagination_sql;
+use crate::transfer::keyset_pagination_sql_with_identifier_quote;
 use crate::types::SpatialColumn;
 use crate::xlsx_export::{
     finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter, XlsxWorksheetData,
@@ -553,6 +553,19 @@ struct KeysetPlan {
     last_pk_values: Vec<Value>,
 }
 
+fn build_keyset_export_sql(plan: &KeysetPlan, request: &QueryResultExportRequest, limit: usize) -> String {
+    keyset_pagination_sql_with_identifier_quote(
+        &plan.columns,
+        &plan.table,
+        &plan.schema,
+        &request.database_type,
+        &plan.primary_keys,
+        &plan.last_pk_values,
+        limit,
+        request.identifier_quote.as_deref(),
+    )
+}
+
 fn object_name_parts(name: &sqlparser::ast::ObjectName) -> Option<Vec<String>> {
     name.0
         .iter()
@@ -772,20 +785,7 @@ async fn export_query_result_core_inner(
 
         let (sql_to_execute, plan_limit, use_agent_result_session, single_execution) =
             if let Some(plan) = keyset_plan.as_ref() {
-                (
-                    keyset_pagination_sql(
-                        &plan.columns,
-                        &plan.table,
-                        &plan.schema,
-                        &request.database_type,
-                        &plan.primary_keys,
-                        &plan.last_pk_values,
-                        this_page,
-                    ),
-                    this_page,
-                    false,
-                    false,
-                )
+                (build_keyset_export_sql(plan, request, this_page), this_page, false, false)
             } else {
                 let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                     sql: request.sql.clone(),
@@ -2259,6 +2259,26 @@ mod tests {
     fn keyset_candidate_rejects_filters_and_projection_changes() {
         assert!(safe_keyset_candidate("SELECT * FROM users WHERE active = true").is_none());
         assert!(safe_keyset_candidate("SELECT id, name FROM users").is_none());
+    }
+
+    #[test]
+    fn kingbase_keyset_export_uses_connection_identifier_quote() {
+        let mut export_request = request("sql", None, None);
+        export_request.database_type = DatabaseType::Kingbase;
+        export_request.identifier_quote = Some("`".to_string());
+        let plan = KeysetPlan {
+            columns: vec!["id".to_string(), "name".to_string()],
+            primary_keys: vec!["id".to_string()],
+            pk_indices: vec![0],
+            schema: "app".to_string(),
+            table: "events".to_string(),
+            last_pk_values: vec![serde_json::json!(7)],
+        };
+
+        assert_eq!(
+            build_keyset_export_sql(&plan, &export_request, 100),
+            "SELECT `id`, `name` FROM `app`.`events` WHERE `id` > 7 ORDER BY `id` ASC LIMIT 100"
+        );
     }
 
     #[tokio::test]
