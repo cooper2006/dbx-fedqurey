@@ -180,6 +180,10 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Linking, bundling, and signing run for 30+ minutes after the last
+            # rustc call; the server's 10-minute default idle timeout would
+            # exit first and zero the counters shown by "Show sccache stats".
+            echo "SCCACHE_IDLE_TIMEOUT=0"
           } >> "$GITHUB_ENV"
 
       - name: Compute Rust dependency hash
@@ -322,6 +326,10 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Linking, bundling, and signing run for 30+ minutes after the last
+            # rustc call; the server's 10-minute default idle timeout would
+            # exit first and zero the counters shown by "Show sccache stats".
+            echo "SCCACHE_IDLE_TIMEOUT=0"
           } >> "$GITHUB_ENV"
 
       - name: Compute Rust dependency hash
