@@ -2134,6 +2134,44 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void hiveAdhocRetryOnlyRewritesSelectStatements() throws Exception {
+        List<String> executedSql = new ArrayList<>();
+        Driver driver = new AdhocFailingHiveDriver(executedSql);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:hive2://adhoc-retry-test:10000/default",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode insertResponse = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "sql": "INSERT INTO logs VALUES (1)"
+                }
+                """.formatted(connection));
+
+            assertTrue(insertResponse.has("error"), insertResponse.toString());
+            assertTrue(insertResponse.path("error").path("message").asText().contains("10750"), insertResponse.toString());
+            assertEquals(List.of("INSERT INTO logs VALUES (1)"), executedSql);
+
+            executedSql.clear();
+            JsonNode selectResponse = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT name FROM users"
+                }
+                """.formatted(connection));
+
+            assertTrue(selectResponse.has("error"), selectResponse.toString());
+            assertEquals(List.of("SELECT name FROM users", "SELECT /*+ adhoc */ name FROM users"), executedSql);
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
     void listDataTypesUsesJdbcTypeInfo() throws Exception {
         JsonNode response = request("listDataTypes", """
             { "connection": %s }
@@ -3828,10 +3866,25 @@ final class DbxJdbcPluginTest {
             new Class<?>[] { Connection.class },
             (proxy, method, args) -> switch (method.getName()) {
                 case "getMetaData" -> metadata;
+                // Hive fallback probes "SHOW DATABASES" via a plain statement before
+                // falling back to getSchemas; report no rows so the schema fallback
+                // path stays covered.
+                case "createStatement" -> emptyQueryResultStatement();
                 case "isClosed" -> false;
                 case "isValid" -> true;
                 case "getCatalog" -> null;
                 case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement emptyQueryResultStatement() {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "executeQuery" -> rowsResultSet(new String[] { "database_name" }, new Object[0][]);
                 default -> defaultValue(method.getReturnType());
             }
         );
@@ -4493,6 +4546,79 @@ final class DbxJdbcPluginTest {
         return null;
     }
 
+    private static final class AdhocFailingHiveDriver implements Driver {
+        private final List<String> executedSql;
+
+        private AdhocFailingHiveDriver(List<String> executedSql) {
+            this.executedSql = executedSql;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            if (!acceptsURL(url)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "createStatement" -> adhocFailingStatement(executedSql);
+                    case "isClosed" -> false;
+                    case "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:hive2://adhoc-retry-test:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Statement adhocFailingStatement(List<String> executedSql) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> {
+                if ("execute".equals(method.getName()) || "executeQuery".equals(method.getName())) {
+                    executedSql.add((String) args[0]);
+                    throw new SQLException(
+                        "FAILED: Execution Error, return code 10750 from org.apache.hadoop.hive.ql.exec.mr.MapRedTask");
+                }
+                return switch (method.getName()) {
+                    case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                };
+            }
+        );
+    }
+
     private static final class Hive2ConnectThrowsUnsupportedDriver implements Driver {
         @Override
         public Connection connect(String connectUrl, Properties info) {
@@ -4533,7 +4659,9 @@ final class DbxJdbcPluginTest {
         }
     }
 
-    private static final class Hive2ConnectGoodDriver implements Driver {
+    // Instantiated reflectively by DbxJdbcPlugin through jdbc_driver_class, so it
+    // must stay accessible outside this class.
+    public static final class Hive2ConnectGoodDriver implements Driver {
         private static final String URL = "jdbc:hive2://hive2-connect-test:10000/default";
 
         @Override
