@@ -4060,7 +4060,7 @@ pub fn pagination_sql(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
         }
@@ -4104,7 +4104,7 @@ pub fn pagination_sql_with_order(
     let order_expression = postgres_order_by_expression(order_by_columns, db_type);
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -4192,7 +4192,7 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
         });
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -4303,7 +4303,7 @@ pub fn keyset_pagination_sql_with_identifier_quote(
     let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type, identifier_quote);
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order}");
             oracle_rownum_page_sql(&col_list, base_sql, 0, limit)
         }
@@ -10713,6 +10713,51 @@ mod tests {
         );
         assert!(!sql.contains("OFFSET"));
         assert!(!sql.contains("FETCH NEXT"));
+    }
+
+    #[test]
+    fn oceanbase_oracle_pagination_uses_rownum_for_all_transfer_paths() {
+        let columns = [String::from("id"), String::from("name")];
+        let order = [String::from("id")];
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let sql = pagination_sql(&columns, "users", "APP", &database_type, 100, 50);
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = pagination_sql_with_order(&columns, "users", "APP", &database_type, 100, 50, &order, None);
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("ORDER BY \"id\""), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = pagination_sql_with_filter_order(
+                &columns,
+                "users",
+                "APP",
+                &database_type,
+                100,
+                50,
+                Some("WHERE status = 'active'"),
+                Some("id DESC"),
+                &order,
+            );
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("WHERE (status = 'active')"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = keyset_pagination_sql(
+                &columns,
+                "users",
+                "APP",
+                &database_type,
+                &[String::from("id")],
+                &[json!(25)],
+                50,
+            );
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("WHERE \"id\" > 25"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+        }
     }
 
     #[test]
