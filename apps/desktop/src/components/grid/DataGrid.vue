@@ -5104,6 +5104,7 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.size,
     offset: 0,
+    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
   if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
   const connection = connectionStore.getConfig(props.connectionId);
@@ -5270,6 +5271,7 @@ async function fetchLargeValueRequestChunk(columnIndex: number, requests: LargeV
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.length,
     offset: 0,
+    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
   const connection = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
   const results = await api.executeMulti(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, undefined, uuid(), {
