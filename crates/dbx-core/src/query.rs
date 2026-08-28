@@ -4878,7 +4878,19 @@ fn mysql_transaction_isolation_sql(consistent_snapshot: bool) -> Option<&'static
 }
 
 fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
-    matches!(error, mysql_async::Error::Server(server_error) if server_error.code == 1064)
+    match error {
+        mysql_async::Error::Server(server_error) if server_error.code == 1064 => true,
+        // Doris (and some other MySQL-compatible servers) report unsupported
+        // transaction clauses as ER_UNKNOWN_ERROR (1105) with a parser
+        // diagnostic instead of MySQL's ER_PARSE_ERROR (1064).  Only treat
+        // diagnostics that clearly identify a syntax/parser failure as
+        // retryable; generic 1105 errors may indicate a real server failure.
+        mysql_async::Error::Server(server_error) if server_error.code == 1105 => {
+            let message = server_error.message.to_ascii_lowercase();
+            message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"))
+        }
+        _ => false,
+    }
 }
 
 async fn begin_transaction_session(
@@ -9274,5 +9286,22 @@ for line in sys.stdin:
 
         assert!(mysql_error_is_syntax_error(&syntax_error));
         assert!(!mysql_error_is_syntax_error(&permission_error));
+    }
+
+    #[test]
+    fn mysql_backup_transaction_falls_back_for_doris_parser_syntax_errors() {
+        let doris_syntax_error = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "Syntax error in line 1: START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY ^ Encountered: COMMA Expected: EOF".to_string(),
+            state: "HY000".to_string(),
+        });
+        let generic_unknown_error = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "Unknown error".to_string(),
+            state: "HY000".to_string(),
+        });
+
+        assert!(mysql_error_is_syntax_error(&doris_syntax_error));
+        assert!(!mysql_error_is_syntax_error(&generic_unknown_error));
     }
 }
