@@ -39,6 +39,7 @@ import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
 import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
+import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
@@ -203,6 +204,7 @@ async function fetchDdl(force = false) {
   }
 }
 const errorMessage = ref("");
+const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 const columns = ref<EditableStructureColumn[]>([]);
 const copyColumnsDialogOpen = ref(false);
 const copySourceTables = ref<TableInfo[]>([]);
@@ -244,6 +246,9 @@ const sqliteSchemaRevision = ref<string>();
 const foreignKeys = ref<EditableStructureForeignKey[]>([]);
 const constraints = ref<ConstraintInfo[]>([]);
 const constraintsLoaded = ref(false);
+// The Constraints tab hides foreign keys when the dedicated Foreign Keys tab
+// is also shown, mirroring DataGrid/ObjectBrowser.
+const constraintsForTab = computed(() => constraintsForConstraintsTab(constraints.value, tableMetadataCapabilities.value.foreignKeys));
 const triggers = ref<EditableStructureTrigger[]>([]);
 const triggersLoaded = ref(false);
 const secondaryMetadataLoading = computed(() => indexesLoading.value || foreignKeysLoading.value || constraintsLoading.value || triggersLoading.value);
@@ -1561,6 +1566,7 @@ function resetState() {
   constraintsLoading.value = false;
   triggersLoading.value = false;
   errorMessage.value = "";
+  secondaryMetadataErrors.value = {};
   isPartitionedParent.value = false;
   partitionStatusKnown.value = true;
   concurrentAvailabilityInvalidated.value = false;
@@ -1799,6 +1805,7 @@ async function loadStructure(
   if (!silent) loading.value = true;
   setSecondaryMetadataLoading(effectiveScope, true);
   errorMessage.value = "";
+  secondaryMetadataErrors.value = {};
   let secondaryMetadataScheduled = false;
   let loadedSuccessfully = false;
   try {
@@ -1886,8 +1893,30 @@ async function loadStructure(
       }
     }
     const applySecondaryMetadata = async () => {
-      const [nextIndexes, nextForeignKeys, nextConstraints, nextTriggers] = await Promise.all([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise]);
+      const [indexesResult, foreignKeysResult, constraintsResult, triggersResult] = await Promise.allSettled([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise]);
       if (requestId !== structureLoadRequestId) return;
+
+      type SecondaryMetadataResult = { facet: ObjectMetadataFacet; result: PromiseSettledResult<unknown> };
+      const secondaryResults: SecondaryMetadataResult[] = [
+        { facet: "indexes", result: indexesResult },
+        { facet: "foreign-keys", result: foreignKeysResult },
+        { facet: "constraints", result: constraintsResult },
+        { facet: "triggers", result: triggersResult },
+      ];
+      const failedFacets = secondaryResults.filter((entry): entry is { facet: ObjectMetadataFacet; result: PromiseRejectedResult } => entry.result.status === "rejected");
+      for (const { facet, result } of failedFacets) {
+        console.warn(`[DBX][structure-editor:${facet}-metadata-failed]`, result.reason);
+      }
+      if (showErrors && failedFacets.length > 0) {
+        for (const { facet, result } of failedFacets) {
+          secondaryMetadataErrors.value[facet] = result.reason?.message || String(result.reason);
+        }
+      }
+
+      const nextIndexes = indexesResult.status === "fulfilled" ? indexesResult.value : undefined;
+      const nextForeignKeys = foreignKeysResult.status === "fulfilled" ? foreignKeysResult.value : undefined;
+      const nextConstraints = constraintsResult.status === "fulfilled" ? constraintsResult.value : undefined;
+      const nextTriggers = triggersResult.status === "fulfilled" ? triggersResult.value : undefined;
       if (nextIndexes) {
         indexes.value = createIndexDrafts(nextIndexes);
         loadedMetadataFacets.add("indexes");
@@ -1912,7 +1941,6 @@ async function loadStructure(
     const secondaryMetadataPromise = applySecondaryMetadata()
       .catch((error) => {
         console.warn("[DBX][structure-editor:secondary-metadata-failed]", error);
-        if (showErrors && requestId === structureLoadRequestId) errorMessage.value = error?.message || String(error);
       })
       .finally(() => {
         if (requestId === structureLoadRequestId) setSecondaryMetadataLoading(effectiveScope, false);
@@ -4371,6 +4399,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
+            <div v-else-if="secondaryMetadataErrors.indexes" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.indexes }}
+            </div>
             <table v-else class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
@@ -4486,6 +4517,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
+            <div v-else-if="secondaryMetadataErrors['foreign-keys']" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors["foreign-keys"] }}
+            </div>
             <div v-else-if="foreignKeys.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
@@ -4536,11 +4570,14 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <div v-else-if="constraints.length === 0" class="py-10 text-center text-muted-foreground">
+            <div v-else-if="secondaryMetadataErrors.constraints" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.constraints }}
+            </div>
+            <div v-else-if="constraintsForTab.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
             <div v-else class="space-y-1.5">
-              <div v-for="constraint in constraints" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled ? '' : 'opacity-60'">
+              <div v-for="constraint in constraintsForTab" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled ? '' : 'opacity-60'">
                 <div class="flex flex-wrap items-center gap-1.5">
                   <span class="font-mono font-medium">{{ constraint.name }}</span>
                   <Badge variant="outline" class="shrink-0">{{ constraint.constraint_type }}</Badge>
@@ -4558,6 +4595,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             <div v-if="triggersLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
+            </div>
+            <div v-else-if="secondaryMetadataErrors.triggers" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.triggers }}
             </div>
             <div v-else-if="triggers.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}

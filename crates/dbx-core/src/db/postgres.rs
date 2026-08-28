@@ -33,11 +33,11 @@ use crate::query::{await_stream_with_progress_timeout, DbOperationBudget, Stream
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, CustomTypeDdl,
-    CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember, CustomTypeProperties,
-    DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo,
-    ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder,
-    TableInfo, TriggerInfo,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, ConstraintInfo,
+    CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember,
+    CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo,
+    ObjectInfo, ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo,
+    SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -4106,6 +4106,282 @@ fn postgres_check_constraints_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'c' \
      ORDER BY con.conname"
+}
+
+/// All constraints on a table (primary key, foreign key, unique, check,
+/// exclude, and — on PG 18+ — not-null), as full `ConstraintInfo` records.
+/// `pg_constraint.contype` letters are expanded to display labels and the
+/// `conkey`/`confkey` attribute numbers are resolved to column names.
+/// PostgreSQL has no per-constraint disabled state, so `enabled` is always
+/// true; a `NOT VALID` constraint (e.g. an added-but-unvalidated CHECK or
+/// FK) reports `valid = false` and surfaces the "Not validated" badge.
+pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_constraints_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| ConstraintInfo {
+            name: pg_row_try_string(row, 0),
+            constraint_type: postgres_constraint_type_label(&pg_row_try_string(row, 1)),
+            definition: pg_row_try_string(row, 2),
+            columns: row.try_get::<_, Vec<String>>(3).unwrap_or_default(),
+            ref_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
+            ref_table: row.try_get::<_, Option<String>>(5).ok().flatten(),
+            ref_columns: row.try_get::<_, Vec<String>>(6).unwrap_or_default(),
+            match_type: postgres_constraint_match_type(row.try_get::<_, Option<String>>(7).ok().flatten()),
+            on_update: postgres_fk_action_label(row.try_get::<_, Option<String>>(8).ok().flatten()),
+            on_delete: postgres_fk_action_label(row.try_get::<_, Option<String>>(9).ok().flatten()),
+            deferrable: row.try_get::<_, bool>(10).unwrap_or(false),
+            initially_deferred: row.try_get::<_, bool>(11).unwrap_or(false),
+            enabled: true,
+            valid: row.try_get::<_, bool>(12).unwrap_or(true),
+        })
+        .collect())
+}
+
+/// OpenGauss-compatible constraint metadata without PostgreSQL's array/LATERAL
+/// dependencies. Older OpenGauss releases expose conkey/confkey as catalog
+/// vectors but may reject WITH ORDINALITY or decode them differently on the
+/// wire, so resolve attribute numbers in Rust.
+pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = match postgres_query_cached(&client, opengauss_constraints_sql(true), &[&schema, &table]).await {
+        Ok(rows) => rows,
+        Err(error) if is_missing_opengauss_constraint_column(&error, "convalidated") => {
+            log::debug!(
+                "[opengauss][constraints] convalidated unavailable; defaulting valid=true: {}",
+                pg_error_to_string(error)
+            );
+            postgres_query_cached(&client, opengauss_constraints_sql(false), &[&schema, &table])
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let local_relation_oid =
+        pg_row_try_u32(&rows[0], 13).ok_or("OpenGauss constraint metadata did not return a local relation OID")?;
+    let local_attributes = opengauss_relation_attributes(&client, local_relation_oid).await?;
+    let mut referenced_attributes: HashMap<u32, HashMap<i16, String>> = HashMap::new();
+    let mut result = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let name = pg_row_try_string(&row, 0);
+        let kind = pg_row_try_string(&row, 1);
+        let column_numbers = parse_opengauss_attribute_numbers(&pg_row_try_string(&row, 3))
+            .map_err(|error| format!("failed to parse OpenGauss constraint {name} columns: {error}"))?;
+        let ref_column_numbers = parse_opengauss_attribute_numbers(&pg_row_try_string(&row, 6))
+            .map_err(|error| format!("failed to parse OpenGauss constraint {name} referenced columns: {error}"))?;
+        let referenced_relation_oid = pg_row_try_u32(&row, 14).filter(|oid| *oid != 0);
+        let ref_columns = if kind == "f" {
+            if let Some(oid) = referenced_relation_oid {
+                if let std::collections::hash_map::Entry::Vacant(entry) = referenced_attributes.entry(oid) {
+                    entry.insert(opengauss_relation_attributes(&client, oid).await?);
+                }
+                map_opengauss_attribute_names(&ref_column_numbers, referenced_attributes.get(&oid).unwrap())
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        result.push(ConstraintInfo {
+            name,
+            constraint_type: postgres_constraint_type_label(&kind),
+            definition: pg_row_try_string(&row, 2),
+            columns: map_opengauss_attribute_names(&column_numbers, &local_attributes),
+            ref_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
+            ref_table: row.try_get::<_, Option<String>>(5).ok().flatten(),
+            ref_columns,
+            match_type: postgres_constraint_match_type(pg_row_try_optional_text(&row, 7)),
+            on_update: postgres_fk_action_label(pg_row_try_optional_text(&row, 8)),
+            on_delete: postgres_fk_action_label(pg_row_try_optional_text(&row, 9)),
+            deferrable: pg_row_try_bool(&row, 10).unwrap_or(false),
+            initially_deferred: pg_row_try_bool(&row, 11).unwrap_or(false),
+            enabled: true,
+            valid: pg_row_try_bool(&row, 12).unwrap_or(true),
+        });
+    }
+    Ok(result)
+}
+
+fn opengauss_constraints_sql(include_validated: bool) -> &'static str {
+    if include_validated {
+        "SELECT COALESCE(con.conname, ''), \
+                con.contype::text, \
+                COALESCE(pg_catalog.pg_get_constraintdef(con.oid, true), ''), \
+                COALESCE(con.conkey::text, ''), \
+                refn.nspname, refc.relname, COALESCE(con.confkey::text, ''), \
+                CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confupdtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confdeltype::text END, \
+                con.condeferrable, con.condeferred, con.convalidated, \
+                con.conrelid::oid, con.confrelid::oid \
+         FROM pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+         LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+         ORDER BY COALESCE(con.conname, '')"
+    } else {
+        "SELECT COALESCE(con.conname, ''), \
+                con.contype::text, \
+                COALESCE(pg_catalog.pg_get_constraintdef(con.oid, true), ''), \
+                COALESCE(con.conkey::text, ''), \
+                refn.nspname, refc.relname, COALESCE(con.confkey::text, ''), \
+                CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confupdtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confdeltype::text END, \
+                con.condeferrable, con.condeferred, TRUE, \
+                con.conrelid::oid, con.confrelid::oid \
+         FROM pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+         LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+         ORDER BY COALESCE(con.conname, '')"
+    }
+}
+
+async fn opengauss_relation_attributes(
+    client: &tokio_postgres::Client,
+    relation_oid: u32,
+) -> Result<HashMap<i16, String>, String> {
+    let rows = client
+        .query(
+            "SELECT a.attnum, a.attname::text FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+            &[&relation_oid],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.iter().filter_map(|row| Some((row.try_get::<_, i16>(0).ok()?, pg_row_try_string(row, 1)))).collect())
+}
+
+fn parse_opengauss_attribute_numbers(raw: &str) -> Result<Vec<i16>, String> {
+    let value = raw.trim().trim_matches(|character| matches!(character, '{' | '}' | '[' | ']'));
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<i16>().map_err(|_| format!("invalid attribute number {part:?}")))
+        .collect()
+}
+
+fn map_opengauss_attribute_names(numbers: &[i16], attributes: &HashMap<i16, String>) -> Vec<String> {
+    numbers.iter().filter_map(|number| attributes.get(number).cloned()).collect()
+}
+
+fn pg_row_try_u32(row: &Row, idx: usize) -> Option<u32> {
+    row.try_get::<_, u32>(idx)
+        .ok()
+        .or_else(|| row.try_get::<_, i64>(idx).ok().and_then(|value| u32::try_from(value).ok()))
+        .or_else(|| pg_row_try_string(row, idx).parse::<u32>().ok())
+}
+
+fn pg_row_try_optional_text(row: &Row, idx: usize) -> Option<String> {
+    if let Ok(value) = row.try_get::<_, Option<String>>(idx) {
+        return value.filter(|value| !value.is_empty());
+    }
+    row.try_get::<_, PgRawBytes>(idx)
+        .ok()
+        .and_then(|value| String::from_utf8(value.0).ok())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_missing_opengauss_constraint_column(error: &tokio_postgres::Error, column: &str) -> bool {
+    error.as_db_error().is_some_and(|db_error| {
+        db_error.code().code() == "42703" && db_error.message().to_ascii_lowercase().contains(column)
+    })
+}
+
+fn postgres_constraints_sql() -> &'static str {
+    "SELECT con.conname, \
+            con.contype::text, \
+            pg_catalog.pg_get_constraintdef(con.oid, true) AS definition, \
+            COALESCE(conkey.attnames, ARRAY[]::text[]) AS columns, \
+            refn.nspname AS ref_schema, \
+            refc.relname AS ref_table, \
+            COALESCE(confkey.attnames, ARRAY[]::text[]) AS ref_columns, \
+            CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END AS match_type, \
+            CASE WHEN con.contype = 'f' THEN con.confupdtype::text END AS on_update, \
+            CASE WHEN con.contype = 'f' THEN con.confdeltype::text END AS on_delete, \
+            con.condeferrable, \
+            con.condeferred, \
+            con.convalidated \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+     LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
+     LEFT JOIN LATERAL ( \
+         SELECT array_agg(a.attname::text ORDER BY ord.ord) AS attnames \
+         FROM unnest(con.conkey) WITH ORDINALITY AS ord(attnum, ord) \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ord.attnum AND NOT a.attisdropped \
+     ) conkey ON true \
+     LEFT JOIN LATERAL ( \
+         SELECT array_agg(a.attname::text ORDER BY ord.ord) AS attnames \
+         FROM unnest(con.confkey) WITH ORDINALITY AS ord(attnum, ord) \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = ord.attnum AND NOT a.attisdropped \
+     ) confkey ON true \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+     ORDER BY con.conname"
+}
+
+/// Expand a `pg_constraint.contype` letter to a human-readable label.
+fn postgres_constraint_type_label(contype: &str) -> String {
+    match contype {
+        "c" => "CHECK".to_string(),
+        "f" => "FOREIGN KEY".to_string(),
+        "p" => "PRIMARY KEY".to_string(),
+        "u" => "UNIQUE".to_string(),
+        "t" => "CONSTRAINT TRIGGER".to_string(),
+        "x" => "EXCLUDE".to_string(),
+        "n" => "NOT NULL".to_string(),
+        _ => contype.to_string(),
+    }
+}
+
+/// Normalize a `confupdtype`/`confdeltype` letter to an `information_schema`
+/// style referential-action label, mirroring `postgres_foreign_key_action`.
+fn postgres_fk_action_label(action: Option<String>) -> Option<String> {
+    action
+        .as_deref()
+        .and_then(|value| match value {
+            "a" => Some("NO ACTION"),
+            "r" => Some("RESTRICT"),
+            "c" => Some("CASCADE"),
+            "n" => Some("SET NULL"),
+            "d" => Some("SET DEFAULT"),
+            _ => None,
+        })
+        .map(str::to_string)
+}
+
+/// Normalize a `confmatchtype` letter to a match-type label.
+fn postgres_constraint_match_type(match_type: Option<String>) -> Option<String> {
+    match_type
+        .as_deref()
+        .and_then(|value| match value {
+            "f" => Some("FULL"),
+            "p" => Some("PARTIAL"),
+            "s" | "u" => Some("SIMPLE"),
+            _ => None,
+        })
+        .map(str::to_string)
 }
 
 fn postgres_table_partition_relation_sql() -> &'static str {
@@ -10234,6 +10510,82 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_get_constraintdef(con.oid, true)"));
         assert!(sql.contains("n.nspname = $1 AND c.relname = $2"));
         assert!(sql.contains("ORDER BY con.conname"));
+    }
+
+    #[test]
+    fn postgres_constraints_sql_covers_all_contypes_and_referential_fields() {
+        let sql = postgres_constraints_sql();
+        assert!(sql.contains("con.contype::text"));
+        assert!(sql.contains("pg_catalog.pg_get_constraintdef(con.oid, true)"));
+        // FK-only referential columns are conditionally selected.
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END"));
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confupdtype::text END"));
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confdeltype::text END"));
+        // conkey/confkey attribute numbers are resolved to names via laterals.
+        assert!(sql.contains("unnest(con.conkey) WITH ORDINALITY"));
+        assert!(sql.contains("unnest(con.confkey) WITH ORDINALITY"));
+        // attname (pg_attribute type `name`) is explicitly cast to text so the
+        // array decodes as text[] (matching the COALESCE fallback and Vec<String>).
+        assert!(sql.contains("array_agg(a.attname::text ORDER BY ord.ord)"));
+        assert_eq!(sql.matches("attname::text").count(), 2);
+        assert!(sql.contains("a.attisdropped"));
+        assert!(sql.contains("n.nspname = $1 AND c.relname = $2"));
+        assert!(sql.contains("c.relkind IN ('r','p','f')"));
+        assert!(sql.contains("ORDER BY con.conname"));
+    }
+
+    #[test]
+    fn opengauss_constraint_sql_avoids_array_and_ordinality_dependencies() {
+        let sql = opengauss_constraints_sql(true);
+        assert!(sql.contains("con.conkey::text"));
+        assert!(sql.contains("con.confkey::text"));
+        assert!(sql.contains("con.conrelid::oid"));
+        assert!(sql.contains("con.confrelid::oid"));
+        assert!(!sql.contains("unnest("));
+        assert!(!sql.contains("WITH ORDINALITY"));
+        assert!(!sql.contains("LATERAL"));
+    }
+
+    #[test]
+    fn opengauss_constraint_sql_falls_back_without_convalidated() {
+        let sql = opengauss_constraints_sql(false);
+        assert!(sql.contains("TRUE"));
+        assert!(!sql.contains("con.convalidated"));
+    }
+
+    #[test]
+    fn opengauss_constraint_attribute_vectors_are_strict() {
+        assert_eq!(parse_opengauss_attribute_numbers("1 2 4").unwrap(), vec![1, 2, 4]);
+        assert_eq!(parse_opengauss_attribute_numbers("{3,2}").unwrap(), vec![3, 2]);
+        assert_eq!(parse_opengauss_attribute_numbers("[4, 5]").unwrap(), vec![4, 5]);
+        assert!(parse_opengauss_attribute_numbers("1 bad 3").is_err());
+    }
+
+    #[test]
+    fn postgres_constraint_type_label_expands_contype_letters() {
+        assert_eq!(postgres_constraint_type_label("p"), "PRIMARY KEY");
+        assert_eq!(postgres_constraint_type_label("f"), "FOREIGN KEY");
+        assert_eq!(postgres_constraint_type_label("u"), "UNIQUE");
+        assert_eq!(postgres_constraint_type_label("c"), "CHECK");
+        assert_eq!(postgres_constraint_type_label("x"), "EXCLUDE");
+        assert_eq!(postgres_constraint_type_label("n"), "NOT NULL");
+        assert_eq!(postgres_constraint_type_label("unknown"), "unknown");
+    }
+
+    #[test]
+    fn postgres_fk_action_label_and_match_type_normalize_letters() {
+        assert_eq!(postgres_fk_action_label(Some("c".to_string())).as_deref(), Some("CASCADE"));
+        assert_eq!(postgres_fk_action_label(Some("n".to_string())).as_deref(), Some("SET NULL"));
+        assert_eq!(postgres_fk_action_label(Some("d".to_string())).as_deref(), Some("SET DEFAULT"));
+        assert_eq!(postgres_fk_action_label(Some("a".to_string())).as_deref(), Some("NO ACTION"));
+        assert_eq!(postgres_fk_action_label(Some("r".to_string())).as_deref(), Some("RESTRICT"));
+        assert_eq!(postgres_fk_action_label(Some("zz".to_string())), None);
+        assert_eq!(postgres_fk_action_label(None), None);
+        assert_eq!(postgres_constraint_match_type(Some("f".to_string())).as_deref(), Some("FULL"));
+        assert_eq!(postgres_constraint_match_type(Some("s".to_string())).as_deref(), Some("SIMPLE"));
+        assert_eq!(postgres_constraint_match_type(Some("u".to_string())).as_deref(), Some("SIMPLE"));
+        assert_eq!(postgres_constraint_match_type(Some("p".to_string())).as_deref(), Some("PARTIAL"));
+        assert_eq!(postgres_constraint_match_type(Some("zz".to_string())), None);
     }
 
     #[test]
