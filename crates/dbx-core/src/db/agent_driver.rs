@@ -3026,6 +3026,13 @@ fn agent_java_args_with_extra_opts(
         );
     }
 
+    // DM's driver reflects into NetworkInterface.index when the host contains '%'
+    // (multi-NIC addresses or IPv6 zone suffixes); without this open such connects
+    // fail with InaccessibleObjectException on the managed JRE 21.
+    if agent_jar_path_matches_key(jar_path, "dameng") {
+        args.push("--add-opens=java.base/java.net=ALL-UNNAMED".to_string());
+    }
+
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
     // so users need a process-level escape hatch before the agent jar is loaded.
     if let Some(extra) = extra_opts {
@@ -3806,6 +3813,20 @@ mod tests {
         let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
 
         assert!(!args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
+    }
+
+    #[test]
+    fn agent_java_args_open_java_net_for_dameng() {
+        let args = agent_java_args("/tmp/dbx/drivers/dameng/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_do_not_open_java_net_for_other_agents() {
+        let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
+
+        assert!(!args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
     }
 
     #[test]
