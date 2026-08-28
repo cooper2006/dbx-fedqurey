@@ -2258,17 +2258,6 @@ async fn do_execute_typed(
                         options.page_size.unwrap_or(MAX_ROWS),
                     );
                     session.invoke_with_timeout::<db::QueryResult>("fetchQueryPage", params, plugin_timeout).await
-                } else if options.page_size.is_some() {
-                    invoke_external_driver_query_with_preview_retry(
-                        session.as_ref(),
-                        config.as_ref(),
-                        &sql,
-                        &database,
-                        schema.as_deref(),
-                        &options,
-                        plugin_timeout,
-                    )
-                    .await
                 } else {
                     invoke_external_driver_query_with_preview_retry(
                         session.as_ref(),
