@@ -2259,13 +2259,27 @@ async fn do_execute_typed(
                     );
                     session.invoke_with_timeout::<db::QueryResult>("fetchQueryPage", params, plugin_timeout).await
                 } else if options.page_size.is_some() {
-                    let params =
-                        external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
-                    invoke_external_driver_query_page(session.as_ref(), params, plugin_timeout).await
+                    invoke_external_driver_query_with_preview_retry(
+                        session.as_ref(),
+                        config.as_ref(),
+                        &sql,
+                        &database,
+                        schema.as_deref(),
+                        &options,
+                        plugin_timeout,
+                    )
+                    .await
                 } else {
-                    let params =
-                        external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
-                    session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+                    invoke_external_driver_query_with_preview_retry(
+                        session.as_ref(),
+                        config.as_ref(),
+                        &sql,
+                        &database,
+                        schema.as_deref(),
+                        &options,
+                        plugin_timeout,
+                    )
+                    .await
                 }
             })
             .await
@@ -2348,6 +2362,226 @@ async fn invoke_external_driver_query_page(
         }
         Err(error) => Err(error),
     }
+}
+
+async fn invoke_external_driver_query_with_preview_retry(
+    session: &crate::plugins::PluginDriverSession,
+    config: &crate::models::connection::ConnectionConfig,
+    sql: &str,
+    database: &str,
+    schema: Option<&str>,
+    options: &QueryExecutionOptions,
+    plugin_timeout: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    let result = if options.page_size.is_some() {
+        let params = external_driver_query_params(config, sql, database, schema, options);
+        invoke_external_driver_query_page(session, params, plugin_timeout).await
+    } else {
+        let params = external_driver_query_params(config, sql, database, schema, options);
+        session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+    };
+
+    let Err(error) = result else {
+        return result;
+    };
+    if !options.table_data_preview || !is_external_driver_invalid_utf8_error(&error) {
+        return Err(error);
+    }
+    let Some(fallback_sql) = external_driver_preview_fallback_sql(sql) else {
+        return Err(error);
+    };
+
+    log::warn!(
+        "[query][external-driver] JDBC preview failed with invalid UTF-8; retrying without generated left() wrappers"
+    );
+    if options.page_size.is_some() {
+        let params = external_driver_query_params(config, &fallback_sql, database, schema, options);
+        invoke_external_driver_query_page(session, params, plugin_timeout).await
+    } else {
+        let params = external_driver_query_params(config, &fallback_sql, database, schema, options);
+        session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+    }
+}
+
+/// PostgreSQL can reject a character preview when legacy data contains an
+/// invalid UTF-8 byte exactly at the `left`/`substring` boundary.  JDBC can
+/// still return the unmodified text value, so table previews may safely retry
+/// without the generated `left(...)` wrappers and let the existing marker
+/// extraction truncate the value client-side.
+fn is_external_driver_invalid_utf8_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("invalid byte sequence for encoding") && normalized.contains("utf8")
+}
+
+fn is_sql_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn sql_keyword_at(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
+    let end = index.saturating_add(keyword.len());
+    end <= bytes.len()
+        && bytes[index..end].eq_ignore_ascii_case(keyword)
+        && (index == 0 || !is_sql_word_byte(bytes[index - 1]))
+        && (end == bytes.len() || !is_sql_word_byte(bytes[end]))
+}
+
+/// Skip a quoted literal/identifier or SQL comment and return the first byte
+/// after it. This keeps keyword and parenthesis scans from interpreting commas
+/// or `FROM` text embedded in user predicates/literals.
+fn skip_sql_quoted_or_comment(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = *bytes.get(start)?;
+    let (end_byte, doubled) = match quote {
+        b'\'' => (b'\'', true),
+        b'"' => (b'"', true),
+        b'`' => (b'`', true),
+        b'[' => (b']', true),
+        b'-' if bytes.get(start + 1) == Some(&b'-') => {
+            return Some(
+                bytes[start + 2..].iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |p| start + 2 + p + 1),
+            );
+        }
+        b'/' if bytes.get(start + 1) == Some(&b'*') => {
+            return Some(
+                bytes[start + 2..].windows(2).position(|pair| pair == b"*/").map_or(bytes.len(), |p| start + 2 + p + 2),
+            );
+        }
+        _ => return None,
+    };
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if quote == b'\'' && bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+        } else if bytes[index] == end_byte {
+            if doubled && bytes.get(index + 1) == Some(&end_byte) {
+                index += 2;
+            } else {
+                return Some(index + 1);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Some(bytes.len())
+}
+
+fn find_top_level_sql_keyword(sql: &str, start: usize, keyword: &[u8]) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(next) = skip_sql_quoted_or_comment(bytes, index) {
+            index = next;
+            continue;
+        }
+        match byte {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && sql_keyword_at(bytes, index, keyword) => return Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_preview_left_call(sql: &str, name_start: usize) -> Option<(usize, usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut open = name_start + 4;
+    while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+        open += 1;
+    }
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut comma = None;
+    let mut close = None;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(next) = skip_sql_quoted_or_comment(bytes, index) {
+            index = next;
+            continue;
+        }
+        match byte {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            b',' if depth == 1 => {
+                if comma.is_some() {
+                    return None;
+                }
+                comma = Some(index);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    let close = close?;
+    let comma = comma?;
+    let first = &sql[open + 1..comma];
+    let second = &sql[comma + 1..close];
+    if first.trim().is_empty() || second.trim().is_empty() || !second.trim().bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let first_start = open + 1 + first.len() - first.trim_start().len();
+    let first_end = open + 1 + first.trim_end().len();
+    Some((close, first_start, first_end))
+}
+
+fn rewrite_external_driver_preview_projection(projection: &str) -> Option<String> {
+    let bytes = projection.as_bytes();
+    let mut replacements = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if let Some(next) = skip_sql_quoted_or_comment(bytes, index) {
+            index = next;
+            continue;
+        }
+        if sql_keyword_at(bytes, index, b"left") {
+            let previous = index.checked_sub(1).and_then(|position| bytes.get(position)).copied();
+            if previous != Some(b'.') {
+                if let Some((close, first_start, first_end)) = find_preview_left_call(projection, index) {
+                    replacements.push((index, close + 1, projection[first_start..first_end].to_string()));
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if replacements.is_empty() {
+        return None;
+    }
+    let mut rewritten = projection.to_string();
+    for (start, end, replacement) in replacements.into_iter().rev() {
+        rewritten.replace_range(start..end, &replacement);
+    }
+    Some(rewritten)
+}
+
+fn external_driver_preview_fallback_sql(sql: &str) -> Option<String> {
+    let select_start = find_top_level_sql_keyword(sql, 0, b"select")?;
+    if !sql[..select_start].trim().is_empty() {
+        return None;
+    }
+    let select_end = select_start + b"select".len();
+    let from_start = find_top_level_sql_keyword(sql, select_end, b"from")?;
+    let projection = &sql[select_end..from_start];
+    if !projection.contains(crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX) {
+        return None;
+    }
+    let rewritten_projection = rewrite_external_driver_preview_projection(projection)?;
+    Some(format!("{}{}{}", &sql[..select_end], rewritten_projection, &sql[from_start..]))
 }
 
 fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
@@ -7416,6 +7650,155 @@ for line in sys.stdin:
             "Unknown column executeQueryPage in field list",
             "executeQueryPage"
         ));
+    }
+
+    #[test]
+    fn external_driver_preview_fallback_rewrites_generated_postgres_projections() {
+        let sql = concat!(
+            "SELECT \"id\", left(\"description\", 140) AS \"description\", ",
+            "left(\"metadata\"::text, 141) AS \"metadata\", ",
+            "'left(\"literal\", 1)' AS \"note\", ",
+            "'T:139' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"job_details\" WHERE left(note, 1) = 'x' LIMIT 100"
+        );
+        assert_eq!(
+            external_driver_preview_fallback_sql(sql).as_deref(),
+            Some("SELECT \"id\", \"description\" AS \"description\", \"metadata\"::text AS \"metadata\", 'left(\"literal\", 1)' AS \"note\", 'T:139' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"job_details\" WHERE left(note, 1) = 'x' LIMIT 100")
+        );
+    }
+
+    #[test]
+    fn external_driver_preview_fallback_handles_nested_commas_without_touching_literals() {
+        let sql = concat!(
+            "SELECT left(coalesce(\"description\", concat('a,b', \"fallback\")), 140) AS \"description\", ",
+            "'FROM left(\"literal\", 1)' AS \"note\", ",
+            "'T:140' AS \"__DBX_LARGE_VALUE_BYTES_T_0\" FROM \"job_details\""
+        );
+        assert_eq!(
+            external_driver_preview_fallback_sql(sql).as_deref(),
+            Some("SELECT coalesce(\"description\", concat('a,b', \"fallback\")) AS \"description\", 'FROM left(\"literal\", 1)' AS \"note\", 'T:140' AS \"__DBX_LARGE_VALUE_BYTES_T_0\" FROM \"job_details\"")
+        );
+    }
+
+    #[test]
+    fn external_driver_preview_fallback_requires_generated_marker_and_select_shape() {
+        assert!(external_driver_preview_fallback_sql("SELECT left(value, 10) FROM t").is_none());
+        assert!(external_driver_preview_fallback_sql(
+            "WITH rows AS (SELECT left(value, 10) AS value FROM t) SELECT value FROM rows"
+        )
+        .is_none());
+        assert!(external_driver_preview_fallback_sql(
+            "SELECT left(value, 10) AS value FROM t WHERE note = '__DBX_LARGE_VALUE_BYTES_T_0'"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn external_driver_invalid_utf8_error_detection_is_narrow() {
+        assert!(is_external_driver_invalid_utf8_error("ERROR: invalid byte sequence for encoding \"UTF8\": 0xe2"));
+        assert!(is_external_driver_invalid_utf8_error(
+            "org.postgresql.util.PSQLException: ERROR: invalid byte sequence for encoding \"UTF8\": 0xe2"
+        ));
+        assert!(!is_external_driver_invalid_utf8_error("ERROR: invalid byte sequence for encoding \"LATIN1\": 0xe2"));
+        assert!(!is_external_driver_invalid_utf8_error("Incorrect syntax near SELECT"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_preview_retry_preserves_marker_truncation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-preview-retry-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeQueryPage\"'*)\n      echo executeQueryPage >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding \\\"UTF8\\\": 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n    *'\"method\":\"executeQuery\"'*)\n      echo executeQuery >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding \\\"UTF8\\\": 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n  esac\ndone\n",
+                calls.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "preview-retry".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("preview retry plugin should start");
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-preview".to_string();
+        config.connection_string = Some("jdbc:test".to_string());
+        let marker = format!("{}T_1", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX);
+        let sql = format!(
+            "SELECT \"id\", left(\"description\", 140) AS \"description\", 'T:3' AS \"{marker}\" FROM \"job_details\""
+        );
+        let options = QueryExecutionOptions {
+            max_rows: Some(100),
+            page_size: Some(100),
+            table_data_preview: true,
+            ..Default::default()
+        };
+        let mut result = invoke_external_driver_query_with_preview_retry(
+            &session,
+            &config,
+            &sql,
+            "",
+            None,
+            &options,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("preview retry should return the unwrapped value");
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1), serde_json::json!("abc...")]]);
+        assert_eq!(
+            cells,
+            vec![db::LargeValueCell {
+                row_index: 0,
+                column_index: 1,
+                original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+            }]
+        );
+
+        let options = QueryExecutionOptions { max_rows: Some(100), table_data_preview: true, ..Default::default() };
+        let mut result = invoke_external_driver_query_with_preview_retry(
+            &session,
+            &config,
+            &sql,
+            "",
+            None,
+            &options,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("non-paged preview retry should return the unwrapped value");
+        let cells = extract_server_large_value_markers(&mut result);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1), serde_json::json!("abc...")]]);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 4);
+
+        session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
