@@ -1,5 +1,29 @@
 # WORK_LOG
 
+## 2026-08-28
+
+### 合并 upstream/main（t8y2/dbx）
+
+- **来源**：`git fetch upstream` → `git merge upstream/main --no-edit`
+- **范围**：190 个非合并提交，602 文件变更，+40120/-19373 行
+- **合并冲突**：无（clean merge）
+- **本地构建配置**：merge 前临时还原 `.cargo/config.toml`（Linux/macOS lld 链接器配置）与 `Cargo.toml`（release profile：opt-level=3、codegen-units=16、lto=false、incremental=true），merge 后重新应用
+- **主要变更摘要**：
+  - 编辑器：全局默认事务提交模式、拖拽结果列到 SQL 编辑器、Zen 模式
+  - 结构：PostgreSQL 系数据库展示表约束、MySQL 自增编辑与字段快捷键
+  - Grid：行列十字光标高亮、时间戳小数补零、JOIN 结果删行、复合唯一引用键、外部结果替换重置滚动
+  - 安全：只读连接临时写解锁窗口
+  - 导入：SQL 脚本导入（方言感知解析）
+  - 连接：创建连接时选择分组
+  - 查询：折叠重复外部驱动查询分支、空 raw 占位符保留
+  - Oracle：慢索引元数据不再阻塞首次查询
+  - Dameng：多 NIC 主机开放 java.net 模块、列类型大写
+  - MySQL：DRDS 索引表达式回退、健康探针超时保留连接池
+  - 传输：SQL Server 启用 identity insert、OceanBase Oracle 用 rownum 分页
+  - MCP：TLS 连接安装 rustls crypto provider
+  - CI：通过 sccache 缓存原生 C 依赖
+  - 其他多项 bug 修复与测试增强
+
 ## 2026-08-22
 
 ### 修复：dbx-core 测试编译错误（E0063 × 17）

@@ -35,8 +35,10 @@ mysql_async = { git = "https://github.com/zipg/mysql_async.git", rev = "4a9e60a6
 tiberius = { path = "vendor/tiberius" }
 
 [profile.release]
-panic = "abort"
+opt-level = 3          # 追求运行性能；临时测试可以改成 2
+codegen-units = 16     # 默认16；设为1编译最慢、程序最优；越大编译越快
+lto = false            # 不需要极致性能就关闭LTO，大幅缩短链接时间
+panic = "unwind"
 strip = true
-lto = true
-codegen-units = 1
-opt-level = "s"
+
+incremental = true  # 开启release增量缓存
