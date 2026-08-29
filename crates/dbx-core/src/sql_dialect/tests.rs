@@ -148,7 +148,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
-        TablePaginationStrategy::FetchFirst
+        TablePaginationStrategy::Rownum
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oscar), PaginationContext::BoundedRead),

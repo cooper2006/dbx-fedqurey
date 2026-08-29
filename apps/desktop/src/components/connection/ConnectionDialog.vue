@@ -3109,7 +3109,7 @@ const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", d
 const canChooseVisibleNacosNamespaces = computed(() => form.value.db_type === "nacos");
 const isNacosV3AdminPlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin");
 const isNacosV3ConsolePlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console");
-const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword");
+const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosAuthKind.value === "usernamePassword");
 const nacosManualNamespaceLabelKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespaces" : "nacos.nacosManagedNamespacesNameOrId"));
 const nacosManualNamespacePlaceholderKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespacesIdPlaceholder" : "nacos.nacosManagedNamespacesPlaceholder"));
 const nacosManualNamespaceHintKey = computed(() => {
@@ -3323,7 +3323,8 @@ const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "confi
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
   const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
-  return `${widthClass} connection-dialog-content--config`;
+  const scrollableAdvancedNacos = form.value.db_type === "nacos" && configTab.value === "advanced";
+  return `${widthClass} connection-dialog-content--config${scrollableAdvancedNacos ? " connection-dialog-content--scrollable" : ""}`;
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -4471,6 +4472,7 @@ async function resolveManualNacosNamespaceNames(namespaces: string[]): Promise<s
 
 function isNacosNamespaceListingPermissionError(error: unknown): boolean {
   const message = errorMessage(error);
+  if (/NACOS_ERROR\[rnacosNamespaceDirectoryUnavailable\]/.test(message)) return true;
   if (/NACOS_ERROR\[(?:v3ManagedNamespacesRequired|managedNamespacesRequired)\]/.test(message)) return true;
   return /\/v3\/(?:admin|console)\/core\/namespace\/list/.test(message) && /\b403\b/.test(message) && /authorization failed/i.test(message);
 }
@@ -4556,7 +4558,10 @@ async function saveVisibleNacosNamespaceSelection() {
   if (visibleNacosNamespaceAccessMode.value === "manual") {
     const manualNamespaces = parseNacosManagedNamespaces(nacosManagedNamespacesText.value);
     isResolvingManualNacosNamespaces.value = true;
-    const resolvedNamespaces = isNacosV3AdminPlane.value ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
+    // r-nacos does not promise a namespace directory on its client OpenAPI.
+    // Preserve user-provided IDs directly so scoped config access does not
+    // require a separate console login.
+    const resolvedNamespaces = isNacosV3AdminPlane.value || nacosImplementation.value === "rnacos" ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
     isResolvingManualNacosNamespaces.value = false;
     nacosManagedNamespacesText.value = resolvedNamespaces.join("\n");
     form.value.visible_databases = resolvedNamespaces;
@@ -7973,7 +7978,7 @@ function openExternalUrl(url: string) {
             </TabsContent>
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6">
+              <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
                 <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
                   <div class="flex items-center gap-1">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckDisabled") }}</Label>
@@ -8977,6 +8982,10 @@ function openExternalUrl(url: string) {
 
 .connection-dialog-content--config {
   min-height: 0;
+}
+
+.connection-dialog-content--scrollable {
+  height: min(720px, calc(var(--dbx-viewport-height) - 2rem));
 }
 
 .connection-dialog-content--config .connection-form-body {

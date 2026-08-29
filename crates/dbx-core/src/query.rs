@@ -828,14 +828,24 @@ fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&s
     }
 }
 
+#[cfg(test)]
 fn sql_for_execution_context(db_type: Option<DatabaseType>, sql: &str, schema: Option<&str>) -> String {
+    sql_for_execution_context_with_identifier_quote(db_type, sql, schema, None)
+}
+
+fn sql_for_execution_context_with_identifier_quote(
+    db_type: Option<DatabaseType>,
+    sql: &str,
+    schema: Option<&str>,
+    identifier_quote: Option<&str>,
+) -> String {
     let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) else {
         return sql.to_string();
     };
     match db_type {
         Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
         Some(DatabaseType::Kingbase) => {
-            qualify_kingbase_unqualified_relations(sql, schema).unwrap_or_else(|| sql.to_string())
+            qualify_kingbase_unqualified_relations(sql, schema, identifier_quote).unwrap_or_else(|| sql.to_string())
         }
         _ => sql.to_string(),
     }
@@ -865,7 +875,7 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<String> {
+fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_quote: Option<&str>) -> Option<String> {
     let dialect = PostgreSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
     if statements.is_empty() {
@@ -878,8 +888,13 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<Str
             continue;
         }
         let cte_names = statement_cte_names(statement);
-        let mut qualifier =
-            KingbaseRelationQualifier { schema, cte_names: &cte_names, parameterized_table_depth: 0, changed: false };
+        let mut qualifier = KingbaseRelationQualifier {
+            schema,
+            identifier_quote: identifier_quote_char(identifier_quote),
+            cte_names: &cte_names,
+            parameterized_table_depth: 0,
+            changed: false,
+        };
         let _ = statement.visit(&mut qualifier);
         changed |= qualifier.changed;
     }
@@ -889,6 +904,7 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<Str
 
 struct KingbaseRelationQualifier<'a> {
     schema: &'a str,
+    identifier_quote: char,
     cte_names: &'a HashSet<String>,
     parameterized_table_depth: usize,
     changed: bool,
@@ -913,7 +929,12 @@ impl VisitorMut for KingbaseRelationQualifier<'_> {
 
     fn post_visit_relation(&mut self, relation: &mut ObjectName) -> ControlFlow<Self::Break> {
         if self.parameterized_table_depth == 0
-            && qualify_unqualified_relation_name(relation, self.schema, self.cte_names)
+            && qualify_unqualified_relation_name_with_quote(
+                relation,
+                self.schema,
+                self.cte_names,
+                self.identifier_quote,
+            )
         {
             self.changed = true;
         }
@@ -933,6 +954,15 @@ fn statement_uses_schema_context(statement: &Statement) -> bool {
 }
 
 fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
+    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, '"')
+}
+
+fn qualify_unqualified_relation_name_with_quote(
+    name: &mut ObjectName,
+    schema: &str,
+    cte_names: &HashSet<String>,
+    identifier_quote: char,
+) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
     };
@@ -941,8 +971,19 @@ fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_na
     }
 
     let table = table.clone();
-    name.0 = vec![ObjectNamePart::Identifier(Ident::with_quote('"', schema)), ObjectNamePart::Identifier(table)];
+    name.0 = vec![
+        ObjectNamePart::Identifier(Ident::with_quote(identifier_quote, schema)),
+        ObjectNamePart::Identifier(table),
+    ];
     true
+}
+
+fn identifier_quote_char(identifier_quote: Option<&str>) -> char {
+    match identifier_quote.map(str::trim) {
+        Some("`") => '`',
+        Some("\"") => '"',
+        _ => '"',
+    }
 }
 
 fn statement_cte_names(statement: &Statement) -> HashSet<String> {
@@ -2185,7 +2226,8 @@ async fn do_execute_typed(
         PoolKind::Agent(client) => {
             let client = client.clone();
             let source_client = client.clone();
-            let sql = sql_for_execution_context(pool_db_type, sql, schema);
+            let sql =
+                sql_for_execution_context_with_identifier_quote(pool_db_type, sql, schema, client.identifier_quote());
             let database = database.map(|s| s.to_string());
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
@@ -3888,8 +3930,12 @@ pub async fn execute_statements(
         let execution_schema = schema_for_execution_context(db_type, schema);
         let rewritten_statements;
         let statements = if qualifies_unqualified_agent_relations(db_type) {
-            rewritten_statements =
-                statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+            rewritten_statements = statements
+                .iter()
+                .map(|sql| {
+                    sql_for_execution_context_with_identifier_quote(db_type, sql, schema, client.identifier_quote())
+                })
+                .collect::<Vec<_>>();
             rewritten_statements.as_slice()
         } else {
             statements
@@ -4764,8 +4810,10 @@ async fn exec_tx_agent_inner(
     let execution_schema = schema_for_execution_context(db_type, schema);
     let rewritten_statements;
     let statements = if qualifies_unqualified_agent_relations(db_type) {
-        rewritten_statements =
-            statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+        rewritten_statements = statements
+            .iter()
+            .map(|sql| sql_for_execution_context_with_identifier_quote(db_type, sql, schema, client.identifier_quote()))
+            .collect::<Vec<_>>();
         rewritten_statements.as_slice()
     } else {
         statements
@@ -5636,7 +5684,7 @@ async fn execute_manual_txn_agent_statement(
     page_size: Option<usize>,
     result_session_id: Option<&str>,
 ) -> Result<db::QueryResult, String> {
-    let sql = sql_for_execution_context(db_type, statement, schema);
+    let sql = sql_for_execution_context_with_identifier_quote(db_type, statement, schema, client.identifier_quote());
     let execution_schema = schema_for_execution_context(db_type, schema);
     let options = manual_txn_agent_query_options(row_limit, table_data_preview, page_size, result_session_id);
     let request = manual_txn_agent_query_request(
@@ -8652,6 +8700,37 @@ for line in sys.stdin:
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM", Some("APP")),
             "SELECT * FROM"
+        );
+    }
+
+    #[test]
+    fn kingbase_execution_context_uses_driver_identifier_quote() {
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("`"),
+            ),
+            "SELECT * FROM `audit-schema`.sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("\""),
+            ),
+            "SELECT * FROM \"audit-schema\".sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("unsupported"),
+            ),
+            "SELECT * FROM \"audit-schema\".sys_user"
         );
     }
 

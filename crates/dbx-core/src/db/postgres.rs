@@ -6143,6 +6143,16 @@ pub(crate) enum PostgresSearchPathContext {
     LocalQueryTransaction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresSearchPathBaseline {
+    configured: String,
+    first_resolved_schema: Option<String>,
+    has_explicit_pg_catalog: bool,
+}
+
+type PostgresSearchPathBaselineEntry = (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline);
+type PostgresSearchPathBaselineCache = Mutex<HashMap<usize, PostgresSearchPathBaselineEntry>>;
+
 pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
     let (scope, suffix) = match context {
         // Ordinary queries and exports historically fall back to public for
@@ -6157,8 +6167,46 @@ pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearch
 }
 
 fn postgres_set_single_schema_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
-    let scope = if context == PostgresSearchPathContext::LocalTransaction { " LOCAL" } else { "" };
+    let scope = if matches!(
+        context,
+        PostgresSearchPathContext::LocalTransaction | PostgresSearchPathContext::LocalQueryTransaction
+    ) {
+        " LOCAL"
+    } else {
+        ""
+    };
     format!("SET{scope} search_path TO {}", pg_quote_ident(schema))
+}
+
+fn postgres_set_preserved_search_path_sql(
+    schema: &str,
+    context: PostgresSearchPathContext,
+    baseline: &PostgresSearchPathBaseline,
+) -> String {
+    let scope = if matches!(
+        context,
+        PostgresSearchPathContext::LocalTransaction | PostgresSearchPathContext::LocalQueryTransaction
+    ) {
+        " LOCAL"
+    } else {
+        ""
+    };
+    let configured = baseline.configured.trim();
+    let selected_schema = pg_quote_ident(schema);
+    let mut path = if baseline.first_resolved_schema.as_deref() == Some(schema) {
+        configured.to_string()
+    } else if configured.is_empty() {
+        selected_schema.clone()
+    } else {
+        format!("{selected_schema}, {configured}")
+    };
+    if path.is_empty() {
+        path = selected_schema;
+    }
+    if !baseline.has_explicit_pg_catalog {
+        path.push_str(", pg_catalog");
+    }
+    format!("SET{scope} search_path TO {path}")
 }
 
 fn postgres_requires_single_schema_search_path(error: &str) -> bool {
@@ -6191,6 +6239,61 @@ fn mark_postgres_client_single_schema_search_path(client: &deadpool_postgres::Cl
     clients.insert(key, Arc::downgrade(statement_cache));
 }
 
+fn postgres_search_path_baselines() -> &'static PostgresSearchPathBaselineCache {
+    static BASELINES: OnceLock<PostgresSearchPathBaselineCache> = OnceLock::new();
+    BASELINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_postgres_search_path_baseline(client: &deadpool_postgres::Client) -> Option<PostgresSearchPathBaseline> {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut baselines = postgres_search_path_baselines().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match baselines.get(&key) {
+        Some((cached, baseline)) if cached.upgrade().is_some_and(|cached| Arc::ptr_eq(&cached, statement_cache)) => {
+            Some(baseline.clone())
+        }
+        _ => {
+            baselines.remove(&key);
+            None
+        }
+    }
+}
+
+fn cache_postgres_search_path_baseline(client: &deadpool_postgres::Client, baseline: PostgresSearchPathBaseline) {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut baselines = postgres_search_path_baselines().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    baselines.retain(|_, (cached, _)| cached.strong_count() > 0);
+    baselines.insert(key, (Arc::downgrade(statement_cache), baseline));
+}
+
+async fn postgres_search_path_baseline(
+    client: &deadpool_postgres::Client,
+    timeout_duration: Duration,
+) -> Result<PostgresSearchPathBaseline, String> {
+    if let Some(baseline) = cached_postgres_search_path_baseline(client) {
+        return Ok(baseline);
+    }
+    let row = tokio::time::timeout(
+        timeout_duration,
+        client.query_one(
+            "SELECT current_setting('search_path'), (current_schemas(false))[1], \
+                    'pg_catalog' = ANY(current_schemas(false))",
+            &[],
+        ),
+    )
+    .await
+    .map_err(|_| format!("PostgreSQL schema.get timed out after {} seconds", timeout_duration.as_secs()))?
+    .map_err(pg_error_to_string)?;
+    let baseline = PostgresSearchPathBaseline {
+        configured: row.try_get(0).map_err(|error| error.to_string())?,
+        first_resolved_schema: row.try_get(1).map_err(|error| error.to_string())?,
+        has_explicit_pg_catalog: row.try_get(2).map_err(|error| error.to_string())?,
+    };
+    cache_postgres_search_path_baseline(client, baseline.clone());
+    Ok(baseline)
+}
+
 pub(crate) async fn set_postgres_search_path(
     client: &deadpool_postgres::Client,
     schema: &str,
@@ -6207,7 +6310,13 @@ pub(crate) async fn set_postgres_search_path(
         .await;
     }
 
-    let primary_sql = postgres_set_search_path_sql(schema, context);
+    let primary_sql = match postgres_search_path_baseline(client, timeout_duration).await {
+        Ok(baseline) => postgres_set_preserved_search_path_sql(schema, context, &baseline),
+        Err(error) => {
+            log::warn!("[postgres][schema.get:error] schema={schema} error={error}; using compatibility fallback");
+            postgres_set_search_path_sql(schema, context)
+        }
+    };
     match execute_postgres_infra_statement(client, &primary_sql, timeout_duration, "schema.set").await {
         Ok(affected) => Ok(affected),
         Err(primary_error) if postgres_requires_single_schema_search_path(&primary_error) => {
@@ -6350,15 +6459,8 @@ pub async fn execute_query_with_max_rows_and_cancel(
     .await
 }
 
-fn postgres_read_only_transaction_setup(schema: Option<&str>) -> Vec<(String, &'static str)> {
-    let mut statements = vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")];
-    if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
-        statements.push((
-            postgres_set_search_path_sql(schema, PostgresSearchPathContext::LocalQueryTransaction),
-            "explain_analyze.schema",
-        ));
-    }
-    statements
+fn postgres_read_only_transaction_setup() -> Vec<(String, &'static str)> {
+    vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")]
 }
 
 fn postgres_read_only_transaction_cleanup_error(error: String) -> String {
@@ -6404,12 +6506,21 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
     cancel_context: Option<PostgresCancelContext>,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
-    let setup = postgres_read_only_transaction_setup(schema);
+    let setup = postgres_read_only_transaction_setup();
 
     run_postgres_operation_with_rollback(
         || async {
             for (statement, stage) in setup {
                 execute_postgres_infra_statement(&client, &statement, budget.recycle_timeout, stage).await?;
+            }
+            if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
+                set_postgres_search_path(
+                    &client,
+                    schema,
+                    PostgresSearchPathContext::LocalQueryTransaction,
+                    budget.recycle_timeout,
+                )
+                .await?;
             }
 
             execute_postgres_user_query_with_mode(
@@ -8447,14 +8558,7 @@ mod tests {
     #[test]
     fn postgres_explain_analyze_uses_read_only_transaction_local_schema() {
         assert_eq!(
-            postgres_read_only_transaction_setup(Some("sales")),
-            vec![
-                ("BEGIN READ ONLY".to_string(), "explain_analyze.begin"),
-                ("SET LOCAL search_path TO \"sales\", pg_catalog, public".to_string(), "explain_analyze.schema"),
-            ]
-        );
-        assert_eq!(
-            postgres_read_only_transaction_setup(None),
+            postgres_read_only_transaction_setup(),
             vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")]
         );
     }
@@ -8772,6 +8876,57 @@ mod tests {
                 PostgresSearchPathContext::LocalTransaction,
             ),
             "SET LOCAL search_path TO \"tenant\"\"; RESET search_path; --\""
+        );
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql("application", PostgresSearchPathContext::LocalQueryTransaction),
+            "SET LOCAL search_path TO \"application\""
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_keeps_the_configured_path_when_selected_schema_is_first() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "application, extensions, public".to_string(),
+            first_resolved_schema: Some("application".to_string()),
+            has_explicit_pg_catalog: false,
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO application, extensions, public, pg_catalog"
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_prepends_selected_schema_without_dropping_configured_items() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "\"$user\", extensions, public".to_string(),
+            first_resolved_schema: Some("public".to_string()),
+            has_explicit_pg_catalog: false,
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"application\", \"$user\", extensions, public, pg_catalog"
+        );
+        assert_eq!(
+            postgres_set_preserved_search_path_sql(
+                "application",
+                PostgresSearchPathContext::LocalQueryTransaction,
+                &baseline,
+            ),
+            "SET LOCAL search_path TO \"application\", \"$user\", extensions, public, pg_catalog"
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_keeps_explicit_pg_catalog_position() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "extensions, pg_catalog, public".to_string(),
+            first_resolved_schema: Some("extensions".to_string()),
+            has_explicit_pg_catalog: true,
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"application\", extensions, pg_catalog, public"
         );
     }
 
@@ -11667,8 +11822,36 @@ mod tests {
         drop(client);
 
         let query_sql = format!("SELECT marker, {helper_ident}() AS helper FROM pg_settings");
+        let stale_session_recovery = async {
+            let client = pool.get().await.map_err(|error| error.to_string())?;
+            set_postgres_search_path(&client, &schema, PostgresSearchPathContext::Query, Duration::from_secs(5))
+                .await?;
+            client.execute("SET search_path TO public", &[]).await.map_err(pg_error_to_string)?;
+            set_postgres_search_path(&client, &schema, PostgresSearchPathContext::Query, Duration::from_secs(5))
+                .await?;
+            let selected: String = client
+                .query_one("SELECT marker FROM pg_settings", &[])
+                .await
+                .map_err(pg_error_to_string)?
+                .try_get(0)
+                .map_err(pg_error_to_string)?;
+            client.execute("RESET search_path", &[]).await.map_err(pg_error_to_string)?;
+            Ok::<_, String>(selected)
+        }
+        .await;
         let ordinary_result = execute_query_with_schema(&pool, &schema, &query_sql).await;
         let path_after_ordinary = execute_query(&pool, "SHOW search_path").await;
+        let read_only_result = execute_query_in_read_only_transaction_with_rollback(
+            &pool,
+            Some(&schema),
+            &query_sql,
+            None,
+            None,
+            DbOperationBudget::with_defaults(),
+            None,
+        )
+        .await;
+        let path_after_read_only = execute_query(&pool, "SHOW search_path").await;
 
         let mut streamed_rows = Vec::new();
         let streaming_result = stream_select_query_with_cancel(
@@ -11739,11 +11922,17 @@ mod tests {
             .expect("clean search_path fixtures");
 
         let ordinary = ordinary_result.expect("ordinary schema query");
+        assert_eq!(stale_session_recovery.expect("recover stale session search_path"), "selected-schema");
         assert_eq!(
             ordinary.rows,
             vec![vec![serde_json::json!("selected-schema"), serde_json::json!("public-fallback")]]
         );
         assert_eq!(path_after_ordinary.expect("path after ordinary query").rows, initial_path.rows);
+        assert_eq!(
+            read_only_result.expect("read-only schema query").rows,
+            vec![vec![serde_json::json!("selected-schema"), serde_json::json!("public-fallback")]]
+        );
+        assert_eq!(path_after_read_only.expect("path after read-only query").rows, initial_path.rows);
         assert_eq!(streaming_result.expect("streaming schema query"), 1);
         assert_eq!(
             streamed_rows,

@@ -21,6 +21,14 @@ export interface SqlSnippet {
   enabled?: boolean;
 }
 
+export interface SqlShortcutAction {
+  id: string;
+  label: string;
+  shortcut: string;
+  sql: string;
+  enabled?: boolean;
+}
+
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
 
 export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "sequence" | "object";

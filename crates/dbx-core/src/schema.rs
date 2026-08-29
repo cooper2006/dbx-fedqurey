@@ -3040,6 +3040,7 @@ fn escape_presto_like_pattern(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::agent_postgres_extension_fallback_config;
     use super::db;
     use super::{
         clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
@@ -4713,6 +4714,17 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn postgres_extension_metadata_fallback_targets_pg_compatible_agents() {
+        for db_type in [DatabaseType::Highgo, DatabaseType::Vastbase] {
+            assert!(agent_postgres_extension_fallback_config(Some(&test_connection_config(db_type))).is_some());
+        }
+        for db_type in [DatabaseType::Kingbase, DatabaseType::Uxdb, DatabaseType::Postgres, DatabaseType::Mysql] {
+            assert!(agent_postgres_extension_fallback_config(Some(&test_connection_config(db_type))).is_none());
+        }
+        assert!(agent_postgres_extension_fallback_config(None).is_none());
+    }
+
+    #[test]
     fn agent_metadata_timeout_defaults_to_sixty_seconds_and_honors_longer_config() {
         assert_eq!(super::agent_metadata_timeout(None), Some(std::time::Duration::from_secs(60)));
 
@@ -6143,6 +6155,10 @@ fn is_agent_postgres_metadata_fallback_config(config: &ConnectionConfig) -> bool
     matches!(config.db_type, DatabaseType::Highgo | DatabaseType::Vastbase)
 }
 
+fn agent_postgres_extension_fallback_config(config: Option<&ConnectionConfig>) -> Option<&ConnectionConfig> {
+    config.filter(|config| is_agent_postgres_metadata_fallback_config(config))
+}
+
 async fn native_postgres_metadata_pool(
     state: &AppState,
     connection_id: &str,
@@ -7294,6 +7310,15 @@ pub async fn list_extensions_core(
             }
         }
 
+        // HighGo and Vastbase use Agent pools but expose PostgreSQL's extension
+        // catalogs. Reuse the native metadata fallback so their installed
+        // extensions are not silently reported as an empty list.
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_extensions(&pool, schema).await;
+            }
+        }
+
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
 
         match &pool {
@@ -7322,6 +7347,12 @@ pub async fn list_available_extensions_core(
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await;
+            }
+        }
+
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_available_extensions(&pool).await;
             }
         }
 
