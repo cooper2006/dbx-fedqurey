@@ -218,6 +218,7 @@ impl Default for ConnectionConfig {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -246,6 +247,7 @@ impl Default for ConnectionConfig {
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: HashMap::new(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -528,6 +530,15 @@ pub fn default_http_tunnel_connect_timeout_secs() -> u64 {
 pub fn default_connect_timeout_secs() -> u64 {
     10
 }
+
+/// Cloud Spanner schema changes are long-running operations rather than plain
+/// statements. Measured against the real service, `CREATE INDEX` on an *empty*
+/// table took 22.9-33.6s over seven runs, so the generic default fails
+/// intermittently — and the failure is misleading, because the operation keeps
+/// running server-side and completes, leaving a retry to report
+/// `Duplicate name in schema`. Raising a floor mirrors what
+/// `connection::agent_connect_timeout` already does for Access.
+pub const SPANNER_MIN_QUERY_TIMEOUT_SECS: u64 = 120;
 
 pub fn default_query_timeout_secs() -> u64 {
     60
@@ -893,21 +904,12 @@ impl ConnectionConfig {
         }
     }
 
-    /// Cloud Spanner schema changes are long-running operations rather than plain
-    /// statements. Measured against the real service, `CREATE INDEX` on an *empty*
-    /// table took 22.9-33.6s over seven runs, so the generic default fails
-    /// intermittently — and the failure is misleading, because the operation keeps
-    /// running server-side and completes, leaving a retry to report
-    /// `Duplicate name in schema`. Raising a floor mirrors what
-    /// `connection::agent_connect_timeout` already does for Access.
-    const SPANNER_MIN_QUERY_TIMEOUT_SECS: u64 = 120;
-
     pub fn effective_query_timeout_secs(&self) -> u64 {
         if self.query_timeout_secs == 0 {
             // An explicit 0 is the UI's "no limit"; a floor must not impose one.
             return 0;
         }
-        let floor = if self.db_type == DatabaseType::Spanner { Self::SPANNER_MIN_QUERY_TIMEOUT_SECS } else { 1 };
+        let floor = if self.db_type == DatabaseType::Spanner { SPANNER_MIN_QUERY_TIMEOUT_SECS } else { 1 };
         self.query_timeout_secs.max(floor)
     }
 

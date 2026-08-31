@@ -1228,6 +1228,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![existing.id.clone()]),
+                query_timeout_secs: None,
             })
             .await
             .unwrap();
@@ -1300,6 +1301,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![removed.id.clone()]),
+                query_timeout_secs: None,
             })
             .await
             .unwrap();
@@ -1330,6 +1332,7 @@ mod tests {
                 read_only: true,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: None,
+                query_timeout_secs: None,
             })
             .await
             .unwrap();

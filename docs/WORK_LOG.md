@@ -1,5 +1,37 @@
 # WORK_LOG
 
+## 2026-08-31
+
+### 合并 upstream/main（t8y2/dbx）
+
+- **来源**：`git fetch upstream` → `git merge upstream/main --no-commit`（以本地为主处理冲突）
+- **范围**：37 个非合并提交，205 文件变更，+11123/-1220 行
+- **合并冲突**：1 个（`apps/desktop/src/components/editor/QueryEditor.vue`），已采用上游 SQL 快捷键功能（`sqlShortcutActions`、`runSqlShortcutAction`、`combinedDomKeydownHandler` 等）
+- **构建修复**：上游新增 `ConnectionConfig` 字段 `visible_database_patterns`（`Option<Vec<String>>`）与 `redis_key_templates`（`Vec<String>`），在 `Default` 实现及 2 处测试辅助函数（`calcite_agent.rs`、`federated.rs`）中补齐默认值
+- **验证**：`cargo check --all-targets --workspace` 全部通过（6m28s）
+- **主要变更摘要**：
+  - 编辑器：批量选中并插入 SQL 补全列、稳定 batch column selection、保留工具栏执行时 SQL 选择
+  - Grid：列过滤移到下拉 header、12 小时日期格式与时区别名、go-to-column 快捷键与键盘导航、总行数刷新移至标签、transpose 长文本编辑器样式统一、减少搜索分配
+  - DDL：DDL 查看对话框支持拖动标题栏
+  - 备份：添加 gzip 压缩与历史记录筛选
+  - SQL 文件：在树中创建、重命名、删除 SQL 文件
+  - Schema Diff：显示比较进度与下一步、部署脚本预览与选择同步、守卫部署脚本执行
+  - MCP：新增全局查询超时覆盖
+  - MongoDB：侧边栏预览并确认创建数据库
+  - Elasticsearch：超 1 万文档支持 pit + search_after 分页
+  - Xugu（虚谷）：侧边栏标记公共同义词作用域
+  - Oracle/OceanBase：格式化视图 DDL 预览
+  - Highgo：通过 limit/offset 分页查询提升性能
+  - Postgres：只读用户通过 pg_catalog 读取外键
+  - SQL Server：高亮 SET 关键字、重写 sql_variant CTE 查询避免崩溃
+  - SQLite：验证 SSH 备份与查询错误
+  - Linux：AppImage 禁用 dmabuf 渲染器
+  - SSH：停止 ssh config 覆盖显式连接字段
+  - Agent：按百分比或时间门控下载传输进度
+  - AI：批量流式 delta 事件、追加生成 SQL 去重
+  - CLI：安装默认 rustls crypto provider 防止 panic
+  - 其他文档与 bug 修复
+
 ## 2026-08-28
 
 ### 合并 upstream/main（t8y2/dbx）

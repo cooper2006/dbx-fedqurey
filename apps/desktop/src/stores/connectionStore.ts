@@ -143,7 +143,7 @@ import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
-import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
+import { appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints, isMysqlMissingPasswordFailure, isSqliteMissingEncryptionPasswordFailure } from "@/lib/connection/connectionErrorHints";
 import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
@@ -938,7 +938,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function connectionErrorWithDriverUpdateHint(config: ConnectionConfig | undefined, message: string): string {
     if (!config) return message;
     message = appendConnectionErrorHints(config, message, i18n.global.t);
-    if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
+    if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile, { ssh: connectionUsesSsh(config) })) return message;
     return appendAgentDriverUpdateHint(message, agentDriverUpdateHint());
   }
 
@@ -3841,6 +3841,10 @@ export const useConnectionStore = defineStore("connection", () => {
         queryStore.rollbackConnectionTransactions(connectionId);
         break;
     }
+    // Tab handling is synchronous in memory, but persistence is debounced. Flush
+    // the scoped tab state before disconnect returns so a quick reconnect/restart
+    // cannot restore tabs that the selected policy already removed.
+    await queryStore.flushPendingPersist().catch(() => undefined);
     await disconnectRequest;
     if (isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       clearConnectionError(connectionId);
@@ -3879,6 +3883,10 @@ export const useConnectionStore = defineStore("connection", () => {
         queryStore.rollbackDatabaseTransactions(connectionId, database);
         break;
     }
+    // Keep database-level disconnect consistent with connection-level cleanup:
+    // the next restore must observe the post-policy tab set, not the debounced
+    // snapshot from before this database was closed.
+    await queryStore.flushPendingPersist().catch(() => undefined);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database);
     if (node) {
       node.isExpanded = false;
