@@ -373,6 +373,13 @@ pub async fn test_connection_with_info(
     run_temporary_connection_test(&state.app, body.config, true).await.map(Json).map_err(AppError::from)
 }
 
+pub async fn test_ssh_tunnel(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ConnectRequest>,
+) -> Result<Json<String>, AppError> {
+    state.app.test_connection_ssh_tunnel(&body.config.canonicalized()).await.map(Json).map_err(AppError::from)
+}
+
 pub async fn connect_db(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -1228,7 +1235,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![existing.id.clone()]),
-                query_timeout_secs: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1301,7 +1308,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![removed.id.clone()]),
-                query_timeout_secs: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1332,7 +1339,7 @@ mod tests {
                 read_only: true,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: None,
-                query_timeout_secs: None,
+                ..Default::default()
             })
             .await
             .unwrap();

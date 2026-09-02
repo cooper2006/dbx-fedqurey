@@ -319,13 +319,12 @@ async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   await store.ensureConnected(connectionId);
   const config = store.getConfig(connectionId);
-  const names =
-    config?.db_type === "dameng"
-      ? await fetchNamespaceOptionsForConnection(connectionId, config)
-      : databaseOptionsForConnection(
-          (await api.listDatabases(connectionId)).map((database) => database.name),
-          config,
-        );
+  const names = config
+    ? await fetchNamespaceOptionsForConnection(connectionId, config)
+    : databaseOptionsForConnection(
+        (await api.listDatabases(connectionId)).map((database) => database.name),
+        config,
+      );
   if (side === "source") {
     sourceDatabases.value = names;
     sourceDatabase.value = names.length === 1 ? names[0] : "";

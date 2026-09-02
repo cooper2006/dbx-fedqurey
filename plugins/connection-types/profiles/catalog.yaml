@@ -470,6 +470,14 @@ profiles:
     user: ""
     urlParams: auth=NONE
     category: analytics
+  - id: argo
+    dbType: argo
+    label: ArgoDB (Transwarp)
+    icon: hive
+    port: 10000
+    user: ""
+    category: domestic
+    pickerLabel: ArgoDB
   - id: impala
     dbType: impala
     label: Apache Impala
@@ -690,6 +698,14 @@ profiles:
     icon: InfluxDB
     pickerIcon: influxdb
     port: 8086
+    user: ""
+    category: timeseries
+  - id: influxdb3
+    dbType: influxdb3
+    label: InfluxDB 3.x
+    icon: InfluxDB
+    pickerIcon: influxdb
+    port: 8181
     user: ""
     category: timeseries
   - id: victoriametrics

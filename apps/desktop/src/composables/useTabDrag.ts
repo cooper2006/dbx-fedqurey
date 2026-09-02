@@ -35,6 +35,7 @@ let pending: {
   sourceEl: HTMLElement | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => boolean) | null = null;
+let dragAxis: () => "horizontal" | "vertical" = () => "horizontal";
 let ghostEl: HTMLElement | null = null;
 
 function createGhost(sourceEl: HTMLElement, x: number, y: number) {
@@ -82,8 +83,8 @@ function onPointerMove(event: PointerEvent) {
   if (!pending && !state.active) return;
 
   if (pending && !state.active) {
-    const dx = event.clientX - pending.x;
-    if (Math.abs(dx) < TAB_DRAG_HORIZONTAL_THRESHOLD) return;
+    const delta = dragAxis() === "vertical" ? event.clientY - pending.y : event.clientX - pending.x;
+    if (Math.abs(delta) < TAB_DRAG_HORIZONTAL_THRESHOLD) return;
     state.active = true;
     state.draggedId = pending.id;
     state.startX = pending.x;
@@ -131,9 +132,10 @@ function ensureListeners() {
   listenersAttached = true;
 }
 
-export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean) {
+export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean, axis: () => "horizontal" | "vertical" = () => "horizontal") {
   ensureListeners();
   onDropCallback = onDrop;
+  dragAxis = axis;
 
   function startDrag(event: PointerEvent, tabId: string) {
     if (event.button !== 0) return;
@@ -163,9 +165,10 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
 
     const el = event.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-
-    state.dropPosition = x < rect.width / 2 ? "before" : "after";
+    const vertical = axis() === "vertical";
+    const offset = vertical ? event.clientY - rect.top : event.clientX - rect.left;
+    const size = vertical ? rect.height : rect.width;
+    state.dropPosition = offset < size / 2 ? "before" : "after";
   }
 
   function clearTarget(tabId: string) {

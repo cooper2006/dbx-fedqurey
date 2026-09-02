@@ -1,5 +1,26 @@
 # WORK_LOG
 
+## 2026-08-31（第二次合并）
+
+### 合并 upstream/main（t8y2/dbx）
+
+- **来源**：`git fetch upstream` → `git merge upstream/main --no-commit`（以本地为主处理冲突）
+- **范围**：111 个非合并提交，26 文件冲突（版本 bump）
+- **合并冲突**：26 个，全部为版本号 bump（`0.5.97→0.6.0`、`0.4.74→0.4.77`），已采用上游版本
+- **验证**：`cargo check --all-targets --workspace` 进行中
+- **主要变更摘要**（来自上游最新提交）：
+  - SQL 协议：接受大写 completion candidate kinds
+  - Sidebar：支持折叠节点的全局搜索、Cmd/Ctrl R 刷新快捷键
+  - Iris：避免 quoted table preview 标识符、通过 JDBC 对象读取 vendor list
+  - Transfer：隔离表传输任务
+  - AI：支持 Kimi 模型配置删除、Jalapeno Cloud 合作伙伴预设
+  - SQL：保留 with group by 的位置顺序、SQL Server 保留 CTE 前缀
+  - 备份：删除压缩 SQL 备份、toggle filter view 切换面板
+  - Oracle：从元数据加载 materialized view DDL
+  - CI：并发 cnb release sync、按模块路径归属 agent release notes
+  - 文档：添加 argodb 和 influxdb3 数据库支持条目
+  - 版本：bump to v0.6.0 / packages v0.4.77
+
 ## 2026-08-31
 
 ### 合并 upstream/main（t8y2/dbx）

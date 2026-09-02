@@ -1352,7 +1352,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-rowversion-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
     let config = live_sqlserver_config("live-sqlserver-rowversion", &database);
     state.configs.write().await.insert(config.id.clone(), config);
     let source_pool_key =
@@ -1377,6 +1377,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         objects: Vec::new(),
         mode: dbx_core::transfer::TransferMode::Append,
         target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
+        quote_target_column_names: true,
         ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };

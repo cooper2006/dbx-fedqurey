@@ -4,6 +4,7 @@ import type {
   DatabaseConnectionInfo,
   DatabaseInfo,
   DatabaseStorageInfo,
+  XuguTablespaceInfo,
   SqlServerCompletionContext,
   SchemaInfo,
   LinkedServerInfo,
@@ -147,6 +148,8 @@ import type {
   PromptTemplate,
   SshPromptResolution,
   MeilisearchIndexOverview,
+  ElasticsearchIndexMetadataKind,
+  ElasticsearchDeleteByQueryResult,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
@@ -162,6 +165,7 @@ import type {
   DataGridSaveStatementOptions,
   HiveTablePropertiesSqlOptions,
 } from "@/lib/dataGrid/dataGridSql";
+import type { DmlChangePreviewSqlOptions, DmlChangePreviewSqlResult } from "@/lib/sql/dmlChangePreview";
 import type { DataGridExtractRequest, DataGridExtractResult } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
@@ -368,6 +372,10 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
 
 export async function testConnection(config: ConnectionConfig): Promise<string> {
   return post("/api/connection/test", { config });
+}
+
+export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
+  return post("/api/connection/test-ssh-tunnel", { config });
 }
 
 export async function testConnectionWithInfo(config: ConnectionConfig): Promise<ConnectionTestResult> {
@@ -792,6 +800,10 @@ export async function listDatabaseStorage(connectionId: string, databases: strin
     connection_id: connectionId,
     databases,
   });
+}
+
+export async function listXuguTablespaces(connectionId: string, database?: string): Promise<XuguTablespaceInfo[]> {
+  return get(`/api/schema/xugu/tablespaces?${qs({ connection_id: connectionId, database })}`);
 }
 
 export async function getSqlServerCompletionContext(connectionId: string, database: string): Promise<SqlServerCompletionContext> {
@@ -1520,6 +1532,10 @@ export async function buildDataGridCopyInsertStatement(options: DataGridCopyInse
   return result ?? undefined;
 }
 
+export async function buildDmlChangePreviewSql(options: DmlChangePreviewSqlOptions): Promise<DmlChangePreviewSqlResult> {
+  return post("/api/query/build-dml-change-preview-sql", { options });
+}
+
 export async function buildDataGridContextFilterCondition(options: DataGridContextFilterConditionOptions): Promise<string | undefined> {
   const result = await post<string | null>("/api/query/build-data-grid-context-filter-condition", { options });
   return result ?? undefined;
@@ -1804,6 +1820,26 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
     body: JSON.stringify(policy),
   });
   if (!res.ok) throw await backendResponseError(res);
+}
+
+export async function loadMcpHttpServerSettings(): Promise<import("@/lib/backend/tauri").McpHttpServerSettings> {
+  return { enabled: false, host: "127.0.0.1", port: 5225, path: "/mcp", allowRemote: false, allowedHosts: [], allowedOrigins: [] };
+}
+
+export async function saveMcpHttpServerSettings(_settings: import("@/lib/backend/tauri").McpHttpServerSettings): Promise<import("@/lib/backend/tauri").McpHttpServerStatus> {
+  throw new Error("The MCP HTTP server is available only in DBX Desktop");
+}
+
+export async function mcpHttpServerStatus(): Promise<import("@/lib/backend/tauri").McpHttpServerStatus> {
+  return { enabled: false, running: false, endpoint: null, accessToken: null, lastError: null, recentLogs: [] };
+}
+
+export async function rotateMcpHttpServerToken(): Promise<import("@/lib/backend/tauri").McpHttpServerStatus> {
+  throw new Error("The MCP HTTP server is available only in DBX Desktop");
+}
+
+export async function loadWebMcpHttpStatus(): Promise<import("@/lib/backend/tauri").WebMcpHttpStatus> {
+  return get("/api/app-settings/mcp-http-status");
 }
 
 export async function loadMaxAgentTurns(): Promise<number> {
@@ -2221,7 +2257,7 @@ export interface SqlFileEntry {
   children: SqlFileEntry[];
 }
 
-export async function listSqlFilesInFolder(_folderPath: string): Promise<SqlFileEntry[]> {
+export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: string): Promise<SqlFileEntry[]> {
   throw new Error("Listing SQL files in a folder is only available in the desktop app");
 }
 
@@ -3866,6 +3902,21 @@ export async function elasticsearchCountDocuments(connectionId: string, index: s
     index,
     filter,
     executionId,
+  });
+}
+
+export async function elasticsearchGetIndexMetadata(connectionId: string, index: string, kind: ElasticsearchIndexMetadataKind): Promise<Record<string, any>> {
+  return post("/api/document-store/elasticsearch/index-metadata", {
+    connectionId,
+    index,
+    kind,
+  });
+}
+
+export async function elasticsearchDeleteAllDocuments(connectionId: string, index: string): Promise<ElasticsearchDeleteByQueryResult> {
+  return post("/api/document-store/elasticsearch/documents/delete-all", {
+    connectionId,
+    index,
   });
 }
 

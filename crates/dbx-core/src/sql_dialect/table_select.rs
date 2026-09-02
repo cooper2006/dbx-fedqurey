@@ -5,7 +5,7 @@ use super::capabilities::{
 };
 use super::identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_gaussdb_jdbc_identifier,
-    quote_table_identifier,
+    quote_iris_identifier, quote_table_identifier,
 };
 use super::types::{
     TableDataSelectSqlOptions, TableSelectSqlOptions, DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN,
@@ -209,6 +209,8 @@ pub fn build_table_data_select_sql_with_database(
     let table = if let Some(database) = jdbc_tdengine_database {
         qualified_table_name(Some(DatabaseType::Tdengine), Some(database), &options.table_name)
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
+    } else if database_type == Some(DatabaseType::Iris) {
+        table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
     } else if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
         table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
     } else if include_database_name {
@@ -238,8 +240,9 @@ pub fn build_table_data_select_sql_with_database(
     };
     let predicate = normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
-    let default_order_by = if database_type == Some(DatabaseType::InfluxDb) {
-        // InfluxQL only allows sorting of timestamp column
+    let default_order_by = if matches!(database_type, Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3)) {
+        // InfluxQL only allows sorting of the timestamp column; SQL-mode
+        // InfluxDB 3 tables also key naturally on `time`.
         Some("time DESC".to_string())
     } else if database_type == Some(DatabaseType::Impala) {
         // Impala requires ORDER BY when OFFSET is present. Keeping the same
@@ -359,6 +362,10 @@ pub fn build_table_data_select_sql_with_database(
             &options.columns,
             limit,
             options.offset.unwrap_or(0),
+            options
+                .driver_profile
+                .as_deref()
+                .is_some_and(|profile| profile.trim().eq_ignore_ascii_case("sqlserver-legacy")),
         ),
         TablePaginationStrategy::QuestDbLimit => build_questdb_table_select_sql(
             &table_alias,
@@ -411,6 +418,14 @@ pub(crate) fn table_data_qualified_table_name(
     table_name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
+    if database_type == Some(DatabaseType::Iris) {
+        let table = quote_iris_identifier(table_name, identifier_quote);
+        return schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(|schema| format!("{}.{table}", quote_iris_identifier(schema, identifier_quote)))
+            .unwrap_or(table);
+    }
     if !uses_connection_identifier_quote(database_type, identifier_quote) {
         return qualified_table_name(database_type, schema, table_name);
     }
@@ -470,7 +485,17 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
     if database_type == Some(DatabaseType::VictoriaMetrics) {
         return format!("{}[1h]", victoriametrics_metric_selector(options.table_name));
     }
-    let table = qualified_table_name(database_type, options.schema, options.table_name);
+    let table = if database_type == Some(DatabaseType::Iris) {
+        let table = quote_iris_identifier(options.table_name, None);
+        options
+            .schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(|schema| format!("{}.{table}", quote_iris_identifier(schema, None)))
+            .unwrap_or(table)
+    } else {
+        qualified_table_name(database_type, options.schema, options.table_name)
+    };
     let select_columns = quoted_table_columns_or_star(database_type, options.columns);
     let order_by = if options.order_columns.is_empty() {
         String::new()
@@ -608,14 +633,27 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
-    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)) {
+    if !matches!(
+        database_type,
+        Some(
+            DatabaseType::Hive
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::InfluxDb
+        )
+    ) {
         return "*".to_string();
     }
     columns
         .iter()
         .map(|column| {
             let ident = quote_table_identifier(database_type, column);
-            format!("{ident} AS {ident}")
+            if database_type == Some(DatabaseType::Hive) {
+                format!("{ident} AS {ident}")
+            } else {
+                ident
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -628,6 +666,7 @@ pub(super) fn build_sqlserver_table_select_sql(
     columns: &[String],
     limit: usize,
     offset: usize,
+    legacy_compatible: bool,
 ) -> String {
     let columns_sql = if columns.is_empty() {
         "*".to_string()
@@ -639,6 +678,9 @@ pub(super) fn build_sqlserver_table_select_sql(
             .join(", ")
     };
     let order = if order_by == "(SELECT NULL)" { String::new() } else { format!(" ORDER BY {order_by}") };
+    if legacy_compatible {
+        return format!("SELECT {columns_sql} FROM {table}{where_clause}{order}");
+    }
     if offset == 0 {
         return format!("SELECT TOP ({limit}) {columns_sql} FROM {table}{where_clause}{order}");
     }
@@ -771,6 +813,22 @@ mod tests {
     }
 
     #[test]
+    fn influxdb_table_select_quotes_explicit_columns() {
+        // InfluxQL needs double-quoted identifiers and only permits ORDER BY on
+        // the time column; explicit column lists must not fall back to "*".
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                database: Some("monitor".to_string()),
+                table_name: "cpu".to_string(),
+                columns: vec!["time".to_string(), "host".to_string(), "value".to_string()],
+                ..Default::default()
+            }),
+            "SELECT \"time\", \"host\", \"value\" FROM \"cpu\" ORDER BY time DESC LIMIT 100;"
+        );
+    }
+
+    #[test]
     fn databricks_table_select_uses_backtick_identifiers() {
         assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -863,5 +921,17 @@ mod tests {
             build_count_table_sql(Some(DatabaseType::VictoriaMetrics), None, "rack\\\"temperature"),
             r#"count({__name__="rack\\\"temperature"})"#
         );
+    }
+
+    #[test]
+    fn sqlserver_legacy_table_preview_leaves_paging_to_the_agent_cursor() {
+        let mut options = opts(DatabaseType::SqlServer, None, None, "users");
+        options.driver_profile = Some(" SQLSERVER-LEGACY ".to_string());
+        options.columns = vec!["id".to_string(), "name".to_string()];
+        options.order_by = Some("[id] ASC".to_string());
+        options.limit = Some(100);
+        options.offset = Some(100);
+
+        assert_eq!(build_table_data_select_sql(options), "SELECT [id], [name] FROM [users] ORDER BY [id] ASC");
     }
 }

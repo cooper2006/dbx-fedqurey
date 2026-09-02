@@ -52,15 +52,60 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
-const tabDrag = useTabDrag((draggedId, targetId, position) => {
-  return queryStore.reorderTab(draggedId, targetId, position);
-});
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
-const isWrapLayout = computed(() => settingsStore.editorSettings.tabLayout === "wrap");
-const fixedTabs = computed(() => queryStore.tabs.filter((tab) => tab.pinned));
-const regularTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pinned));
+const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
+const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
+const isManualTabOrder = computed(() => settingsStore.editorSettings.tabSortMode === "manual");
+const tabDrag = useTabDrag(
+  (draggedId, targetId, position) => queryStore.reorderTab(draggedId, targetId, position),
+  () => (isVerticalLayout.value ? "vertical" : "horizontal"),
+);
+
+function tabGroupKey(tab: QueryTab) {
+  const connection = connectionStore.getConfig(tab.connectionId);
+  if (settingsStore.editorSettings.tabGroupMode === "connection") return tab.connectionId;
+  return connection?.driver_profile || connection?.db_type || tab.connectionId || "unknown";
+}
+
+function sortDisplayedTabs(tabs: QueryTab[]) {
+  const sortMode = settingsStore.editorSettings.tabSortMode;
+  const groupMode = settingsStore.editorSettings.tabGroupMode;
+  return tabs
+    .map((tab, index) => ({ tab, index }))
+    .sort((left, right) => {
+      if (groupMode !== "none") {
+        const group = tabGroupKey(left.tab).localeCompare(tabGroupKey(right.tab), undefined, { sensitivity: "base", numeric: true });
+        if (group) return group;
+      }
+      if (sortMode === "manual") return left.index - right.index;
+      if (sortMode === "created-asc") {
+        const created = (left.tab.createdAt ?? left.index) - (right.tab.createdAt ?? right.index);
+        if (created) return created;
+      } else {
+        const title = tabTitleText(left.tab).localeCompare(tabTitleText(right.tab), undefined, { sensitivity: "base", numeric: true });
+        if (title) return title;
+      }
+      return left.index - right.index;
+    })
+    .map(({ tab }) => tab);
+}
+
+const fixedTabs = computed(() => sortDisplayedTabs(queryStore.tabs.filter((tab) => tab.pinned)));
+const regularTabs = computed(() => sortDisplayedTabs(queryStore.tabs.filter((tab) => !tab.pinned)));
+const displayedTabs = computed(() => [...fixedTabs.value, ...regularTabs.value]);
+
+function isGroupStart(tabs: QueryTab[], index: number) {
+  if (settingsStore.editorSettings.tabGroupMode === "none") return false;
+  return index === 0 || tabGroupKey(tabs[index - 1]!) !== tabGroupKey(tabs[index]!);
+}
+
+function tabGroupLabel(tab: QueryTab) {
+  const connection = connectionStore.getConfig(tab.connectionId);
+  if (settingsStore.editorSettings.tabGroupMode === "connection") return connection?.name || tab.connectionId;
+  return connection?.driver_label || connection?.driver_profile || connection?.db_type || tab.connectionId;
+}
 const hasFixedTabs = computed(() => fixedTabs.value.length > 0);
 const regularSurfaceCount = computed(() => regularTabs.value.length + (props.driverStoreOpen ? 1 : 0) + (props.settingsPageOpen ? 1 : 0));
 const closeConfirmDirtyCount = computed(() => queryStore.closeConfirmDirtyTabIds.length);
@@ -202,11 +247,32 @@ function hasTabsToRight(tab: QueryTab) {
 
 function closeTabsToRightFromTab(tab: QueryTab) {
   const shouldActivateTarget = !tab.pinned && (!!props.settingsPageActive || !!props.driverStoreActive);
-  queryStore.closeRightTabs(tab.id, () => {
+  const tabsToClose = tabsToRightInGroup(tab).map((item) => item.id);
+  const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
+  queryStore.closeTabsByIds(tabsToClose, finalActiveTabId, () => {
     if (tab.pinned) return;
     closeSpecialRegularSurfaces();
     if (shouldActivateTarget) activateTab(tab.id);
   });
+}
+
+function tabsToLeftInGroup(tab: QueryTab) {
+  const groupedTabs = tab.pinned ? fixedTabs.value : regularTabs.value;
+  const targetIndex = groupedTabs.findIndex((item) => item.id === tab.id);
+  return targetIndex < 0 ? [] : groupedTabs.slice(0, targetIndex);
+}
+
+function hasTabsToLeft(tab: QueryTab) {
+  return tabsToLeftInGroup(tab).length > 0;
+}
+
+function closeTabsToLeftFromTab(tab: QueryTab) {
+  // Mirror the close-right path: compute the ids from the sorted display
+  // order (fixedTabs/regularTabs), not the underlying array order, so the
+  // menu closes exactly the tabs shown to the left of the target.
+  const tabsToClose = tabsToLeftInGroup(tab).map((item) => item.id);
+  const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
+  queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
 }
 
 function hasSpecialRegularSurfaceToRight(surface: SpecialRegularSurface) {
@@ -346,6 +412,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
+      label: t("contextMenu.closeLeftTabs"),
+      action: () => closeTabsToLeftFromTab(tab),
+      disabled: !hasTabsToLeft(tab),
+      icon: X,
+    },
+    {
       label: t("contextMenu.closeRightTabs"),
       action: () => closeTabsToRightFromTab(tab),
       disabled: !hasTabsToRight(tab),
@@ -428,7 +500,9 @@ watch(
           if (!container) continue;
           const activeEl = container.querySelector('[data-active-tab="true"]');
           if (activeEl) {
-            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: activeTabScrollInline(container, queryStore.activeTabId) });
+            activeEl.scrollIntoView(
+              isVerticalLayout.value ? { behavior: tabScrollBehavior.value, block: activeTabScrollInline(container, queryStore.activeTabId), inline: "nearest" } : { behavior: tabScrollBehavior.value, block: "nearest", inline: activeTabScrollInline(container, queryStore.activeTabId) },
+            );
             break;
           }
         }
@@ -449,7 +523,7 @@ watch(
       if (!container) return;
       const el = container.querySelector("[data-driver-store-tab]");
       if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+        el.scrollIntoView(isVerticalLayout.value ? { behavior: "smooth", block: "center", inline: "nearest" } : { behavior: "smooth", block: "nearest", inline: "center" });
       }
       updateAllScrollButtons();
     });
@@ -466,7 +540,7 @@ watch(
       if (!container) return;
       const el = container.querySelector("[data-settings-page-tab]");
       if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+        el.scrollIntoView(isVerticalLayout.value ? { behavior: "smooth", block: "center", inline: "nearest" } : { behavior: "smooth", block: "nearest", inline: "center" });
       }
       updateAllScrollButtons();
     });
@@ -530,19 +604,42 @@ function tabDatabaseIconType(tab: QueryTab) {
   return connection.driver_profile || connection.db_type;
 }
 
-const showRegularTabScrollbar = computed(() => hasTabOverflow.value && !isWrapLayout.value);
-const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value && !isWrapLayout.value);
-const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value && !isWrapLayout.value);
+const showRegularTabScrollbar = computed(() => hasTabOverflow.value && !isWrapLayout.value && !isVerticalLayout.value);
+const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value && !isWrapLayout.value && !isVerticalLayout.value);
+const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value && !isWrapLayout.value && !isVerticalLayout.value);
 const regularTabOverflowOpen = ref(false);
 const fixedTabOverflowOpen = ref(false);
 const tabSearchQuery = ref("");
 const filteredOpenTabs = computed(() => {
   const query = tabSearchQuery.value.trim().toLocaleLowerCase();
-  if (!query) return queryStore.tabs;
-  return queryStore.tabs.filter((tab) => tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));
+  if (!query) return displayedTabs.value;
+  return displayedTabs.value.filter((tab) => tabMatchesSearch(tab, query));
 });
-const tabBarClass = computed(() => [isClassicLayout.value ? "bg-muted" : "border-b bg-background", hasFixedTabs.value ? "flex-col" : "", isClassicLayout.value && hasFixedTabs.value ? "border-b" : ""]);
-const regularTabRowClass = computed(() => [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]);
+
+function tabMatchesSearch(tab: QueryTab, query: string) {
+  const connectionName = connectionStore.getConfig(tab.connectionId)?.name || "";
+  return tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query) || connectionName.toLocaleLowerCase().includes(query);
+}
+
+const filteredRegularTabs = computed(() => {
+  const query = tabSearchQuery.value.trim().toLocaleLowerCase();
+  return query ? regularTabs.value.filter((tab) => tabMatchesSearch(tab, query)) : regularTabs.value;
+});
+const filteredFixedTabs = computed(() => {
+  const query = tabSearchQuery.value.trim().toLocaleLowerCase();
+  return query ? fixedTabs.value.filter((tab) => tabMatchesSearch(tab, query)) : fixedTabs.value;
+});
+const hasVisibleFixedTabs = computed(() => filteredFixedTabs.value.length > 0);
+const tabBarClass = computed(() => [
+  isVerticalLayout.value
+    ? `vertical-tab-layout h-full w-60 flex-col bg-background ${settingsStore.editorSettings.tabPlacement === "right" ? "border-l" : "border-r"}`
+    : isClassicLayout.value
+      ? "w-full bg-muted"
+      : `w-full bg-background ${settingsStore.editorSettings.tabPlacement === "bottom" ? "border-t" : "border-b"}`,
+  hasFixedTabs.value ? "flex-col" : "",
+  isClassicLayout.value && hasFixedTabs.value && !isVerticalLayout.value ? "border-b" : "",
+]);
+const regularTabRowClass = computed(() => (isVerticalLayout.value ? ["min-h-0 flex-1 flex-col items-stretch"] : [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]));
 
 watch(regularTabOverflowOpen, (open) => {
   tabSearchQuery.value = "";
@@ -597,10 +694,11 @@ function handleTabMouseDown(event: PointerEvent, tabId: string) {
     // overflowing tab bar.
     if (event.pointerType !== "touch") event.preventDefault();
   }
-  tabDrag.startDrag(event, tabId);
+  if (isManualTabOrder.value) tabDrag.startDrag(event, tabId);
 }
 
 function handleTabDragTarget(event: MouseEvent, tab: QueryTab) {
+  if (!isManualTabOrder.value) return;
   const draggedTab = queryStore.tabs.find((item) => item.id === tabDrag.state.draggedId);
   if (draggedTab && draggedTab.pinned !== tab.pinned) {
     tabDrag.clearTarget(tab.id);
@@ -614,10 +712,8 @@ function tabDropStyle(tabId: string) {
   if (tabDrag.state.draggedId === tabId) return { opacity: 0.4 };
   if (tabDrag.state.targetId !== tabId) return {};
   const dropColor = `var(--ring)`;
-  if (tabDrag.state.dropPosition === "before") {
-    return { boxShadow: `inset 3px 0 0 0 ${dropColor}` };
-  }
-  return { boxShadow: `inset -3px 0 0 0 ${dropColor}` };
+  if (isVerticalLayout.value) return tabDrag.state.dropPosition === "before" ? { boxShadow: `inset 0 3px 0 0 ${dropColor}` } : { boxShadow: `inset 0 -3px 0 0 ${dropColor}` };
+  return tabDrag.state.dropPosition === "before" ? { boxShadow: `inset 3px 0 0 0 ${dropColor}` } : { boxShadow: `inset -3px 0 0 0 ${dropColor}` };
 }
 
 const tabsContainerStyle = computed<CSSProperties>(() => ({
@@ -636,8 +732,8 @@ const fixedTabScrollbarThumbStyle = computed<CSSProperties>(() => ({
   width: `${fixedScrollThumbWidthPercent.value}%`,
 }));
 
-const tabTailDragRegionClass = computed(() => (showRegularTabOverflowControls.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
-const fixedTabTailDragRegionClass = computed(() => (showFixedTabScrollbar.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
+const tabTailDragRegionClass = computed(() => (isVerticalLayout.value || showRegularTabOverflowControls.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
+const fixedTabTailDragRegionClass = computed(() => (isVerticalLayout.value || showFixedTabScrollbar.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
 
 const tabOverflowControlClass = computed(() =>
   isClassicLayout.value
@@ -677,7 +773,11 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </script>
 
 <template>
-  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
+  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
+    <div v-if="isVerticalLayout" class="relative shrink-0 border-b p-2">
+      <Search class="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 w-full pl-7 text-sm" />
+    </div>
     <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="regularTabRowClass">
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showRegularTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
@@ -685,89 +785,96 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         </div>
         <div
           ref="tabsContainerRef"
-          class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto"
-          :class="[isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1.5', isWrapLayout ? 'wrap-mode' : '', isWrapLayout && isClassicLayout ? 'classic-wrap' : '']"
+          class="app-tab-scroll flex w-full min-w-0 flex-1"
+          :class="[
+            isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-1.5 overflow-x-auto py-1.5',
+            isWrapLayout ? 'wrap-mode' : '',
+            isWrapLayout && isClassicLayout ? 'classic-wrap' : '',
+          ]"
           :style="tabsContainerStyle"
-          @scroll="updateScrollButtons"
-          @wheel="onTabsWheel"
+          @scroll="!isVerticalLayout && updateScrollButtons()"
+          @wheel="!isVerticalLayout && onTabsWheel($event)"
         >
-          <CustomContextMenu v-for="tab in regularTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
-              <Tooltip>
-                <TooltipTrigger as-child>
-                  <div
-                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                    :class="
-                      isClassicLayout
-                        ? [
-                            compactTabTitle ? 'min-w-24' : 'min-w-38',
-                            'h-full border-r border-border/80 font-medium dark:border-border/45',
-                            tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90',
-                          ]
-                        : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
-                    "
-                    :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
-                    :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
-                    @click="handleTabClick(tab)"
-                    @dblclick="handleTabDoubleClick(tab, $event)"
-                    @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
-                    @pointerdown="handleTabMouseDown($event, tab.id)"
-                    @mouseenter="handleTabDragTarget($event, tab)"
-                    @mousemove="handleTabDragTarget($event, tab)"
-                    @mouseleave="tabDrag.clearTarget(tab.id)"
-                  >
-                    <TabExecutionStatus :tab="tab">
-                      <span class="shrink-0" :class="tabIconClass(tab)">
-                        <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
-                        <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
-                        <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
-                        <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                        <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
-                        <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
-                        <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
-                        <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
-                        <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
-                        <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
-                        <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                        <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                        <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                        <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
-                        <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
-                        <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
-                        <Code2 v-else class="h-3.5 w-3.5" />
+          <template v-for="(tab, index) in filteredRegularTabs" :key="tab.id">
+            <div v-if="isGroupStart(filteredRegularTabs, index)" class="tab-group-header">{{ tabGroupLabel(tab) }}</div>
+            <CustomContextMenu :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+              <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <div
+                      class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+                      :class="
+                        isClassicLayout
+                          ? [
+                              compactTabTitle ? 'min-w-24' : 'min-w-38',
+                              'h-full border-r border-border/80 font-medium dark:border-border/45',
+                              tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90',
+                            ]
+                          : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
+                      "
+                      :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
+                      :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
+                      @click="handleTabClick(tab)"
+                      @dblclick="handleTabDoubleClick(tab, $event)"
+                      @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
+                      @pointerdown="handleTabMouseDown($event, tab.id)"
+                      @mouseenter="handleTabDragTarget($event, tab)"
+                      @mousemove="handleTabDragTarget($event, tab)"
+                      @mouseleave="tabDrag.clearTarget(tab.id)"
+                    >
+                      <TabExecutionStatus :tab="tab">
+                        <span class="shrink-0" :class="tabIconClass(tab)">
+                          <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                          <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                          <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                          <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
+                          <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                          <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
+                          <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                          <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
+                          <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
+                          <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
+                          <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
+                          <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
+                          <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
+                          <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
+                          <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
+                          <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
+                          <Code2 v-else class="h-3.5 w-3.5" />
+                        </span>
+                      </TabExecutionStatus>
+                      <input
+                        v-if="editingTabId === tab.id"
+                        v-model="editingTitle"
+                        :data-tab-title-input="tab.id"
+                        :aria-label="t('contextMenu.renameTab')"
+                        class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
+                        @click.stop
+                        @mousedown.stop
+                        @keydown.enter.prevent="commitRenameTab(tab)"
+                        @keydown.escape.prevent="cancelRenameTab"
+                        @blur="commitRenameTab(tab)"
+                      />
+                      <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                        <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                        <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                       </span>
-                    </TabExecutionStatus>
-                    <input
-                      v-if="editingTabId === tab.id"
-                      v-model="editingTitle"
-                      :data-tab-title-input="tab.id"
-                      :aria-label="t('contextMenu.renameTab')"
-                      class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
-                      @click.stop
-                      @mousedown.stop
-                      @keydown.enter.prevent="commitRenameTab(tab)"
-                      @keydown.escape.prevent="cancelRenameTab"
-                      @blur="commitRenameTab(tab)"
-                    />
-                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
-                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
-                    </span>
-                    <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
-                    <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
-                      <X class="h-3 w-3" />
-                    </button>
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
-                  <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
-                    <span class="text-muted-foreground">{{ line.label }}</span>
-                    <span>{{ line.value }}</span>
-                  </template>
-                </TooltipContent>
-              </Tooltip>
-            </div>
-          </CustomContextMenu>
+                      <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
+                      <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
+                        <X class="h-3 w-3" />
+                      </button>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
+                    <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
+                      <span class="text-muted-foreground">{{ line.label }}</span>
+                      <span>{{ line.value }}</span>
+                    </template>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </CustomContextMenu>
+          </template>
 
           <!-- Settings Page Tab -->
           <CustomContextMenu v-if="settingsPageOpen" :items="getSpecialRegularTabMenuItems('settings')" v-slot="{ onContextMenu }">
@@ -883,99 +990,110 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       </div>
     </div>
 
-    <div v-if="hasFixedTabs" class="flex w-full min-w-0 shrink-0 overflow-hidden border-t" :class="isClassicLayout ? 'h-8 items-stretch border-border/80 bg-background/45 dark:border-border/45 dark:bg-background/20' : 'h-9 items-center border-border/70 bg-muted/45 px-2 dark:bg-muted/25'">
+    <div
+      v-if="hasVisibleFixedTabs"
+      class="flex w-full min-w-0 shrink-0 overflow-hidden border-t"
+      :class="isVerticalLayout ? 'max-h-[40%] flex-col border-border/70 bg-muted/45 py-1 dark:bg-muted/25' : isClassicLayout ? 'h-8 items-stretch border-border/80 bg-background/45 dark:border-border/45 dark:bg-background/20' : 'h-9 items-center border-border/70 bg-muted/45 px-2 dark:bg-muted/25'"
+    >
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showFixedTabScrollbar" class="app-tab-scrollbar app-tab-scrollbar--bottom" :class="{ 'app-tab-scrollbar--dragging': isFixedScrollbarDragging }" @pointerdown="startFixedScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="fixedTabScrollbarThumbStyle" />
         </div>
         <div
           ref="fixedTabsContainerRef"
-          class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto"
-          :class="[isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1', isWrapLayout ? 'wrap-mode' : '', isWrapLayout && isClassicLayout ? 'classic-wrap' : '']"
+          class="app-tab-scroll flex w-full min-w-0 flex-1"
+          :class="[
+            isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-1.5 overflow-x-auto py-1',
+            isWrapLayout ? 'wrap-mode' : '',
+            isWrapLayout && isClassicLayout ? 'classic-wrap' : '',
+          ]"
           :style="tabsContainerStyle"
-          @scroll="updateFixedScrollButtons"
-          @wheel="onFixedTabsWheel"
+          @scroll="!isVerticalLayout && updateFixedScrollButtons()"
+          @wheel="!isVerticalLayout && onFixedTabsWheel($event)"
         >
-          <CustomContextMenu v-for="tab in fixedTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
-              <Tooltip>
-                <TooltipTrigger as-child>
-                  <div
-                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                    :class="
-                      isClassicLayout
-                        ? [
-                            compactTabTitle ? 'min-w-24' : 'min-w-38',
-                            'h-full border-r border-border/80 font-medium dark:border-border/45',
-                            tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90',
-                          ]
-                        : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
-                    "
-                    :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
-                    :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
-                    @click="handleTabClick(tab)"
-                    @dblclick="handleTabDoubleClick(tab, $event)"
-                    @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
-                    @pointerdown="handleTabMouseDown($event, tab.id)"
-                    @mouseenter="handleTabDragTarget($event, tab)"
-                    @mousemove="handleTabDragTarget($event, tab)"
-                    @mouseleave="tabDrag.clearTarget(tab.id)"
-                  >
-                    <TabExecutionStatus :tab="tab">
-                      <span class="shrink-0" :class="tabIconClass(tab)">
-                        <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
-                        <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
-                        <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
-                        <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                        <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
-                        <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
-                        <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
-                        <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
-                        <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
-                        <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
-                        <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                        <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                        <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                        <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
-                        <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
-                        <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
-                        <Code2 v-else class="h-3.5 w-3.5" />
+          <template v-for="(tab, index) in filteredFixedTabs" :key="tab.id">
+            <div v-if="isGroupStart(filteredFixedTabs, index)" class="tab-group-header">{{ tabGroupLabel(tab) }}</div>
+            <CustomContextMenu :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+              <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <div
+                      class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+                      :class="
+                        isClassicLayout
+                          ? [
+                              compactTabTitle ? 'min-w-24' : 'min-w-38',
+                              'h-full border-r border-border/80 font-medium dark:border-border/45',
+                              tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90',
+                            ]
+                          : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
+                      "
+                      :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
+                      :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
+                      @click="handleTabClick(tab)"
+                      @dblclick="handleTabDoubleClick(tab, $event)"
+                      @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
+                      @pointerdown="handleTabMouseDown($event, tab.id)"
+                      @mouseenter="handleTabDragTarget($event, tab)"
+                      @mousemove="handleTabDragTarget($event, tab)"
+                      @mouseleave="tabDrag.clearTarget(tab.id)"
+                    >
+                      <TabExecutionStatus :tab="tab">
+                        <span class="shrink-0" :class="tabIconClass(tab)">
+                          <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                          <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                          <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                          <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
+                          <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                          <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
+                          <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                          <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
+                          <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
+                          <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
+                          <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
+                          <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
+                          <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
+                          <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
+                          <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
+                          <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
+                          <Code2 v-else class="h-3.5 w-3.5" />
+                        </span>
+                      </TabExecutionStatus>
+                      <input
+                        v-if="editingTabId === tab.id"
+                        v-model="editingTitle"
+                        :data-tab-title-input="tab.id"
+                        :aria-label="t('contextMenu.renameTab')"
+                        class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
+                        @click.stop
+                        @mousedown.stop
+                        @keydown.enter.prevent="commitRenameTab(tab)"
+                        @keydown.escape.prevent="cancelRenameTab"
+                        @blur="commitRenameTab(tab)"
+                      />
+                      <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                        <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                        <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                       </span>
-                    </TabExecutionStatus>
-                    <input
-                      v-if="editingTabId === tab.id"
-                      v-model="editingTitle"
-                      :data-tab-title-input="tab.id"
-                      :aria-label="t('contextMenu.renameTab')"
-                      class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
-                      @click.stop
-                      @mousedown.stop
-                      @keydown.enter.prevent="commitRenameTab(tab)"
-                      @keydown.escape.prevent="cancelRenameTab"
-                      @blur="commitRenameTab(tab)"
-                    />
-                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
-                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
-                    </span>
-                    <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
-                    <button class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0" :aria-label="t('contextMenu.unfixTab')" :title="t('contextMenu.unfixTab')" @click.stop="queryStore.togglePinnedTab(tab.id)">
-                      <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
-                    </button>
-                    <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
-                      <X class="h-3 w-3" />
-                    </button>
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
-                  <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
-                    <span class="text-muted-foreground">{{ line.label }}</span>
-                    <span>{{ line.value }}</span>
-                  </template>
-                </TooltipContent>
-              </Tooltip>
-            </div>
-          </CustomContextMenu>
+                      <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
+                      <button class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0" :aria-label="t('contextMenu.unfixTab')" :title="t('contextMenu.unfixTab')" @click.stop="queryStore.togglePinnedTab(tab.id)">
+                        <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
+                      </button>
+                      <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
+                        <X class="h-3 w-3" />
+                      </button>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
+                    <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
+                      <span class="text-muted-foreground">{{ line.label }}</span>
+                      <span>{{ line.value }}</span>
+                    </template>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </CustomContextMenu>
+          </template>
           <div :class="fixedTabTailDragRegionClass" data-tauri-drag-region />
         </div>
       </div>
@@ -1097,6 +1215,46 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
   overflow-x: visible !important;
   overflow-y: visible !important;
   flex-wrap: wrap;
+}
+
+.vertical-tab-layout {
+  flex: 0 0 15rem;
+}
+
+.vertical-tab-layout .app-tab-strip {
+  height: auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.vertical-tab-layout .app-tab-pill {
+  width: 100%;
+  min-width: 0 !important;
+  min-height: 2rem;
+  height: 2rem !important;
+  border-right: 0;
+}
+
+.vertical-tab-layout .app-tab-scroll > * {
+  width: 100%;
+  flex: none;
+}
+
+.vertical-tab-layout .tab-group-header {
+  width: 100%;
+  padding: 0.45rem 0.6rem 0.2rem;
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1rem;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-tab-scroll:not(.wrap-mode) .tab-group-header {
+  align-self: stretch;
 }
 
 /* 父级 strip 容器在包含 wrap-mode 时也需要解除高度约束和裁剪 */

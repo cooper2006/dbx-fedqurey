@@ -4605,6 +4605,7 @@ test("starting a new query clears the previous result payload immediately", asyn
     rows: [[new Array(10_000).fill("old").join("")]],
     affected_rows: 0,
     execution_time_ms: 1,
+    local_column_filters: { "0": ["str:old"] },
   };
 
   globalThis.fetch = withConnectionHealthMock(async (input) => {
@@ -4636,6 +4637,7 @@ test("starting a new query clears the previous result payload immediately", asyn
     assert.equal(tab.results, undefined);
     await execution;
     assert.deepEqual(tab.result?.columns, ["new"]);
+    assert.equal(tab.result?.local_column_filters, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -7729,6 +7731,52 @@ test("data tab execution uses a tab-scoped client session", async () => {
   }
 });
 
+test("table-data pagination is not clamped by the query result row cap", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeBody: any;
+
+  settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: true, queryResultMaxRows: 100_000 });
+  connectionStore.addEphemeralConnection(conn("table-data-deep-page"));
+  const tabId = store.createTab("table-data-deep-page", "db", "users", "data", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) !== "/api/query/execute-multi") return new Response("unexpected request", { status: 500 });
+    executeBody = JSON.parse(String(init?.body ?? "{}"));
+    return Response.json([
+      {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [199_901 + index]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+  });
+
+  try {
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 100 OFFSET 199900', {
+      pagination: { limit: 100, offset: 199_900 },
+    });
+
+    assert.match(executeBody.sql, /OFFSET 199900/);
+    assert.equal(executeBody.maxRows, 100);
+    assert.equal(executeBody.fetchSize, 100);
+    assert.equal(tab.resultPageLimit, 100);
+    assert.equal(tab.resultPageOffset, 199_900);
+    assert.equal(tab.result?.truncated, undefined);
+    assert.equal(tab.resultTotalRowCount, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("closing a data tab releases its tab-scoped client session", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
@@ -8067,6 +8115,7 @@ test("query execution keeps automatically counting total rows in the background"
     assert.equal(tab.resultTotalRowCountLoading, true);
     assert.equal(countBody.sql, "select count(*) from users");
     assert.equal(countBody.schema, "public");
+    assert.equal(countBody.clientSessionId, `${tabId}:count`);
 
     resolveCount?.(
       new Response(
@@ -8081,6 +8130,74 @@ test("query execution keeps automatically counting total rows in the background"
     );
     await waitFor(() => tab.resultTotalRowCount === 250);
     assert.equal(tab.resultTotalRowCountLoading, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("SQL Server temporary-table counts reuse the query tab session", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  settingsStore.updateEditorSettings({ autoCalculateTotalRows: true });
+  connectionStore.addEphemeralConnection(sqlServerConn("sqlserver-1"));
+  const tabId = store.createTab("sqlserver-1", "db", "Query", "query", "dbo");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  let countBody: any;
+  const closedClientSessions: string[] = [];
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      return Response.json({
+        sqlToExecute: "SELECT * FROM #orders",
+        pageLimit: 100,
+        pageOffset: 0,
+        countSql: "SELECT COUNT(*) FROM (SELECT * FROM #orders) AS dbx_count",
+        useAgentResultSession: false,
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      return Response.json([
+        {
+          columns: ["id"],
+          rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      ]);
+    }
+    if (url === "/api/query/execute") {
+      countBody = JSON.parse(String(init?.body ?? "{}"));
+      return Response.json({ columns: ["count"], rows: [[250]], affected_rows: 0, execution_time_ms: 1 });
+    }
+    if (url === "/api/query/close-client-session") {
+      closedClientSessions.push(JSON.parse(String(init?.body ?? "{}")).clientSessionId);
+      return Response.json(true);
+    }
+    if (url === "/api/query/analyze-editability") {
+      return Response.json({ editable: false, reason: "complex-source" });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "SELECT * FROM #orders");
+    await waitFor(() => tab.resultTotalRowCount === 250);
+
+    assert.equal(countBody.clientSessionId, tabId);
+    assert.equal(closedClientSessions.includes(tabId), false, "the query tab session must remain open");
+
+    tab.resultCountSql = "SELECT COUNT(*) FROM (SELECT * FROM #orders) AS dbx_count";
+    assert.equal(await store.countTabResultRows(tabId), 250);
+    assert.equal(countBody.clientSessionId, tabId);
+    assert.equal(closedClientSessions.includes(tabId), false, "manual count must also preserve the query tab session");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

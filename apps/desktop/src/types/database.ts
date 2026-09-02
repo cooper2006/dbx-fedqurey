@@ -344,6 +344,29 @@ export interface DatabaseStorageInfo {
   size_bytes: number | null;
 }
 
+export interface XuguDatafileInfo {
+  node_id: string;
+  space_id: number;
+  path: string;
+  file_no: number;
+  max_size?: number | null;
+  step_size?: number | null;
+  curr_size?: number | null;
+  reserved1?: string | null;
+}
+
+export interface XuguTablespaceInfo {
+  node_id: string;
+  space_id: number;
+  space_name: string;
+  datafile_num: number;
+  space_type: string;
+  media_error?: string | null;
+  total_chunk_num?: number | null;
+  free_chunk_num?: number | null;
+  datafiles: XuguDatafileInfo[];
+}
+
 export interface SqlServerCompletionContext {
   default_schema: string;
   supports_session_database_switch: boolean;
@@ -377,7 +400,7 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -406,7 +429,7 @@ export interface ObjectStatistics {
   total_bytes?: number | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -752,6 +775,10 @@ export interface SpatialColumn {
 export interface QueryResultSourceColumnRef {
   sourceKey: string;
   sourceColumn: string;
+  /** Physical source identity for display-only features such as column formatters. */
+  database?: string;
+  schema?: string;
+  tableName?: string;
 }
 
 export interface QueryResultRun {
@@ -862,6 +889,8 @@ export type TreeNodeType =
   | "connection"
   | "connection-group"
   | "database"
+  | "tablespace"
+  | "datafile"
   | "doris-catalog"
   | "linked-server-root"
   | "linked-server"
@@ -878,6 +907,7 @@ export type TreeNodeType =
   | "type-member"
   | "sequence"
   | "synonym"
+  | "job"
   | "package"
   | "package-body"
   | "group-columns"
@@ -897,9 +927,12 @@ export type TreeNodeType =
   | "group-types"
   | "group-sequences"
   | "group-synonyms"
+  | "group-jobs"
   | "group-packages"
   | "group-partitions"
   | "group-extensions"
+  | "group-tablespaces"
+  | "group-datafiles"
   | "extension"
   | "object-browser"
   | "user-admin"
@@ -999,6 +1032,8 @@ export interface TreeNode {
   comment?: string | null;
   valid?: boolean | null;
   sizeBytes?: number | null;
+  xuguTablespace?: XuguTablespaceInfo;
+  xuguDatafilePath?: string;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;
@@ -1084,6 +1119,8 @@ export interface QueryPageJumpProgress {
 
 export interface QueryTab {
   id: string;
+  /** Stable creation time used when tabs are displayed in creation order. */
+  createdAt?: number;
   title: string;
   customTitle?: boolean;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
@@ -1162,6 +1199,8 @@ export interface QueryTab {
     head: number;
   };
   executionId?: string;
+  /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
+  executingResultRunId?: string | null;
   isExplaining?: boolean;
   explainExecutionId?: string;
   /** Per-run connection session for explain flows that require session state. */
@@ -1396,6 +1435,7 @@ export interface TransferTaskConfig {
   content: TransferContent;
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  quoteTargetColumnNames: boolean;
   batchSize: number;
 }
 

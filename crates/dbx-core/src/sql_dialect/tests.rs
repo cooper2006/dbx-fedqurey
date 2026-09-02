@@ -35,6 +35,11 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Spanner), "user`name"), "`user``name`");
+    // ArgoDB shares the Hive-family dialect: backticks quote identifiers and
+    // double quotes are string literals, and schemas qualify table names.
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Argo), "user`name"), "`user``name`");
+    assert_eq!(quote_transfer_identifier("user`name", &DatabaseType::Argo), "`user``name`");
+    assert!(is_schema_aware(DatabaseType::Argo));
 }
 
 /// Spanner databases are created in one of two immutable dialects. The connected
@@ -316,7 +321,7 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
             order_columns: &[],
             limit: 100,
         }),
-        "SELECT TOP 100 * FROM \"Ens\".\"AlarmResponse\""
+        "SELECT TOP 100 * FROM Ens.AlarmResponse"
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
@@ -492,7 +497,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT `id` AS `id`, `name` AS `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
+        "SELECT `id`, `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -773,7 +778,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT TOP 100 * FROM \"Ens\".\"AlarmResponse\""
+        "SELECT TOP 100 * FROM Ens.AlarmResponse"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -792,7 +797,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT * FROM \"Ens\".\"AlarmResponse\" WHERE (Status = 'Open') ORDER BY \"ID\" ASC"
+        "SELECT * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY \"ID\" ASC"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -1073,7 +1078,7 @@ fn explicit_table_data_order_is_preserved() {
 }
 
 #[test]
-fn builds_iris_table_data_sql_with_literal_top_and_quoted_object() {
+fn builds_iris_table_data_sql_with_literal_top_and_ordinary_object() {
     let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Iris),
         schema: Some("Ens".to_string()),
@@ -1090,13 +1095,23 @@ fn builds_iris_table_data_sql_with_literal_top_and_quoted_object() {
         ..Default::default()
     });
 
-    assert_eq!(
-        sql,
-        "SELECT TOP 25 * FROM \"Ens\".\"AlarmResponse\" WHERE (\"Status\" = 'Open') ORDER BY \"Status\" DESC"
-    );
+    assert_eq!(sql, "SELECT TOP 25 * FROM Ens.AlarmResponse WHERE (\"Status\" = 'Open') ORDER BY \"Status\" DESC");
     assert!(!sql.contains("?"));
     assert!(!sql.contains(":%qpar"));
     assert!(!sql.contains(" LIMIT "));
+}
+
+#[test]
+fn iris_table_data_sql_quotes_only_delimited_object_names() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Iris),
+        schema: Some("App Schema".to_string()),
+        table_name: "Patient Record".to_string(),
+        limit: Some(25),
+        ..Default::default()
+    });
+
+    assert_eq!(sql, "SELECT TOP 25 * FROM \"App Schema\".\"Patient Record\"");
 }
 
 #[test]

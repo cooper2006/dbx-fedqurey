@@ -1,19 +1,22 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::db::mongo_driver::MongoDocumentResult;
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{
     agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
-use crate::sql_dialect::{normalize_len_params, qualified_transfer_table, quote_transfer_identifier};
+use crate::sql_dialect::{
+    normalize_len_params, qualified_transfer_table, quote_transfer_identifier, transfer_column_identifier,
+};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -23,6 +26,13 @@ static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::
 });
 static MYSQL_COLLATE_CLAUSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b").expect("valid MySQL COLLATE clause regex")
+});
+// An inline FK constraint *definition line*: an optional `CONSTRAINT <name>`
+// prefix followed by `FOREIGN KEY (`. Anchored to the line start so column
+// definitions whose COMMENT/DEFAULT strings mention "foreign key" never match.
+static INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r#"(?i)^\s*(?:CONSTRAINT\s+(?:`[^`]*`|"[^"]*"|\S+)\s+)?FOREIGN\s+KEY\s*\("#)
+        .expect("valid inline foreign key constraint line regex")
 });
 
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
@@ -125,7 +135,7 @@ pub enum TransferObjectFamily {
 
 pub fn transfer_object_family(db_type: &DatabaseType) -> Option<TransferObjectFamily> {
     match db_type {
-        DatabaseType::Mysql => Some(TransferObjectFamily::Mysql),
+        DatabaseType::Mysql | DatabaseType::Gbase => Some(TransferObjectFamily::Mysql),
         DatabaseType::Postgres
         | DatabaseType::Kingbase
         | DatabaseType::Gaussdb
@@ -185,9 +195,15 @@ pub struct TransferRequest {
     pub mode: TransferMode,
     #[serde(default)]
     pub target_table_name_case: TransferTableNameCase,
+    #[serde(default = "default_quote_target_column_names")]
+    pub quote_target_column_names: bool,
     #[serde(default)]
     pub ownership_policy: TransferOwnershipPolicy,
     pub batch_size: usize,
+}
+
+fn default_quote_target_column_names() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -783,8 +799,66 @@ fn existing_transfer_target_table_name(
     tables.iter().find(|table| table.name.eq_ignore_ascii_case(requested_name)).map(|table| table.name.clone())
 }
 
+const TRANSFER_PROGRESS_CHANNEL_CAPACITY: usize = 16;
+
+fn try_send_transfer_progress(sender: &tokio::sync::mpsc::Sender<TransferProgress>, progress: TransferProgress) {
+    let _ = sender.try_send(progress);
+}
+
+struct AbortTransferTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTransferTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_transfer_tables_isolated(
+    state: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    catalog: Option<String>,
+    db_type: DatabaseType,
+    table: String,
+    limit: usize,
+) -> Result<Vec<db::TableInfo>, String> {
+    let task = tokio::spawn(async move {
+        if let Some(catalog) = resolve_external_transfer_catalog(catalog.as_deref(), &db_type) {
+            crate::schema::list_doris_catalog_tables_core(
+                &state,
+                &connection_id,
+                catalog,
+                &database,
+                Some(&table),
+                Some(limit),
+                None,
+                None,
+                None,
+            )
+            .await
+        } else {
+            crate::schema::list_tables_core(
+                &state,
+                &connection_id,
+                &database,
+                &schema,
+                Some(&table),
+                Some(limit),
+                None,
+                None,
+                None,
+            )
+            .await
+        }
+    });
+    let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
+    task.await.map_err(|error| format!("Transfer table metadata task failed: {error}"))?
+}
+
 async fn resolve_transfer_target_table_name(
-    state: &AppState,
+    state: &Arc<AppState>,
     request: &TransferRequest,
     source_table: &str,
     target_pool_key: &str,
@@ -803,41 +877,21 @@ async fn resolve_transfer_target_table_name(
     // Route through the catalog-aware path when targeting an external
     // Doris/StarRocks catalog — otherwise the lookup runs against the
     // default / internal catalog and can miss or misidentify the table.
-    let tables = if let Some(catalog) = resolve_external_transfer_catalog(target_catalog, target_db_type) {
-        crate::schema::list_doris_catalog_tables_core(
-            state,
-            &request.target_connection_id,
-            catalog,
-            &request.target_database,
-            Some(&requested_name),
-            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            log::debug!("[transfer] failed to resolve target table metadata for {requested_name} in catalog '{catalog}': {error}");
-            Vec::new()
-        })
-    } else {
-        crate::schema::list_tables_core(
-            state,
-            &request.target_connection_id,
-            &request.target_database,
-            &request.target_schema,
-            Some(&requested_name),
-            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
-            Vec::new()
-        })
-    };
+    let tables = list_transfer_tables_isolated(
+        state.clone(),
+        request.target_connection_id.clone(),
+        request.target_database.clone(),
+        request.target_schema.clone(),
+        target_catalog.map(str::to_string),
+        *target_db_type,
+        requested_name.clone(),
+        TRANSFER_TARGET_TABLE_LOOKUP_LIMIT,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
+        Vec::new()
+    });
 
     if let Some(existing_name) =
         existing_transfer_target_table_name(&requested_name, &tables, allow_case_insensitive_match)
@@ -1491,7 +1545,12 @@ fn writable_transfer_columns(
         .collect()
 }
 
-fn transfer_column_names_match(target_db_type: &DatabaseType, left: &str, right: &str) -> bool {
+fn transfer_column_names_match(
+    target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
+    left: &str,
+    right: &str,
+) -> bool {
     if matches!(
         target_db_type,
         DatabaseType::Mysql
@@ -1508,7 +1567,11 @@ fn transfer_column_names_match(target_db_type: &DatabaseType, left: &str, right:
             | DatabaseType::Impala
             | DatabaseType::Spark
             | DatabaseType::Access
-    ) {
+    ) || (matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss) && !quote_target_column_names)
+    {
+        // Unquoted GaussDB/openGauss identifiers fold to lowercase server-side,
+        // so with quoting disabled a table created from mixed-case source
+        // columns reports folded names back from the catalog.
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -1519,11 +1582,14 @@ fn missing_transfer_target_columns(
     target_columns: &[db::ColumnInfo],
     col_names: &[String],
     target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
 ) -> Vec<String> {
     col_names
         .iter()
         .filter(|name| {
-            !target_columns.iter().any(|column| transfer_column_names_match(target_db_type, name, &column.name))
+            !target_columns.iter().any(|column| {
+                transfer_column_names_match(target_db_type, quote_target_column_names, name, &column.name)
+            })
         })
         .cloned()
         .collect()
@@ -1545,15 +1611,54 @@ fn required_unmapped_transfer_target_columns(
     target_columns: &[db::ColumnInfo],
     col_names: &[String],
     target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
 ) -> Vec<String> {
     target_columns
         .iter()
         .filter(|column| {
             !target_column_can_be_omitted(column, target_db_type)
-                && !col_names.iter().any(|name| transfer_column_names_match(target_db_type, name, &column.name))
+                && !col_names.iter().any(|name| {
+                    transfer_column_names_match(target_db_type, quote_target_column_names, name, &column.name)
+                })
         })
         .map(|column| column.name.clone())
         .collect()
+}
+
+/// Fails fast when a preexisting target table's structure can't accept the
+/// source columns. DBX never alters an existing target table's columns, so
+/// skipping this check (structure-only transfers used to silently skip it,
+/// #7660) leaves the transfer reporting success while the target quietly stays
+/// out of sync with the source.
+fn validate_preexisting_target_columns(
+    target_columns: &[db::ColumnInfo],
+    col_names: &[String],
+    target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
+    target_table: &str,
+) -> Result<(), String> {
+    let missing = missing_transfer_target_columns(target_columns, col_names, target_db_type, quote_target_column_names);
+    if !missing.is_empty() {
+        return Err(format!(
+            "Target table '{target_table}' already exists with a different structure and is missing column(s) \
+             {} present in the source table. DBX does not alter an existing target table's columns during \
+             transfer — drop the target table or adjust its structure to match the source first.",
+            missing.join(", ")
+        ));
+    }
+
+    let required =
+        required_unmapped_transfer_target_columns(target_columns, col_names, target_db_type, quote_target_column_names);
+    if !required.is_empty() {
+        return Err(format!(
+            "Target table '{target_table}' already exists with a different structure and has required column(s) \
+             {} that are not present in the source table and have no default or generated value. DBX does not \
+             alter an existing target table's columns during transfer — drop the target table or adjust its \
+             structure to match the source first.",
+            required.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> Vec<String> {
@@ -2936,7 +3041,7 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -3120,6 +3225,31 @@ pub fn generate_create_table_ddl(
     table_comment: Option<&str>,
     catalog: Option<&str>,
 ) -> String {
+    generate_create_table_ddl_with_column_quoting(
+        columns,
+        table,
+        source_schema,
+        schema,
+        target_db,
+        source_db,
+        table_comment,
+        catalog,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_create_table_ddl_with_column_quoting(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    source_schema: &str,
+    schema: &str,
+    target_db: &DatabaseType,
+    source_db: &DatabaseType,
+    table_comment: Option<&str>,
+    catalog: Option<&str>,
+    quote_target_column_names: bool,
+) -> String {
     let full_table = qualified_table(table, schema, target_db, catalog);
 
     let is_mysql_family = matches!(
@@ -3135,12 +3265,20 @@ pub fn generate_create_table_ddl(
     for c in columns {
         col_lines.push({
             let mapped_type = postgres_column_type_sql(c, source_schema, schema, source_db, target_db);
-            let mut line = format!("  {} {}", quote_identifier(&c.name, target_db), mapped_type);
+            let mut line = format!(
+                "  {} {}",
+                transfer_column_identifier(&c.name, target_db, quote_target_column_names),
+                mapped_type
+            );
             if let Some(default_clause) = column_default_clause(c, source_schema, schema, source_db, target_db) {
                 line.push(' ');
                 line.push_str(&default_clause);
             }
-            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)
+            if !c.is_nullable
+                && !matches!(
+                    target_db,
+                    DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo
+                )
             {
                 line.push_str(" NOT NULL");
             }
@@ -3164,10 +3302,10 @@ pub fn generate_create_table_ddl(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
         for c in columns {
             if c.is_primary_key {
-                let qname = quote_identifier(&c.name, target_db);
+                let qname = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
                 if is_mysql_family {
                     let mapped = map_column_type(&c.data_type, source_db, target_db);
                     if mysql_type_needs_key_prefix(&mapped) {
@@ -3233,6 +3371,17 @@ pub fn generate_comment_ddl(
     target_db: &DatabaseType,
     table_comment: Option<&str>,
 ) -> Vec<String> {
+    generate_comment_ddl_with_column_quoting(columns, table, schema, target_db, table_comment, true)
+}
+
+fn generate_comment_ddl_with_column_quoting(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    schema: &str,
+    target_db: &DatabaseType,
+    table_comment: Option<&str>,
+    quote_target_column_names: bool,
+) -> Vec<String> {
     if !(is_postgres_transfer_dialect(target_db)
         || matches!(target_db, DatabaseType::Oracle | DatabaseType::ClickHouse))
     {
@@ -3260,7 +3409,7 @@ pub fn generate_comment_ddl(
                 continue;
             }
             let escaped = trimmed.replace('\'', "''");
-            let qcol = quote_identifier(&c.name, target_db);
+            let qcol = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
 
             match target_db {
                 target_db if is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle) => {
@@ -3330,8 +3479,25 @@ impl InsertSqlTemplate {
         catalog: Option<&str>,
         overrides_postgres_system_values: bool,
     ) -> Self {
+        Self::new_with_column_quoting(columns, table, schema, db_type, catalog, overrides_postgres_system_values, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_column_quoting(
+        columns: &[String],
+        table: &str,
+        schema: &str,
+        db_type: &DatabaseType,
+        catalog: Option<&str>,
+        overrides_postgres_system_values: bool,
+        quote_target_column_names: bool,
+    ) -> Self {
         let full_table = qualified_table(table, schema, db_type, catalog);
-        let col_list = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+        let col_list = columns
+            .iter()
+            .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+            .collect::<Vec<_>>()
+            .join(", ");
         let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
             " OVERRIDING SYSTEM VALUE"
         } else {
@@ -3465,6 +3631,7 @@ pub fn generate_upsert_typed(
         catalog,
         false,
         false,
+        true,
     )
 }
 
@@ -3480,13 +3647,18 @@ fn generate_upsert_typed_for_transfer(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> String {
     if rows.is_empty() || pk_columns.is_empty() {
         return String::new();
     }
 
     let full_table = qualified_table(table, schema, db_type, catalog);
-    let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+    let col_list = columns
+        .iter()
+        .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
 
@@ -3502,7 +3674,11 @@ fn generate_upsert_typed_for_transfer(
             if is_postgres_transfer_dialect(db_type)
                 || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb) =>
         {
-            let pk_list = pk_columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+            let pk_list = pk_columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
             let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
                 " OVERRIDING SYSTEM VALUE"
             } else {
@@ -3516,7 +3692,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("{qc} = EXCLUDED.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3529,13 +3705,13 @@ fn generate_upsert_typed_for_transfer(
             let mut sql = format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"));
             if non_pk_columns.is_empty() {
                 sql.push_str("\nON DUPLICATE KEY UPDATE ");
-                let first_pk = quote_identifier(&pk_columns[0], db_type);
+                let first_pk = transfer_column_identifier(&pk_columns[0], db_type, quote_target_column_names);
                 sql.push_str(&format!("{first_pk} = {first_pk}"));
             } else {
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("{qc} = VALUES({qc})")
                     })
                     .collect::<Vec<_>>()
@@ -3545,11 +3721,15 @@ fn generate_upsert_typed_for_transfer(
             sql
         }
         DatabaseType::SqlServer => {
-            let src_col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+            let src_col_list = columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
             let on_clause = pk_columns
                 .iter()
                 .map(|c| {
-                    let qc = quote_identifier(c, db_type);
+                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                     format!("target.{qc} = src.{qc}")
                 })
                 .collect::<Vec<_>>()
@@ -3564,7 +3744,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("target.{qc} = src.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3572,9 +3752,16 @@ fn generate_upsert_typed_for_transfer(
                 sql.push_str(&format!("\nWHEN MATCHED THEN UPDATE SET {update_set}"));
             }
 
-            let insert_cols = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-            let insert_vals =
-                columns.iter().map(|c| format!("src.{}", quote_identifier(c, db_type))).collect::<Vec<_>>().join(", ");
+            let insert_cols = columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_vals = columns
+                .iter()
+                .map(|column| format!("src.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
+                .collect::<Vec<_>>()
+                .join(", ");
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});"));
             sql
         }
@@ -3586,7 +3773,7 @@ fn generate_upsert_typed_for_transfer(
                     vals.push(format!(
                         "{} AS {}",
                         escape_value_typed(v, db_type, column_types.get(index).and_then(|value| value.as_deref())),
-                        quote_identifier(c, db_type)
+                        transfer_column_identifier(c, db_type, quote_target_column_names)
                     ));
                 }
                 using_rows.push(format!("SELECT {} FROM dual", vals.join(", ")));
@@ -3595,7 +3782,7 @@ fn generate_upsert_typed_for_transfer(
             let on_clause = pk_columns
                 .iter()
                 .map(|c| {
-                    let qc = quote_identifier(c, db_type);
+                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                     format!("t.{qc} = s.{qc}")
                 })
                 .collect::<Vec<_>>()
@@ -3608,7 +3795,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("t.{qc} = s.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3616,14 +3803,29 @@ fn generate_upsert_typed_for_transfer(
                 sql.push_str(&format!("\nWHEN MATCHED THEN UPDATE SET {update_set}"));
             }
 
-            let insert_cols = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-            let insert_vals =
-                columns.iter().map(|c| format!("s.{}", quote_identifier(c, db_type))).collect::<Vec<_>>().join(", ");
+            let insert_cols = columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_vals = columns
+                .iter()
+                .map(|column| format!("s.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
+                .collect::<Vec<_>>()
+                .join(", ");
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"));
             sql
         }
         _ => {
-            let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false);
+            let template = InsertSqlTemplate::new_with_column_quoting(
+                columns,
+                table,
+                schema,
+                db_type,
+                catalog,
+                false,
+                quote_target_column_names,
+            );
             template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
         }
     }
@@ -3632,7 +3834,7 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala, _) => 500,
+        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo, _) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
@@ -3813,6 +4015,7 @@ fn generate_transfer_write_sql(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> String {
     match mode {
         TransferMode::Upsert => generate_upsert_typed_for_transfer(
@@ -3826,13 +4029,21 @@ fn generate_transfer_write_sql(
             catalog,
             overrides_postgres_system_values,
             mysql_spatial_markers,
+            quote_target_column_names,
         ),
         _ => {
             if rows.is_empty() {
                 return String::new();
             }
-            let template =
-                InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
+            let template = InsertSqlTemplate::new_with_column_quoting(
+                columns,
+                table,
+                schema,
+                db_type,
+                catalog,
+                overrides_postgres_system_values,
+                quote_target_column_names,
+            );
             template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
         }
     }
@@ -3864,7 +4075,9 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
-    generate_insert_sql_batches_from_value_rows(columns, value_rows, table, schema, db_type, catalog, limits, false)
+    generate_insert_sql_batches_from_value_rows(
+        columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3879,6 +4092,7 @@ fn generate_insert_typed_sql_batches_for_transfer(
     limits: SqlBatchLimits,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -3894,6 +4108,7 @@ fn generate_insert_typed_sql_batches_for_transfer(
         catalog,
         limits,
         overrides_postgres_system_values,
+        quote_target_column_names,
     )
 }
 
@@ -3907,6 +4122,7 @@ fn generate_insert_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
     overrides_postgres_system_values: bool,
+    quote_target_column_names: bool,
 ) -> Result<Vec<(String, usize)>, String> {
     if value_rows.is_empty() {
         return Ok(Vec::new());
@@ -3919,7 +4135,15 @@ fn generate_insert_sql_batches_from_value_rows(
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
     let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
+    let template = InsertSqlTemplate::new_with_column_quoting(
+        columns,
+        table,
+        schema,
+        db_type,
+        catalog,
+        overrides_postgres_system_values,
+        quote_target_column_names,
+    );
     let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
     let mut start = 0usize;
@@ -3957,6 +4181,7 @@ fn generate_insert_sql_batches_from_value_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn generate_transfer_write_sql_batches(
     mode: &TransferMode,
     columns: &[String],
@@ -3969,6 +4194,37 @@ fn generate_transfer_write_sql_batches(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+) -> Result<Vec<String>, String> {
+    generate_transfer_write_sql_batches_with_column_quoting(
+        mode,
+        columns,
+        column_types,
+        rows,
+        table,
+        schema,
+        db_type,
+        pk_columns,
+        catalog,
+        overrides_postgres_system_values,
+        mysql_spatial_markers,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_transfer_write_sql_batches_with_column_quoting(
+    mode: &TransferMode,
+    columns: &[String],
+    column_types: &[Option<String>],
+    rows: &[Vec<serde_json::Value>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    pk_columns: &[String],
+    catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -3986,6 +4242,7 @@ fn generate_transfer_write_sql_batches(
             SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode)),
             overrides_postgres_system_values,
             mysql_spatial_markers,
+            quote_target_column_names,
         )?
         .into_iter()
         .map(|(sql, _)| sql)
@@ -4014,6 +4271,7 @@ fn generate_transfer_write_sql_batches(
             catalog,
             overrides_postgres_system_values,
             mysql_spatial_markers,
+            quote_target_column_names,
         );
 
         while end < rows.len() && end - start < max_rows {
@@ -4029,6 +4287,7 @@ fn generate_transfer_write_sql_batches(
                 catalog,
                 overrides_postgres_system_values,
                 mysql_spatial_markers,
+                quote_target_column_names,
             );
             if candidate.len() > max_sql_bytes && !accepted.is_empty() {
                 break;
@@ -4689,6 +4948,10 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
 /// text, which both Postgres and MySQL-family `SHOW CREATE TABLE` output share,
 /// and on foreign key constraints always being the last items before the closing
 /// paren (true for both dialects' DDL dumps).
+///
+/// Only genuine constraint definition lines match (`CONSTRAINT <name> FOREIGN
+/// KEY (` / bare `FOREIGN KEY (`); a column line whose COMMENT or DEFAULT text
+/// merely mentions the words must survive (#7660).
 fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
     if !statement.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE ") {
         return statement.to_string();
@@ -4696,7 +4959,7 @@ fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
 
     let mut lines: Vec<String> = Vec::new();
     for line in statement.lines() {
-        if line.to_ascii_uppercase().contains(" FOREIGN KEY ") {
+        if INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE.is_match(line) {
             if let Some(previous) = lines.last_mut() {
                 let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
                 if previous[..trimmed_len].ends_with(',') {
@@ -4864,6 +5127,19 @@ async fn execute_on_pool_once(
             );
             client.execute_query(params).await
         }
+        PoolKind::ExternalDriver { config, session, .. } => {
+            let database = database_from_pool_key(pool_key)
+                .map(str::to_string)
+                .unwrap_or_else(|| config.effective_database().unwrap_or("").to_string());
+            let params = crate::query::external_driver_query_params(
+                config.as_ref(),
+                sql,
+                &database,
+                None,
+                &QueryExecutionOptions { max_rows, fetch_size: max_rows, ..QueryExecutionOptions::default() },
+            );
+            session.invoke_with_timeout("executeQuery", params, None).await
+        }
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
@@ -4888,7 +5164,39 @@ fn catalog_from_pool_key(pool_key: &str) -> Option<&str> {
 
 pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
     let configs = state.configs.read().await;
-    configs.get(connection_id).map(|c| c.db_type).ok_or_else(|| format!("Connection config not found: {connection_id}"))
+    configs
+        .get(connection_id)
+        .map(effective_transfer_database_type)
+        .ok_or_else(|| format!("Connection config not found: {connection_id}"))
+}
+
+fn effective_transfer_database_type(config: &ConnectionConfig) -> DatabaseType {
+    if config.db_type != DatabaseType::Jdbc {
+        return config.db_type;
+    }
+    if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) {
+        return DatabaseType::Jdbc;
+    }
+
+    let jdbc_identity = [
+        config.driver_profile.as_deref().unwrap_or(""),
+        config.connection_string.as_deref().unwrap_or(""),
+        config.jdbc_driver_class.as_deref().unwrap_or(""),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    // GBase 8a only: 8s (`gbasedbt`/`jdbc:gbasedbt-sqli`) is Informix-based and
+    // must not be mapped into the MySQL transfer family.
+    let is_gbase_8a = jdbc_identity.contains("jdbc:gbase:")
+        || jdbc_identity.contains("cn.gbase.")
+        || (jdbc_identity.contains("gbase")
+            && !jdbc_identity.contains("gbasedbt")
+            && !jdbc_identity.contains("gbase8s"));
+    if is_gbase_8a {
+        DatabaseType::Gbase
+    } else {
+        DatabaseType::Jdbc
+    }
 }
 
 pub async fn get_columns_for_transfer(
@@ -4934,6 +5242,13 @@ pub async fn get_columns_for_transfer(
         drop(connections);
         return db::influxdb_driver::get_columns(&client, &database, &table).await;
     }
+    if let Some(PoolKind::InfluxDb3(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return db::influxdb3_driver::get_columns(&client, &database, &table).await;
+    }
     if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
         let client = client.clone();
         let database = database.to_string();
@@ -4942,6 +5257,26 @@ pub async fn get_columns_for_transfer(
         drop(connections);
         let mut client = client.lock().await;
         return client.get_columns(&database, &schema, &table, None).await;
+    }
+    if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(pool_key) {
+        let config = config.clone();
+        let session = session.clone();
+        let database = database.to_string();
+        let schema = schema.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return session
+            .invoke_with_timeout(
+                "getColumns",
+                serde_json::json!({
+                    "connection": config.as_ref(),
+                    "database": database,
+                    "schema": schema,
+                    "table": table,
+                }),
+                None,
+            )
+            .await;
     }
     let pool = connections.get(pool_key).ok_or("Pool not found")?;
     let schema = schema.to_string();
@@ -6531,7 +6866,7 @@ pub(crate) fn sort_table_names_by_dependencies(
 
 #[allow(clippy::too_many_arguments)]
 async fn transfer_mongodb_table<F>(
-    state: &AppState,
+    state: &Arc<AppState>,
     request: &TransferRequest,
     table: &str,
     table_index: usize,
@@ -6687,7 +7022,7 @@ where
 
                 if request.create_table {
                     if !target_table_preexisting {
-                        let ddl = generate_create_table_ddl(
+                        let ddl = generate_create_table_ddl_with_column_quoting(
                             &sql_target_columns,
                             &target_table,
                             &request.source_schema,
@@ -6696,18 +7031,20 @@ where
                             source_db_type,
                             None,
                             request.target_catalog.as_deref(),
+                            request.quote_target_column_names,
                         );
                         let target_table_created = transfer_create_table_created(
                             execute_on_pool(state, target_pool_key, &ddl).await.map(|_| ()),
                             &format!("Failed to create table from MongoDB collection '{table}'"),
                         )?;
                         if target_table_created {
-                            for stmt in generate_comment_ddl(
+                            for stmt in generate_comment_ddl_with_column_quoting(
                                 &sql_target_columns,
                                 &target_table,
                                 &request.target_schema,
                                 target_db_type,
                                 None,
+                                request.quote_target_column_names,
                             ) {
                                 if let Err(e) = execute_on_pool(state, target_pool_key, &stmt).await {
                                     log::warn!(
@@ -6752,7 +7089,7 @@ where
             } else {
                 mongo_documents_to_rows(&documents, &sql_target_column_names)
             };
-            let write_statements = generate_transfer_write_sql_batches(
+            let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
                 &TransferMode::Append,
                 &sql_target_column_names,
                 &sql_target_column_types,
@@ -6764,6 +7101,7 @@ where
                 request.target_catalog.as_deref(),
                 false,
                 false,
+                request.quote_target_column_names,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
@@ -6888,8 +7226,8 @@ async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cur
 /// Transfer a single table. Returns rows transferred.
 /// `progress_callback` is invoked for progress updates.
 #[allow(clippy::too_many_arguments)]
-pub async fn transfer_table<F>(
-    state: &AppState,
+async fn transfer_table_inner<F>(
+    state: &Arc<AppState>,
     request: &TransferRequest,
     table: &str,
     table_index: usize,
@@ -6966,45 +7304,23 @@ where
         log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
     }
 
-    // Fetch source table comment
-    // Route through the catalog-aware path for Doris/StarRocks external catalogs
-    // so the comment comes from the selected catalog, not the default one.
-    let table_comment: Option<String> =
-        if let Some(catalog) = resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type) {
-            crate::schema::list_doris_catalog_tables_core(
-                state,
-                &request.source_connection_id,
-                catalog,
-                &request.source_database,
-                Some(table),
-                Some(1),
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .and_then(|t| t.comment)
-        } else {
-            crate::schema::list_tables_core(
-                state,
-                &request.source_connection_id,
-                &request.source_database,
-                &request.source_schema,
-                Some(table),
-                Some(1),
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .and_then(|t| t.comment)
-        };
+    // Fetch source table comment. Keep this list-tables metadata chain on its
+    // own task stack, just like the target-table lookup above.
+    let table_comment = list_transfer_tables_isolated(
+        state.clone(),
+        request.source_connection_id.clone(),
+        request.source_database.clone(),
+        request.source_schema.clone(),
+        request.source_catalog.clone(),
+        *source_db_type,
+        table.to_string(),
+        1,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .next()
+    .and_then(|table| table.comment);
 
     let source_indexes =
         if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
@@ -7091,7 +7407,8 @@ where
                 source_driver_profile.as_deref(),
                 target_driver_profile.as_deref(),
                 preserves_target_table_name,
-            );
+            ) && (request.quote_target_column_names
+                || !matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss));
             let mut reused_source_ddl = false;
             let ddl = if can_reuse_source_ddl {
                 let (source_ddl, source_ddl_was_read) = if let Some(catalog) =
@@ -7114,7 +7431,7 @@ where
                         Err(err) => {
                             log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
                             (
-                                generate_create_table_ddl(
+                                generate_create_table_ddl_with_column_quoting(
                                     &columns,
                                     &target_table,
                                     &request.source_schema,
@@ -7123,6 +7440,7 @@ where
                                     source_db_type,
                                     table_comment.as_deref(),
                                     request.target_catalog.as_deref(),
+                                    request.quote_target_column_names,
                                 ),
                                 false,
                             )
@@ -7141,7 +7459,7 @@ where
                     {
                         Ok(ddl) => (ddl, true),
                         Err(_) => (
-                            generate_create_table_ddl(
+                            generate_create_table_ddl_with_column_quoting(
                                 &columns,
                                 &target_table,
                                 &request.source_schema,
@@ -7150,6 +7468,7 @@ where
                                 source_db_type,
                                 table_comment.as_deref(),
                                 request.target_catalog.as_deref(),
+                                request.quote_target_column_names,
                             ),
                             false,
                         ),
@@ -7158,7 +7477,7 @@ where
                 if contains_oceanbase_mysql_table_options(&source_ddl)
                     && !db::oceanbase_mysql::is_profile(target_db_type, target_driver_profile.as_deref())
                 {
-                    generate_create_table_ddl(
+                    generate_create_table_ddl_with_column_quoting(
                         &columns,
                         &target_table,
                         &request.source_schema,
@@ -7167,6 +7486,7 @@ where
                         source_db_type,
                         table_comment.as_deref(),
                         request.target_catalog.as_deref(),
+                        request.quote_target_column_names,
                     )
                 } else {
                     reused_source_ddl = source_ddl_was_read;
@@ -7179,7 +7499,7 @@ where
                     )
                 }
             } else {
-                generate_create_table_ddl(
+                generate_create_table_ddl_with_column_quoting(
                     &columns,
                     &target_table,
                     &request.source_schema,
@@ -7188,6 +7508,7 @@ where
                     source_db_type,
                     table_comment.as_deref(),
                     request.target_catalog.as_deref(),
+                    request.quote_target_column_names,
                 )
             };
             // MySQL-family targets: create the bare table first and add any foreign
@@ -7248,12 +7569,13 @@ where
             if target_table_created {
                 pending_fk_alters
                     .extend(deferred_fk_alters.into_iter().map(|statement| (target_table.clone(), statement)));
-                let comment_stmts = generate_comment_ddl(
+                let comment_stmts = generate_comment_ddl_with_column_quoting(
                     &columns,
                     &target_table,
                     &request.target_schema,
                     target_db_type,
                     table_comment.as_deref(),
+                    request.quote_target_column_names,
                 );
                 for stmt in &comment_stmts {
                     if let Err(e) = execute_on_pool(state, target_pool_key, stmt).await {
@@ -7282,6 +7604,28 @@ where
     // Structure-only transfer: complete the table's post-create schema DDL,
     // then skip everything data-related.
     if !should_copy_data(&request.content) {
+        if request.create_table && target_table_preexisting {
+            let target_columns = get_columns_for_transfer(
+                state,
+                target_pool_key,
+                &request.target_connection_id,
+                &request.target_database,
+                &request.target_schema,
+                &target_table,
+                request.target_catalog.as_deref(),
+            )
+            .await
+            .map_err(|error| {
+                format!("Failed to inspect target table '{target_table}' columns before transfer: {error}")
+            })?;
+            validate_preexisting_target_columns(
+                &target_columns,
+                &col_names,
+                target_db_type,
+                request.quote_target_column_names,
+                &target_table,
+            )?;
+        }
         if should_restore_postgres_table_schema {
             restore_postgres_table_schema_objects(
                 state,
@@ -7301,7 +7645,11 @@ where
         || (request.mode == TransferMode::Upsert
             && !matches!(
                 target_db_type,
-                DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+                DatabaseType::ClickHouse
+                    | DatabaseType::Hive
+                    | DatabaseType::Kyuubi
+                    | DatabaseType::Impala
+                    | DatabaseType::Argo
             ))
         || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng);
     let target_columns = if needs_target_columns {
@@ -7326,26 +7674,13 @@ where
     // can't accept the planned insert, fail fast here instead of truncating
     // the target's existing data and then hitting an opaque driver error.
     if request.create_table && target_table_preexisting {
-        let missing = missing_transfer_target_columns(&target_columns, &col_names, target_db_type);
-        if !missing.is_empty() {
-            return Err(format!(
-                "Target table '{target_table}' already exists with a different structure and is missing column(s) \
-                 {} present in the source table. DBX does not alter an existing target table's columns during \
-                 transfer — drop the target table or adjust its structure to match the source first.",
-                missing.join(", ")
-            ));
-        }
-
-        let required = required_unmapped_transfer_target_columns(&target_columns, &col_names, target_db_type);
-        if !required.is_empty() {
-            return Err(format!(
-                "Target table '{target_table}' already exists with a different structure and has required column(s) \
-                 {} that are not present in the source table and have no default or generated value. DBX does not \
-                 alter an existing target table's columns during transfer — drop the target table or adjust its \
-                 structure to match the source first.",
-                required.join(", ")
-            ));
-        }
+        validate_preexisting_target_columns(
+            &target_columns,
+            &col_names,
+            target_db_type,
+            request.quote_target_column_names,
+            &target_table,
+        )?;
     }
 
     // Truncate target if overwrite mode
@@ -7365,7 +7700,11 @@ where
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
         if matches!(
             target_db_type,
-            DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+            DatabaseType::ClickHouse
+                | DatabaseType::Hive
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
         ) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
@@ -7448,7 +7787,7 @@ where
                 break;
             }
 
-            let write_statements = generate_transfer_write_sql_batches(
+            let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
                 &effective_mode,
                 &col_names,
                 &col_types,
@@ -7460,6 +7799,7 @@ where
                 request.target_catalog.as_deref(),
                 overrides_postgres_system_values,
                 mysql_spatial_markers,
+                request.quote_target_column_names,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_transfer_write_statement(
@@ -7537,6 +7877,74 @@ where
     }
 
     Ok(total_transferred)
+}
+
+/// Transfer one table on its own Tokio task so the large transfer future and
+/// nested driver metadata futures do not share a single worker stack.
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_table<F>(
+    state: &Arc<AppState>,
+    request: &TransferRequest,
+    table: &str,
+    table_index: usize,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
+    pending_fk_alters: &mut Vec<(String, String)>,
+    mut progress_callback: F,
+) -> Result<u64, String>
+where
+    F: FnMut(TransferProgress),
+{
+    let state = state.clone();
+    let request = request.clone();
+    let table = table.to_string();
+    let source_db_type = *source_db_type;
+    let target_db_type = *target_db_type;
+    let source_pool_key = source_pool_key.to_string();
+    let target_pool_key = target_pool_key.to_string();
+    let known_foreign_keys = known_foreign_keys
+        .get(&table)
+        .map(|foreign_keys| HashMap::from([(table.clone(), foreign_keys.clone())]))
+        .unwrap_or_default();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+
+    let mut task = tokio::spawn(async move {
+        let mut task_pending_fk_alters = Vec::new();
+        let result = transfer_table_inner(
+            &state,
+            &request,
+            &table,
+            table_index,
+            &source_db_type,
+            &target_db_type,
+            &source_pool_key,
+            &target_pool_key,
+            &known_foreign_keys,
+            &mut task_pending_fk_alters,
+            move |progress| {
+                try_send_transfer_progress(&progress_tx, progress);
+            },
+        )
+        .await;
+        (result, task_pending_fk_alters)
+    });
+    let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
+
+    loop {
+        tokio::select! {
+            biased;
+            Some(progress) = progress_rx.recv() => progress_callback(progress),
+            result = &mut task => {
+                let (result, task_pending_fk_alters) =
+                    result.map_err(|error| format!("Transfer table task failed: {error}"))?;
+                pending_fk_alters.extend(task_pending_fk_alters);
+                return result;
+            }
+        }
+    }
 }
 
 pub async fn transfer_postgres_schema_dependencies<F>(
@@ -8028,6 +8436,98 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jdbc_transfer_config(connection_string: &str, driver_class: &str, profile: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "test-jdbc".to_string(),
+            name: "Test JDBC".to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Jdbc,
+            driver_profile: if profile.is_empty() { None } else { Some(profile.to_string()) },
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            default_schema: None,
+            visible_databases: None,
+            visible_database_patterns: None,
+            visible_schemas: None,
+            show_system_schemas: false,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 5,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: if connection_string.is_empty() { None } else { Some(connection_string.to_string()) },
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: if driver_class.is_empty() { None } else { Some(driver_class.to_string()) },
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            save_password: true,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+            federation_enabled: false,
+            docs_notes_path: None,
+        }
+    }
+
+    #[test]
+    fn gbase_8s_jdbc_stays_generic_for_transfer() {
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbasedbt-sqli://localhost:9088/dbx_test:INFORMIXSERVER=ol_gbasedbt",
+                "com.gbasedbt.jdbc.Driver",
+                ""
+            )),
+            DatabaseType::Jdbc
+        );
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbase://localhost:5258/dbx_test",
+                "cn.gbase.Driver",
+                "gbase8s"
+            )),
+            DatabaseType::Jdbc
+        );
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbase://localhost:5258/dbx_test",
+                "com.gbase.jdbc.Driver",
+                ""
+            )),
+            DatabaseType::Gbase
+        );
+    }
+
     use serde_json::json;
 
     fn test_column(name: &str, data_type: &str) -> db::ColumnInfo {
@@ -8167,6 +8667,7 @@ mod tests {
         .unwrap();
         assert_eq!(request.content, TransferContent::StructureAndData);
         assert!(request.objects.is_empty());
+        assert!(request.quote_target_column_names);
     }
 
     #[test]
@@ -8190,6 +8691,7 @@ mod tests {
             }],
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
         };
@@ -8197,6 +8699,7 @@ mod tests {
         assert_eq!(json["content"], "structureOnly");
         assert_eq!(json["objects"][0]["objectType"], "VIEW");
         assert_eq!(json["objects"][0]["names"][0], "v1");
+        assert_eq!(json["quoteTargetColumnNames"], true);
     }
 
     mod transfer_family_tests {
@@ -8261,6 +8764,7 @@ mod tests {
                 create_table: true,
                 mode: TransferMode::Append,
                 target_table_name_case: TransferTableNameCase::Preserve,
+                quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 batch_size: 1000,
                 content: TransferContent::DataOnly,
@@ -8345,6 +8849,7 @@ mod tests {
             assert!(same.contains(&Event));
             // unsupported databases
             assert!(cross_family_transferable_object_kinds(&DatabaseType::Sqlite, &DatabaseType::Mysql).is_empty());
+            assert_eq!(transfer_object_family(&DatabaseType::Gbase), Some(TransferObjectFamily::Mysql));
             // postgres is not a validated cross-family source or target:
             // the executor rejects postgres sources and no dialect-aware
             // conversion exists for it (postgres <-> postgres stays same-family)
@@ -8723,6 +9228,35 @@ mod tests {
 
             assert!(!stripped.to_ascii_uppercase().contains("FOREIGN KEY"), "{stripped}");
             assert!(stripped.contains("KEY `fk_child_parent` (`parent_id`)"), "{stripped}");
+        }
+
+        #[test]
+        fn keeps_columns_whose_comment_mentions_foreign_key() {
+            // Regression for #7660: the deferred-FK DDL rewrite used to drop any
+            // line containing " FOREIGN KEY ", so column definitions whose
+            // COMMENT text merely mentions the words silently vanished from the
+            // created target table.
+            let ddl = "CREATE TABLE `title_task` (\n  `id` varchar(32) NOT NULL,\n  `review_result` varchar(100) DEFAULT NULL,\n  `review_mode` tinyint NOT NULL DEFAULT '0' COMMENT 'foreign key of review flow',\n  `score_snapshot_json` text COMMENT 'snapshot json, see foreign key docs',\n  `task_status` int DEFAULT '0',\n  PRIMARY KEY (`id`),\n  KEY `idx_task_status` (`task_status`),\n  CONSTRAINT `fk_title_task_org` FOREIGN KEY (`org_id`) REFERENCES `org` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+            let stripped = strip_inline_foreign_key_constraint_lines(ddl);
+
+            assert!(stripped.contains("`review_mode` tinyint NOT NULL DEFAULT '0'"), "{stripped}");
+            assert!(stripped.contains("`score_snapshot_json` text"), "{stripped}");
+            assert!(!stripped.contains("FOREIGN KEY"), "{stripped}");
+            assert!(stripped.contains("KEY `idx_task_status` (`task_status`)"), "{stripped}");
+        }
+
+        #[test]
+        fn strips_only_foreign_key_constraint_lines_regardless_of_other_mentions() {
+            // A CHECK constraint whose expression mentions the words stays; a
+            // nameless inline `FOREIGN KEY (` line (defensive: some MySQL
+            // dialects emit it) is still stripped.
+            let ddl = "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `kind` varchar(10) NOT NULL,\n  CONSTRAINT `chk_kind` CHECK (`kind` <> 'foreign key'),\n  FOREIGN KEY (`id`) REFERENCES `parent` (`id`)\n) ENGINE=InnoDB";
+
+            let stripped = strip_inline_foreign_key_constraint_lines(ddl);
+
+            assert!(stripped.contains("CONSTRAINT `chk_kind` CHECK (`kind` <> 'foreign key')"), "{stripped}");
+            assert!(!stripped.contains("REFERENCES"), "{stripped}");
         }
 
         #[test]
@@ -9258,6 +9792,7 @@ mod tests {
             objects: Vec::new(),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
         }
@@ -9480,7 +10015,7 @@ mod tests {
         let col_names = vec!["id".to_string(), "name".to_string(), "extra_col".to_string()];
 
         assert_eq!(
-            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true),
             vec!["extra_col".to_string()]
         );
     }
@@ -9490,11 +10025,26 @@ mod tests {
         let target_columns = vec![test_column("ID", "int"), test_column("Name", "varchar(32)")];
         let col_names = vec!["id".to_string(), "name".to_string()];
 
-        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql).is_empty());
-        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Kyuubi).is_empty());
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true).is_empty());
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Kyuubi, true).is_empty());
         assert_eq!(
-            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres),
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres, true),
             vec!["id".to_string(), "name".to_string()]
+        );
+    }
+
+    #[test]
+    fn gauss_target_column_validation_ignores_case_when_quoting_disabled() {
+        let target_columns = vec![test_column("id", "int"), test_column("user_id", "bigint")];
+        let col_names = vec!["id".to_string(), "USER_ID".to_string()];
+
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Gaussdb, false).is_empty());
+        assert!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::OpenGauss, false).is_empty()
+        );
+        assert_eq!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Gaussdb, true),
+            vec!["USER_ID".to_string()]
         );
     }
 
@@ -9527,11 +10077,15 @@ mod tests {
         ];
         let col_names = vec!["id".to_string()];
 
-        assert!(required_unmapped_transfer_target_columns(&target_columns[..6], &col_names, &DatabaseType::Mysql)
+        assert!(required_unmapped_transfer_target_columns(
+            &target_columns[..6],
+            &col_names,
+            &DatabaseType::Mysql,
+            true
+        )
+        .is_empty());
+        assert!(required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::SqlServer, true)
             .is_empty());
-        assert!(
-            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::SqlServer).is_empty()
-        );
     }
 
     #[test]
@@ -9543,7 +10097,7 @@ mod tests {
         let col_names = vec!["id".to_string()];
 
         assert_eq!(
-            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true),
             vec!["required_code".to_string()]
         );
     }
@@ -9594,6 +10148,78 @@ mod tests {
         assert!(!ddl.contains("`age` INT COMMENT")); // no comment for age
         assert!(ddl.contains("`name` VARCHAR(100) NOT NULL COMMENT '用户姓名'"));
         assert!(ddl.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn gaussdb_transfer_can_leave_safe_target_columns_unquoted() {
+        let columns = vec![
+            db::ColumnInfo { is_primary_key: true, ..test_column("USER_ID", "int") },
+            test_column("CamelName", "varchar(32)"),
+            test_column("select", "varchar(32)"),
+            test_column("has space", "varchar(32)"),
+        ];
+
+        let ddl = generate_create_table_ddl_with_column_quoting(
+            &columns,
+            "case_target",
+            "dbx_test",
+            "public",
+            &DatabaseType::Gaussdb,
+            &DatabaseType::Mysql,
+            None,
+            None,
+            false,
+        );
+
+        assert!(ddl.contains("USER_ID INTEGER"), "ddl: {ddl}");
+        assert!(ddl.contains("CamelName VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("\"select\" VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("\"has space\" VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY (USER_ID)"), "ddl: {ddl}");
+
+        let quoted = generate_create_table_ddl_with_column_quoting(
+            &columns,
+            "case_target",
+            "dbx_test",
+            "public",
+            &DatabaseType::Gaussdb,
+            &DatabaseType::Mysql,
+            None,
+            None,
+            true,
+        );
+        assert!(quoted.contains("\"USER_ID\" INTEGER"), "ddl: {quoted}");
+        assert!(quoted.contains("\"CamelName\" VARCHAR(32)"), "ddl: {quoted}");
+    }
+
+    #[test]
+    fn gaussdb_transfer_writes_use_the_same_target_column_quoting_policy() {
+        let columns = vec!["USER_ID".to_string(), "CamelName".to_string(), "select".to_string()];
+        let column_types = vec![Some("int".to_string()), Some("varchar".to_string()), Some("varchar".to_string())];
+        let rows = vec![vec![serde_json::json!(1), serde_json::json!("Alice"), serde_json::json!("ok")]];
+
+        let statements = generate_transfer_write_sql_batches_with_column_quoting(
+            &TransferMode::Append,
+            &columns,
+            &column_types,
+            &rows,
+            "case_target",
+            "public",
+            &DatabaseType::Gaussdb,
+            &[],
+            None,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 1);
+        assert!(
+            statements[0].starts_with("INSERT INTO \"public\".\"case_target\" (USER_ID, CamelName, \"select\") VALUES"),
+            "sql: {}",
+            statements[0]
+        );
     }
 
     #[test]
@@ -12071,6 +12697,19 @@ SELECT 1 FROM dual"#
             federation_enabled: false,
             ..Default::default()
         };
+        let mut gbase_jdbc = config.clone();
+        gbase_jdbc.db_type = DatabaseType::Jdbc;
+        gbase_jdbc.connection_string = Some("jdbc:gbase://127.0.0.1:5258/dbx_test".to_string());
+        gbase_jdbc.jdbc_driver_class = Some("cn.gbase.Driver".to_string());
+        assert_eq!(effective_transfer_database_type(&gbase_jdbc), DatabaseType::Gbase);
+        assert_eq!(
+            transfer_object_family(&effective_transfer_database_type(&gbase_jdbc)),
+            Some(TransferObjectFamily::Mysql)
+        );
+
+        gbase_jdbc.connection_string = Some("jdbc:unknown://127.0.0.1:1234/dbx_test".to_string());
+        gbase_jdbc.jdbc_driver_class = Some("com.example.Driver".to_string());
+        assert_eq!(effective_transfer_database_type(&gbase_jdbc), DatabaseType::Jdbc);
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("paimon"), &config), Some("paimon"));
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("default_catalog"), &config), None);
     }
@@ -12440,5 +13079,28 @@ CREATE INDEX items_name_idx ON public.items (id);"#;
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].starts_with("CREATE TABLE"));
+    }
+
+    #[test]
+    fn transfer_progress_queue_has_bounded_capacity() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+        for rows_transferred in 0..=TRANSFER_PROGRESS_CHANNEL_CAPACITY {
+            try_send_transfer_progress(
+                &sender,
+                TransferProgress {
+                    transfer_id: "transfer".to_string(),
+                    table: "table".to_string(),
+                    table_index: 0,
+                    total_tables: 1,
+                    rows_transferred: rows_transferred as u64,
+                    total_rows: None,
+                    status: TransferStatus::Running,
+                    error: None,
+                    terminal: false,
+                },
+            );
+        }
+
+        assert_eq!(receiver.len(), TRANSFER_PROGRESS_CHANNEL_CAPACITY);
     }
 }
